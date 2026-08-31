@@ -3,11 +3,14 @@
 //! Every one of these is an enum rather than a string, so a renderer that forgets a case fails to
 //! compile instead of printing something wrong.
 
+use serde::{Deserialize, Serialize};
+
 /// How reversible an action is.
 ///
 /// Assigned by the host from the capabilities a tool holds. A tool never declares its own tier,
 /// because a careless or malicious one would mark everything reversible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Tier {
     /// No effect outside the sandbox or the app. Runs with no prompt and no journal entry.
     Contained,
@@ -32,7 +35,8 @@ impl Tier {
 /// Whether a tool was called directly by the loop or from inside a code-mode script.
 ///
 /// Keeps nested calls visible in the trace rather than hidden behind one opaque script step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallPath {
     Direct,
     Script,
@@ -41,7 +45,8 @@ pub enum CallPath {
 /// Where a model runs. A capability, not a setting.
 ///
 /// The prompt gate reads this to decide whether a `private` claim is allowed into a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Locality {
     Cloud,
     OnDevice,
@@ -51,7 +56,8 @@ pub enum Locality {
 ///
 /// Routing is by task, not by turn. `Primary` owns the cached conversation prefix for the whole
 /// session, so utility work must never share that prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelRole {
     /// The conversation. One model per session.
     Primary,
@@ -60,7 +66,10 @@ pub enum ModelRole {
 }
 
 /// Money, in whole cents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+#[serde(transparent)]
 pub struct Cents(u64);
 
 impl Cents {
@@ -87,7 +96,8 @@ impl Cents {
 /// How a call is priced.
 ///
 /// A model rather than a number, so local inference records free instead of a wrong estimate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CostModel {
     Free,
     PerToken {
@@ -115,7 +125,8 @@ impl CostModel {
 }
 
 /// What a scope is holding while it is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScopeKind {
     Tool,
     Search,
@@ -125,7 +136,8 @@ pub enum ScopeKind {
 }
 
 /// How a task ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Completed,
     Interrupted,
@@ -134,7 +146,8 @@ pub enum TaskStatus {
 }
 
 /// Why the loop stopped and handed control back to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BlockReason {
     /// The spend ceiling was reached. Checked before a model call, never during one.
     BudgetCeiling { spent: Cents, ceiling: Cents },
@@ -147,7 +160,8 @@ pub enum BlockReason {
 }
 
 /// What an action did to the world. Determines how it is reversed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     FileWrite,
     FileDelete,
@@ -157,7 +171,8 @@ pub enum ActionKind {
 }
 
 /// What a memory write did to a concept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WriteOp {
     Created,
     Appended,

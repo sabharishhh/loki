@@ -3,12 +3,14 @@
 //! Newtypes rather than bare integers, so the compiler rejects passing one where another is
 //! expected. Ids are per run and are not stable across restarts. Nothing on disk refers to them.
 
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 macro_rules! counter_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(transparent)]
         pub struct $name(u64);
 
         impl $name {
@@ -58,7 +60,8 @@ counter_id! {
 ///
 /// For example `people/meera.md`. Unlike the counter ids this is stable, because it is what the
 /// file is actually called.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ConceptId(String);
 
 impl ConceptId {
@@ -74,7 +77,8 @@ impl ConceptId {
 }
 
 /// Content hash of a fetched page, used to address it in the evidence store.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ContentHash(String);
 
 impl ContentHash {
