@@ -54,6 +54,8 @@ final class Conversation {
     private(set) var spentCents: UInt64 = 0
     private(set) var lastError: String?
 
+    let dictation = Dictation()
+
     private let core: Core?
     private var streaming: Turn.ID?
 
@@ -90,6 +92,28 @@ final class Conversation {
     }
 
     var isReady: Bool { core != nil }
+
+    /// Speaking during a task is an interrupt.
+    ///
+    /// Voice activity detection fires this before transcription finishes, so the visible stop
+    /// lands inside the 150ms budget rather than waiting for words.
+    private func speechStarted() {
+        if case .running = composer { interrupt() }
+    }
+
+    /// Begins an utterance. The composer shows `listening` while it runs.
+    func startDictation() {
+        dictation.onSpeechStart = { [weak self] in self?.speechStarted() }
+        composer = .listening
+        Task { await dictation.start() }
+    }
+
+    /// Ends the utterance and returns what was said, for the composer to place in the draft.
+    func stopDictation() async -> String {
+        let text = await dictation.stop()
+        if case .listening = composer { composer = .idle }
+        return text
+    }
 
     /// Starts consuming the core's two streams. Called once, when the thread appears.
     func observe() {

@@ -128,6 +128,17 @@ Running from Xcode gives you the real menu bar behaviour with no Dock icon, beca
 `app/Resources/Info.plist` is embedded into the executable at link time. `Cmd-R` and
 `make run` behave the same way.
 
+## Voice
+
+Hold **F** in the composer to dictate, release to stop. A tap still types `f`; only a hold past
+350ms starts dictation. Speaking while a turn is running interrupts it.
+
+Transcription is on device via `SpeechAnalyzer`. Audio never leaves the Mac and never crosses the
+bridge; the Rust core receives text only. macOS asks for microphone access the first time.
+
+Apple Silicon only. The global `opt+space` hotkey is not built yet, because it needs accessibility
+permission and its own onboarding step.
+
 ## Everyday commands
 
 ```bash

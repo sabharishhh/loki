@@ -7,14 +7,17 @@ import SwiftUI
 struct Composer: View {
     let conversation: Conversation
     @State private var draft = ""
+    @State private var talkMonitor: Any?
+    @State private var holdTimer: Task<Void, Never>?
+    @State private var draftBeforeTalk = ""
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             HStack(spacing: Theme.Space.m) {
-                Image(systemName: "mic")
+                Image(systemName: isListening ? "mic.fill" : "mic")
                     .font(.system(size: 13))
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(isListening ? Theme.State.reading.color : Theme.Colors.faint)
 
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -45,7 +48,17 @@ struct Composer: View {
         }
         .padding(Theme.Space.l)
         .background(.regularMaterial)
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            watchForTalkKey()
+        }
+        .onDisappear(perform: stopWatching)
+        .onChange(of: conversation.dictation.transcript) { _, text in
+            // The field shows what was heard as it is heard, after whatever was already typed.
+            if isListening {
+                draft = (draftBeforeTalk + " " + text).trimmingCharacters(in: .whitespaces)
+            }
+        }
     }
 
     private var hints: some View {
@@ -75,6 +88,66 @@ struct Composer: View {
     private var isRunning: Bool {
         if case .running = conversation.composer { return true }
         return false
+    }
+
+    private var isListening: Bool { conversation.dictation.isListening }
+
+    /// F is a letter, so a tap must type it and only a hold may start dictation.
+    private static let holdThreshold = Duration.milliseconds(350)
+
+    /// Hold F to talk, release to stop.
+    ///
+    /// The key event is never swallowed, so `f` types exactly as it always would. Only once the
+    /// hold threshold passes does dictation start, and the character typed on the way in is taken
+    /// back at that point.
+    ///
+    /// A local monitor, so this fires only while Loki is frontmost and needs no accessibility
+    /// permission. The global hotkey does need one, which is a separate onboarding step.
+    private func watchForTalkKey() {
+        guard talkMonitor == nil else { return }
+        talkMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            guard event.keyCode == 3, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+            else { return event }
+            if event.isARepeat { return nil }
+
+            if event.type == .keyDown {
+                beginHold()
+            } else {
+                endHold()
+            }
+            return event
+        }
+    }
+
+    private func beginHold() {
+        holdTimer?.cancel()
+        holdTimer = Task {
+            try? await Task.sleep(for: Self.holdThreshold)
+            guard !Task.isCancelled else { return }
+            // Take back the character the tap already typed, and keep the rest as a prefix so
+            // holding F mid-sentence does not discard what is there.
+            draftBeforeTalk = draft.hasSuffix("f") ? String(draft.dropLast()) : draft
+            draft = draftBeforeTalk
+            conversation.startDictation()
+        }
+    }
+
+    private func endHold() {
+        holdTimer?.cancel()
+        holdTimer = nil
+        guard isListening else { return }
+        Task {
+            let text = await conversation.stopDictation()
+            draft = (draftBeforeTalk + " " + text).trimmingCharacters(in: .whitespaces)
+            draftBeforeTalk = ""
+        }
+    }
+
+    private func stopWatching() {
+        holdTimer?.cancel()
+        holdTimer = nil
+        talkMonitor.map(NSEvent.removeMonitor)
+        talkMonitor = nil
     }
 
     private var borderColor: Color {

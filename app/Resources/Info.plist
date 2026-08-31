@@ -12,5 +12,7 @@
     <key>LSMinimumSystemVersion</key>    <string>26.0</string>
     <!-- Menu bar app. No Dock icon, no main window. -->
     <key>LSUIElement</key>               <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Loki transcribes what you say on this Mac. Audio never leaves the machine.</string>
 </dict>
 </plist>
