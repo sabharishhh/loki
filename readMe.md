@@ -1,0 +1,102 @@
+# Loki
+
+A personal assistant that runs on your Mac. Rust core, SwiftUI menu bar app, memory you own.
+
+Status: Phase 1, the skeleton. See `.agent/PLAN.md`.
+
+## Shape of the project
+
+```
+crates/loki-core/   the core. Loop, event stream, ports, provider adapters
+crates/loki-ffi/    the C ABI the app links against
+crates/loki-cli/    dev harness. Runs the core with no app
+app/                the SwiftUI app, a SwiftPM package
+scripts/            build-app.sh assembles Loki.app
+```
+
+Two halves. The Rust core does the work; the Swift app is a driving adapter over a C ABI.
+**The app cannot link until the core is built**, which is why every app target builds the core
+first.
+
+## Setup
+
+Needs Rust 1.96 (pinned in `rust-toolchain.toml`) and Xcode 26.
+
+```bash
+make core     # build the Rust side
+make check    # fmt, clippy, tests, swift build
+```
+
+## Running it
+
+A model key is the only credential. Put it in your shell:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+`OPENAI_API_KEY` works too. This is temporary. The key moves to the macOS Keychain in Phase 4.
+
+### The core alone, no UI
+
+Fastest way to test a change to the loop.
+
+```bash
+make cli
+```
+
+Type a message. `Ctrl-C` interrupts a running turn, `Ctrl-D` quits.
+Set `LOKI_TRACE=1` to see every event instead of the plain view.
+
+### The app
+
+```bash
+make run
+```
+
+Builds `Loki.app` and launches it with your shell's environment, so the key comes through.
+Look for the small square in the menu bar, then **Open Loki**.
+
+Note that double-clicking `Loki.app` in Finder will not work yet: a Finder launch inherits no
+shell environment, so the app starts with no key and says so. Launch it from a terminal, or use
+Xcode, until the Keychain lands.
+
+## Working in Xcode
+
+There is no `.xcodeproj` on purpose. Xcode opens the package directly, which gives the editor,
+debugger, previews and Instruments with no generated project file to merge.
+
+```bash
+make xcode
+```
+
+That builds the core first, then opens `app/` in Xcode. Then, once:
+
+1. **Product > Scheme > Edit Scheme** (or `Cmd-<`).
+2. Select **Run** in the left column, then the **Arguments** tab.
+3. Under **Environment Variables**, click **+** and add `ANTHROPIC_API_KEY` with your key.
+4. Close. `Cmd-R` now runs the app with the key.
+
+Xcode stores that in `app/.swiftpm/`, which is gitignored, so your key never reaches the repo.
+
+**Xcode does not know about Cargo.** If you change Rust code, run `make core` (or
+`cargo build -p loki-ffi`) before hitting `Cmd-R`, otherwise Xcode links the previous build.
+
+Running from Xcode gives you the real menu bar behaviour with no Dock icon, because
+`app/Resources/Info.plist` is embedded into the executable at link time. `Cmd-R` and
+`make run` behave the same way.
+
+## Everyday commands
+
+```bash
+make            # list every target
+make check      # what CI runs
+make test       # tests only
+make fmt        # format Rust
+make clean      # remove build output
+```
+
+## Documentation
+
+`docs/` is the source of truth for the architecture and is not tracked here.
+`.agent/` holds the working plan and decision log, also untracked.

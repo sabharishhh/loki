@@ -3,9 +3,13 @@ import PackageDescription
 
 // The Mac app.
 //
-// SwiftPM rather than an .xcodeproj so the whole project stays text and diffable. Xcode opens
-// this package directly. `scripts/build-app.sh` wraps the executable into a .app bundle with
-// LSUIElement set, which is what makes it a menu bar app with no Dock icon.
+// SwiftPM rather than an .xcodeproj so the whole project stays text and diffable. Xcode opens this
+// package directly, which gives the editor, debugger, previews and Instruments with no project
+// file to merge.
+//
+// Resources/Info.plist is embedded into the executable with -sectcreate, so LSUIElement applies
+// when the binary runs on its own. Without that, `swift run` and Xcode's Run both show a Dock
+// icon while the assembled bundle does not, and the two behave differently for no good reason.
 //
 // LokiCore is a system library target that links the Rust static library built by Cargo.
 
@@ -22,6 +26,17 @@ let package = Package(
                 .linkedLibrary("loki_ffi"),
             ]
         ),
-        .executableTarget(name: "LokiApp", dependencies: ["LokiCore"]),
+        .executableTarget(
+            name: "LokiApp",
+            dependencies: ["LokiCore"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Resources/Info.plist",
+                ])
+            ]
+        ),
     ]
 )
