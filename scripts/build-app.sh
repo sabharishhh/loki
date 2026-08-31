@@ -21,6 +21,9 @@ case "$CONFIG" in
   *) echo "usage: $0 [debug|release]" >&2; exit 2 ;;
 esac
 
+# Match SwiftPM's deployment target so the linker does not warn about mismatched object files.
+export MACOSX_DEPLOYMENT_TARGET=26.0
+
 echo "==> cargo build ($CONFIG)"
 cd "$ROOT"
 cargo build -p loki-ffi $CARGO_FLAGS

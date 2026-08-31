@@ -13,3 +13,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 loki-core.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio-util.workspace = true
+serde_json.workspace = true

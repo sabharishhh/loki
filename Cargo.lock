@@ -563,6 +563,9 @@ name = "loki-ffi"
 version = "0.1.0"
 dependencies = [
  "loki-core",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
