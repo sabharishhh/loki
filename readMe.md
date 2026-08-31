@@ -49,9 +49,9 @@ Three variables control which provider runs:
 With both keys set and no `LOKI_PROVIDER`, Anthropic wins. Naming a provider whose key is missing
 is reported rather than silently falling back.
 
-**OpenAI defaults are unverified.** The adapter defaults to `gpt-5` with a 400k context, and
-pricing defaults to zero so the ledger under-reports rather than inventing a number. Set
-`LOKI_MODEL` to a model you actually have access to. See Q-4 in `.agent/LOG.md`.
+Pricing follows the model. `adapters/pricing.rs` holds the published rate for each known model, so
+setting `LOKI_MODEL` changes the price too. A model the table does not know is recorded as free,
+which under-reports rather than inventing a number. Rates are cached and will drift.
 
 This is all temporary. The key moves to the macOS Keychain in Phase 4.
 

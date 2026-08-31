@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use super::pricing;
 use super::sse::{self, EventParser};
 use crate::core::vocab::{Cents, CostModel, Locality};
 use crate::ports::model::{
@@ -19,7 +20,7 @@ use crate::ports::model::{
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MODEL: &str = "gpt-5";
+const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const DEFAULT_CONTEXT_WINDOW: usize = 400_000;
 
 pub struct Openai {
@@ -27,7 +28,8 @@ pub struct Openai {
     api_key: String,
     base_url: String,
     model: String,
-    cost: CostModel,
+    /// Set explicitly by `with_pricing`. Otherwise looked up from the model name.
+    cost: Option<CostModel>,
     max_context: usize,
 }
 
@@ -42,7 +44,7 @@ impl Openai {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: DEFAULT_MODEL.to_owned(),
-            cost: CostModel::Free,
+            cost: None,
             max_context: DEFAULT_CONTEXT_WINDOW,
         })
     }
@@ -60,16 +62,13 @@ impl Openai {
         self
     }
 
-    /// Sets pricing for the chosen model.
-    ///
-    /// Pricing is per model and this adapter cannot know which one the caller picked, so the
-    /// default is [`CostModel::Free`]. Set this or the ledger under-reports.
+    /// Overrides pricing, for a model the table does not know.
     #[must_use]
     pub const fn with_pricing(mut self, input_per_mtok: Cents, output_per_mtok: Cents) -> Self {
-        self.cost = CostModel::PerToken {
+        self.cost = Some(CostModel::PerToken {
             input_per_mtok,
             output_per_mtok,
-        };
+        });
         self
     }
 
@@ -101,7 +100,10 @@ impl ModelProvider for Openai {
             prompt_cache: true,
             max_context: self.max_context,
             tools: ToolSupport::Native,
-            cost: self.cost,
+            cost: self
+                .cost
+                .or_else(|| pricing::openai(&self.model))
+                .unwrap_or(CostModel::Free),
         }
     }
 
@@ -371,20 +373,46 @@ mod tests {
     }
 
     #[test]
-    fn pricing_defaults_to_free_until_set() {
+    fn pricing_follows_the_model() {
         let provider = Openai::new("k").unwrap();
-        assert_eq!(provider.caps().cost, CostModel::Free);
-
-        let priced = Openai::new("k")
-            .unwrap()
-            .with_pricing(Cents::new(125), Cents::new(1000));
         assert_eq!(
-            priced.caps().cost,
+            provider.caps().cost,
             CostModel::PerToken {
-                input_per_mtok: Cents::new(125),
-                output_per_mtok: Cents::new(1000),
+                input_per_mtok: Cents::new(400),
+                output_per_mtok: Cents::new(500),
+            },
+            "the default model should be priced"
+        );
+
+        let mini = Openai::new("k").unwrap().with_model("gpt-5-mini");
+        assert_eq!(
+            mini.caps().cost,
+            CostModel::PerToken {
+                input_per_mtok: Cents::new(45),
+                output_per_mtok: Cents::new(360),
             }
         );
-        assert_eq!(priced.id(), "openai");
+    }
+
+    #[test]
+    fn an_unpriced_model_reports_free_rather_than_a_guess() {
+        let unknown = Openai::new("k").unwrap().with_model("some-local-model");
+        assert_eq!(unknown.caps().cost, CostModel::Free);
+        assert_eq!(unknown.id(), "openai");
+    }
+
+    #[test]
+    fn explicit_pricing_wins_over_the_table() {
+        let forced = Openai::new("k")
+            .unwrap()
+            .with_model("gpt-5.6-terra")
+            .with_pricing(Cents::new(1), Cents::new(2));
+        assert_eq!(
+            forced.caps().cost,
+            CostModel::PerToken {
+                input_per_mtok: Cents::new(1),
+                output_per_mtok: Cents::new(2),
+            }
+        );
     }
 }

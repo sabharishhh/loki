@@ -257,8 +257,10 @@ impl Loop {
 
     fn record_spend(&mut self, usage: &Usage) {
         let caps = self.provider.caps();
-        let charge = caps.cost.charge(usage.input_tokens, usage.output_tokens);
-        self.budget.record(charge);
+        self.budget.record_micros(
+            caps.cost
+                .charge_micros(usage.input_tokens, usage.output_tokens),
+        );
 
         self.events.emit(&Event::ModelCall {
             provider: self.provider.id().to_owned(),

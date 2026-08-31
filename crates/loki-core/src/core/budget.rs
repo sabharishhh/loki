@@ -3,7 +3,7 @@
 //! Checked before a model call, never during one. Killing a task mid-flight to save money is
 //! losing work, and losing work is the one thing interruption is not allowed to do.
 
-use super::vocab::{BlockReason, Cents};
+use super::vocab::{BlockReason, Cents, MICRO_CENTS_PER_CENT};
 
 /// Fraction of the ceiling at which a warning fires. Early enough to act on, late enough not to
 /// be noise.
@@ -17,9 +17,12 @@ pub enum Verdict {
 }
 
 /// A monthly ceiling and what has been spent against it.
+///
+/// Spend accumulates in micro-cents. A single call costs a fraction of a cent, so rounding each
+/// one to whole cents would record zero on a cheap model and the ceiling would never trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
-    spent: Cents,
+    spent_micros: u64,
     ceiling: Cents,
     warned: bool,
 }
@@ -28,15 +31,22 @@ impl Budget {
     #[must_use]
     pub const fn new(ceiling: Cents) -> Self {
         Self {
-            spent: Cents::ZERO,
+            spent_micros: 0,
             ceiling,
             warned: false,
         }
     }
 
+    /// Spend so far, rounded down for display.
     #[must_use]
     pub const fn spent(self) -> Cents {
-        self.spent
+        Cents::new(self.spent_micros / MICRO_CENTS_PER_CENT)
+    }
+
+    /// Spend so far, exact.
+    #[must_use]
+    pub const fn spent_micros(self) -> u64 {
+        self.spent_micros
     }
 
     #[must_use]
@@ -44,26 +54,27 @@ impl Budget {
         self.ceiling
     }
 
-    pub const fn record(&mut self, amount: Cents) {
-        self.spent = self.spent.saturating_add(amount);
+    pub const fn record_micros(&mut self, micros: u64) {
+        self.spent_micros = self.spent_micros.saturating_add(micros);
     }
 
     /// Whether the next model call may run.
     ///
     /// Warns once per crossing rather than on every call, so a long session does not repeat it.
     pub fn check(&mut self) -> Verdict {
-        if self.spent.get() >= self.ceiling.get() {
+        let ceiling_micros = self.ceiling.get().saturating_mul(MICRO_CENTS_PER_CENT);
+
+        if self.spent_micros >= ceiling_micros {
             return Verdict::Stop(BlockReason::BudgetCeiling {
-                spent: self.spent,
+                spent: self.spent(),
                 ceiling: self.ceiling,
             });
         }
 
-        let threshold = self.ceiling.get() / 100 * WARN_AT;
-        if !self.warned && self.spent.get() >= threshold {
+        if !self.warned && self.spent_micros >= ceiling_micros / 100 * WARN_AT {
             self.warned = true;
             return Verdict::Warn {
-                spent: self.spent,
+                spent: self.spent(),
                 ceiling: self.ceiling,
             };
         }
@@ -79,14 +90,14 @@ mod tests {
     #[test]
     fn proceeds_while_under_the_warning_line() {
         let mut budget = Budget::new(Cents::new(1000));
-        budget.record(Cents::new(500));
+        budget.record_micros(500 * MICRO_CENTS_PER_CENT);
         assert_eq!(budget.check(), Verdict::Proceed);
     }
 
     #[test]
     fn warns_once_then_stays_quiet() {
         let mut budget = Budget::new(Cents::new(1000));
-        budget.record(Cents::new(850));
+        budget.record_micros(850 * MICRO_CENTS_PER_CENT);
         assert!(matches!(budget.check(), Verdict::Warn { .. }));
         assert_eq!(budget.check(), Verdict::Proceed);
     }
@@ -94,7 +105,7 @@ mod tests {
     #[test]
     fn stops_at_the_ceiling() {
         let mut budget = Budget::new(Cents::new(1000));
-        budget.record(Cents::new(1000));
+        budget.record_micros(1000 * MICRO_CENTS_PER_CENT);
         assert!(matches!(
             budget.check(),
             Verdict::Stop(BlockReason::BudgetCeiling { .. })
@@ -102,9 +113,21 @@ mod tests {
     }
 
     #[test]
+    fn many_sub_cent_calls_still_reach_the_ceiling() {
+        // Ten thousand turns at half a cent each is 5000 cents. Rounding each to whole cents
+        // would record zero and the ceiling would never trip.
+        let mut budget = Budget::new(Cents::new(1000));
+        for _ in 0..10_000 {
+            budget.record_micros(500_000);
+        }
+        assert_eq!(budget.spent(), Cents::new(5000));
+        assert!(matches!(budget.check(), Verdict::Stop(_)));
+    }
+
+    #[test]
     fn stopping_outranks_warning() {
         let mut budget = Budget::new(Cents::new(1000));
-        budget.record(Cents::new(2000));
+        budget.record_micros(2000 * MICRO_CENTS_PER_CENT);
         assert!(matches!(budget.check(), Verdict::Stop(_)));
     }
 }

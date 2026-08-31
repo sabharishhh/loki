@@ -106,21 +106,39 @@ pub enum CostModel {
     },
 }
 
+/// One millionth of a cent. What a rate times a token count naturally produces.
+///
+/// Exists because whole cents cannot hold the cost of one call. A typical turn costs a few
+/// tenths of a cent, so rounding each one to whole cents records zero and the budget ceiling
+/// never trips. Accumulate in these and convert once, at the point a human reads the number.
+pub const MICRO_CENTS_PER_CENT: u64 = 1_000_000;
+
 impl CostModel {
+    /// Exact cost of one call, in millionths of a cent.
+    ///
+    /// A rate is cents per million tokens, so tokens times rate is already micro-cents. No
+    /// division, so nothing is lost.
     #[must_use]
-    pub const fn charge(self, tokens_in: u32, tokens_out: u32) -> Cents {
+    pub const fn charge_micros(self, tokens_in: u32, tokens_out: u32) -> u64 {
         match self {
-            Self::Free => Cents::ZERO,
+            Self::Free => 0,
             Self::PerToken {
                 input_per_mtok,
                 output_per_mtok,
             } => {
-                const PER_MTOK: u64 = 1_000_000;
-                let input = input_per_mtok.get().saturating_mul(tokens_in as u64) / PER_MTOK;
-                let output = output_per_mtok.get().saturating_mul(tokens_out as u64) / PER_MTOK;
-                Cents::new(input.saturating_add(output))
+                let input = input_per_mtok.get().saturating_mul(tokens_in as u64);
+                let output = output_per_mtok.get().saturating_mul(tokens_out as u64);
+                input.saturating_add(output)
             }
         }
+    }
+
+    /// Cost of one call rounded down to whole cents.
+    ///
+    /// Lossy for a single call. Use [`Self::charge_micros`] for anything that accumulates.
+    #[must_use]
+    pub const fn charge(self, tokens_in: u32, tokens_out: u32) -> Cents {
+        Cents::new(self.charge_micros(tokens_in, tokens_out) / MICRO_CENTS_PER_CENT)
     }
 }
 
@@ -209,6 +227,31 @@ mod tests {
     #[test]
     fn local_inference_is_free() {
         assert_eq!(CostModel::Free.charge(50_000, 10_000), Cents::ZERO);
+        assert_eq!(CostModel::Free.charge_micros(50_000, 10_000), 0);
+    }
+
+    #[test]
+    fn the_two_directions_are_summed_before_rounding() {
+        // gpt-5.6-terra: 400 in, 500 out per million.
+        // 12k in is 4.8 cents, 800 out is 0.4, so 5.2 total.
+        let terra = CostModel::PerToken {
+            input_per_mtok: Cents::new(400),
+            output_per_mtok: Cents::new(500),
+        };
+        assert_eq!(terra.charge_micros(12_000, 800), 5_200_000);
+        // Rounding each direction separately first would give 4 + 0, not 5.
+        assert_eq!(terra.charge(12_000, 800), Cents::new(5));
+    }
+
+    #[test]
+    fn a_cheap_model_still_accrues() {
+        // gpt-5.6-luna: 40 in, 50 out. One turn is well under a cent and must not record zero.
+        let luna = CostModel::PerToken {
+            input_per_mtok: Cents::new(40),
+            output_per_mtok: Cents::new(50),
+        };
+        assert_eq!(luna.charge(12_000, 800), Cents::ZERO, "whole cents lose it");
+        assert_eq!(luna.charge_micros(12_000, 800), 520_000, "micros keep it");
     }
 
     #[test]

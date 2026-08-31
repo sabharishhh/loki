@@ -7,4 +7,5 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod pricing;
 pub mod sse;

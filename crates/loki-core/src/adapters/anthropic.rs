@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::sse::{self, EventParser};
 
-use crate::core::vocab::{Cents, CostModel, Locality};
+use super::pricing;
+use crate::core::vocab::{CostModel, Locality};
 use crate::ports::model::{
     Caps, Chunk, ChunkStream, Message, ModelError, ModelProvider, Request, Role, StopReason,
     ToolSupport, Usage,
@@ -19,10 +20,6 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const DEFAULT_MODEL: &str = "claude-opus-5";
 const CONTEXT_WINDOW: usize = 1_000_000;
-
-/// Pricing for `claude-opus-5`, in cents per million tokens.
-const INPUT_PER_MTOK: Cents = Cents::new(500);
-const OUTPUT_PER_MTOK: Cents = Cents::new(2500);
 
 pub struct Anthropic {
     http: reqwest::Client,
@@ -70,10 +67,7 @@ impl ModelProvider for Anthropic {
             prompt_cache: true,
             max_context: CONTEXT_WINDOW,
             tools: ToolSupport::Native,
-            cost: CostModel::PerToken {
-                input_per_mtok: INPUT_PER_MTOK,
-                output_per_mtok: OUTPUT_PER_MTOK,
-            },
+            cost: pricing::anthropic(&self.model).unwrap_or(CostModel::Free),
         }
     }
 
