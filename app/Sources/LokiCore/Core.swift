@@ -69,13 +69,13 @@ public final class Core: Sendable {
     /// Response text as it streams.
     public let tokens: AsyncStream<String>
 
-    // Safety invariant for both: the values are set once in init and never reassigned, every C
-    // function they are passed to is internally synchronized on the Rust side (a tokio Mutex
-    // around the loop, a std Mutex around the cancellation token), and the core is freed exactly
-    // once in deinit, after which no method can run. Marked unsafe only because C pointers carry
-    // no Sendable conformance. Removable once the handle is wrapped in a Sendable Rust-side type.
+    // Safety invariant: set once in init and never reassigned, every C function it is passed to
+    // is internally synchronized on the Rust side (a tokio Mutex around the loop, a std Mutex
+    // around the cancellation token), and the core is freed exactly once in deinit, after which
+    // no method can run. Marked unsafe only because OpaquePointer carries no Sendable
+    // conformance. Removable if the handle is ever wrapped in a Sendable Rust-side type.
     private nonisolated(unsafe) let handle: OpaquePointer
-    private nonisolated(unsafe) let sinks: Unmanaged<Sinks>
+    private let sinks: Unmanaged<Sinks>
 
     /// The linked core's version. Available without starting a core.
     public static var version: String {

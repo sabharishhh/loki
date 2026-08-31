@@ -175,6 +175,8 @@ pub enum BlockReason {
     ConflictUnresolved { concept: String },
     /// A connector's credentials expired and need reauthorizing.
     AuthExpired { connector: String },
+    /// The model provider refused or failed. `detail` is already plain enough to show.
+    ProviderFailed { provider: String, detail: String },
 }
 
 /// What an action did to the world. Determines how it is reversed.

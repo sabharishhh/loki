@@ -15,7 +15,7 @@ use super::event::Event;
 use super::ids::IdGen;
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
-use super::vocab::{Cents, ModelRole, ScopeKind, TaskStatus};
+use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
 
 /// Receives response text as it arrives.
@@ -175,6 +175,13 @@ impl Loop {
             Ok(stream) => self.drain(stream, cancel).await,
             Err(e) => {
                 self.close_scope(scope, started);
+                // Say why. A bare "failed" leaves the user with nothing to act on.
+                self.events.emit(&Event::Blocked {
+                    reason: BlockReason::ProviderFailed {
+                        provider: self.provider.id().to_owned(),
+                        detail: explain(&e),
+                    },
+                });
                 self.events.emit(&Event::TaskFinished {
                     id: task,
                     status: TaskStatus::Failed,
@@ -228,7 +235,15 @@ impl Loop {
                     };
                     break;
                 }
-                Err(_) => {
+                Err(e) => {
+                    // A failure partway through the stream needs a reason as much as one before
+                    // it. Partial text already streamed stays; only the ending changes.
+                    self.events.emit(&Event::Blocked {
+                        reason: BlockReason::ProviderFailed {
+                            provider: self.provider.id().to_owned(),
+                            detail: explain(&e),
+                        },
+                    });
                     status = TaskStatus::Failed;
                     break;
                 }
@@ -279,6 +294,36 @@ fn merge(into: &mut Usage, reported: Usage) {
     into.output_tokens = into.output_tokens.max(reported.output_tokens);
     into.cache_read_tokens = into.cache_read_tokens.max(reported.cache_read_tokens);
     into.cache_write_tokens = into.cache_write_tokens.max(reported.cache_write_tokens);
+}
+
+/// Turns a provider failure into something a person can act on.
+fn explain(error: &ModelError) -> String {
+    match error {
+        ModelError::Unauthorized => {
+            "the API key was rejected. Check the key and the provider match".to_owned()
+        }
+        ModelError::RateLimited(Some(after)) => {
+            format!("rate limited, try again in {}s", after.as_secs())
+        }
+        ModelError::RateLimited(None) => "rate limited, try again shortly".to_owned(),
+        ModelError::BadRequest(body) => format!("the request was rejected: {}", first_line(body)),
+        ModelError::Upstream { status, body } => {
+            format!("the provider returned {status}: {}", first_line(body))
+        }
+        ModelError::Transport(detail) => format!("could not reach the provider: {detail}"),
+        ModelError::Protocol(detail) => format!("could not read the response: {detail}"),
+        ModelError::Cancelled => "cancelled".to_owned(),
+    }
+}
+
+/// Provider error bodies are often a wall of JSON. One line is enough to act on.
+fn first_line(body: &str) -> String {
+    const LIMIT: usize = 160;
+    let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    match line.char_indices().nth(LIMIT) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line.to_owned(),
+    }
 }
 
 /// A short label for the Activity screen.

@@ -19,6 +19,10 @@ struct LokiApp: App {
         }
         .defaultSize(width: 980, height: 720)
         .windowResizability(.contentMinSize)
+        // A menu bar app opens on demand, never at launch. Without this the window opens behind
+        // everything when run as a bare binary and not at all from the bundle, which is two
+        // different behaviours for the same code.
+        .defaultLaunchBehavior(.suppressed)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Interrupt") { conversation.interrupt() }

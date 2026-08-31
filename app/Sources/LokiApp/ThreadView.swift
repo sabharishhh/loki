@@ -11,12 +11,11 @@ struct ThreadView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    ForEach(conversation.turns) { turn in
-                        TurnView(turn: turn).id(turn.id)
-                    }
-
-                    ForEach(conversation.scopes) { scope in
-                        ScopeRail(scope: scope).id(scope.id)
+                    ForEach(conversation.entries) { entry in
+                        switch entry {
+                        case .turn(let turn): TurnView(turn: turn)
+                        case .scope(let scope): ScopeRail(scope: scope)
+                        }
                     }
 
                     if let error = conversation.lastError {
@@ -28,8 +27,8 @@ struct ThreadView: View {
                 .padding(.horizontal, Theme.Space.xl)
                 .padding(.vertical, Theme.Space.xxl)
             }
-            .onChange(of: conversation.turns.last?.text) {
-                guard let last = conversation.turns.last else { return }
+            .onChange(of: conversation.entries.last?.id) {
+                guard let last = conversation.entries.last else { return }
                 withAnimation(Theme.Motion.standard) { proxy.scrollTo(last.id, anchor: .bottom) }
             }
         }

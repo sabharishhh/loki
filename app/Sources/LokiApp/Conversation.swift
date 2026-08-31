@@ -44,12 +44,27 @@ enum ComposerState {
     }
 }
 
+/// One item in the thread, in the order it happened.
+///
+/// Turns and scopes share a timeline. Rendering them as two lists puts every rail below every
+/// turn, which loses the thing the rail is for: showing what happened while an answer was formed.
+enum Entry: Identifiable {
+    case turn(Turn)
+    case scope(Scope)
+
+    var id: String {
+        switch self {
+        case .turn(let turn): "turn-\(turn.id)"
+        case .scope(let scope): "scope-\(scope.id)"
+        }
+    }
+}
+
 /// The thread's state, driven by the core's event stream.
 @MainActor
 @Observable
 final class Conversation {
-    private(set) var turns: [Turn] = []
-    private(set) var scopes: [Scope] = []
+    private(set) var entries: [Entry] = []
     private(set) var composer: ComposerState = .idle
     private(set) var spentCents: UInt64 = 0
     private(set) var lastError: String?
@@ -133,7 +148,8 @@ final class Conversation {
 
     func send(_ text: String) {
         guard let core else { return }
-        turns.append(Turn(speaker: .user, text: text))
+        entries.append(.turn(Turn(speaker: .user, text: text)))
+        lastError = nil
         composer = .running
         do {
             try core.send(text)
@@ -147,14 +163,44 @@ final class Conversation {
         try? core?.interrupt()
     }
 
+    /// Turns only, for the popover's session count.
+    var turns: [Turn] {
+        entries.compactMap { if case .turn(let turn) = $0 { turn } else { nil } }
+    }
+
     private func append(_ token: String) {
-        if let id = streaming, let index = turns.firstIndex(where: { $0.id == id }) {
-            turns[index].text += token
+        if let id = streaming, let index = indexOfTurn(id) {
+            guard case .turn(var turn) = entries[index] else { return }
+            turn.text += token
+            entries[index] = .turn(turn)
         } else {
             let turn = Turn(speaker: .assistant, text: token)
             streaming = turn.id
-            turns.append(turn)
+            entries.append(.turn(turn))
         }
+    }
+
+    private func indexOfTurn(_ id: Turn.ID) -> Int? {
+        entries.firstIndex { if case .turn(let t) = $0 { t.id == id } else { false } }
+    }
+
+    private func indexOfScope(_ id: UInt64) -> Int? {
+        entries.firstIndex { if case .scope(let s) = $0 { s.id == id } else { false } }
+    }
+
+    private func updateScope(_ id: UInt64, _ change: (inout Scope) -> Void) {
+        guard let index = indexOfScope(id), case .scope(var scope) = entries[index] else { return }
+        change(&scope)
+        entries[index] = .scope(scope)
+    }
+
+    /// The most recent scope, which is where a step belongs.
+    private func appendStep(_ step: Step) {
+        guard let index = entries.lastIndex(where: { if case .scope = $0 { true } else { false } }),
+              case .scope(var scope) = entries[index]
+        else { return }
+        scope.steps.append(step)
+        entries[index] = .scope(scope)
     }
 
     private func apply(_ event: CoreEvent) {
@@ -166,39 +212,32 @@ final class Conversation {
 
         case "scope_opened":
             guard let id = fields["id"] as? UInt64 else { return }
-            scopes.append(
-                Scope(id: id, kind: fields["kind"] as? String ?? "tool", state: .reading)
+            entries.append(
+                .scope(Scope(id: id, kind: fields["kind"] as? String ?? "tool", state: .reading))
             )
 
         case "scope_closed":
-            guard let id = fields["id"] as? UInt64,
-                  let index = scopes.firstIndex(where: { $0.id == id })
-            else { return }
-            scopes[index].state = .released
-            scopes[index].elapsed = fields["ms"] as? UInt64
+            guard let id = fields["id"] as? UInt64 else { return }
+            updateScope(id) { scope in
+                scope.state = .released
+                scope.elapsed = fields["ms"] as? UInt64
+            }
 
         case "tool_called":
             guard let tool = fields["tool"] as? String else { return }
-            let tier = fields["tier"] as? String
-            if tier == "irreversible" { composer = .needsYou }
-            scopes.indices.last.map {
-                scopes[$0].steps.append(Step(verb: "call", detail: tool))
-            }
+            if fields["tier"] as? String == "irreversible" { composer = .needsYou }
+            appendStep(Step(verb: "call", detail: tool))
 
         case "memory_recalled":
             let count = (fields["concept_ids"] as? [String])?.count ?? 0
-            scopes.indices.last.map {
-                scopes[$0].steps.append(Step(verb: "recall", detail: "\(count) concepts"))
-            }
-
-        case "model_call":
-            spentCents += 0
+            appendStep(Step(verb: "recall", detail: "\(count) concepts"))
 
         case "budget_warning":
             if let spent = fields["spent"] as? UInt64 { spentCents = spent }
 
         case "blocked":
             composer = .needsYou
+            lastError = describe(fields["reason"])
 
         case "interrupted":
             composer = .idle
@@ -208,7 +247,8 @@ final class Conversation {
         case "task_finished":
             composer = .idle
             streaming = nil
-            if fields["status"] as? String == "failed" {
+            // A blocked event already said why. Only speak up if nothing did.
+            if fields["status"] as? String == "failed", lastError == nil {
                 lastError = "That did not work."
             }
 
@@ -218,8 +258,34 @@ final class Conversation {
     }
 
     private func markOpenScopesInterrupted() {
-        for index in scopes.indices where scopes[index].state != .released {
-            scopes[index].state = .needsYou
+        for index in entries.indices {
+            guard case .scope(var scope) = entries[index], scope.state != .released else { continue }
+            scope.state = .needsYou
+            entries[index] = .scope(scope)
+        }
+    }
+
+    /// Turns a `BlockReason` into a sentence. The Rust side already phrased the detail.
+    private func describe(_ reason: Any?) -> String {
+        guard let reason = reason as? [String: Any],
+              let kind = reason.keys.first,
+              let body = reason[kind] as? [String: Any]
+        else { return "Stopped." }
+
+        switch kind {
+        case "provider_failed":
+            let provider = body["provider"] as? String ?? "The provider"
+            let detail = body["detail"] as? String ?? "no detail"
+            return "\(provider) could not answer: \(detail)"
+        case "budget_ceiling":
+            let spent = body["spent"] as? UInt64 ?? 0
+            return "Paused at your spending limit, \(spent) cents used."
+        case "awaiting_confirm":
+            return "Waiting on you before \(body["action"] as? String ?? "that")."
+        case "auth_expired":
+            return "The connection to \(body["connector"] as? String ?? "that") expired."
+        default:
+            return "Stopped."
         }
     }
 }

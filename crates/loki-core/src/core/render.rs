@@ -4,7 +4,7 @@
 //! Neither can skip a variant, because the compiler checks the match.
 
 use super::event::Event;
-use super::vocab::{ActionKind, BlockReason, CallPath, ScopeKind, TaskStatus, Tier, WriteOp};
+use super::vocab::{ActionKind, BlockReason, CallPath, ScopeKind, Tier, WriteOp};
 
 /// One line of plain language, or nothing when an event is not worth showing.
 ///
@@ -59,6 +59,9 @@ pub fn plain(event: &Event) -> Option<String> {
             BlockReason::AuthExpired { connector } => {
                 format!("The connection to {connector} expired. Reconnect it.")
             }
+            BlockReason::ProviderFailed { provider, detail } => {
+                format!("{provider} could not answer: {detail}")
+            }
         },
         Event::Interrupted { kept, dropped, .. } => format!(
             "Stopped. Kept {} steps, dropped {}.",
@@ -68,10 +71,8 @@ pub fn plain(event: &Event) -> Option<String> {
         Event::Resumed { reused, .. } => {
             format!("Carrying on, reusing {} steps.", reused.len())
         }
-        Event::TaskFinished { status, .. } => match status {
-            TaskStatus::Failed => "That did not work.".into(),
-            TaskStatus::Completed | TaskStatus::Interrupted | TaskStatus::Blocked => return None,
-        },
+        // A failure is always preceded by a `Blocked` saying why, so there is nothing to add.
+        Event::TaskFinished { .. } => return None,
         Event::TaskStarted { .. }
         | Event::ScopeOpened { .. }
         | Event::ScopeClosed { .. }
@@ -205,6 +206,28 @@ mod tests {
     use super::*;
     use crate::core::ids::{ActionId, ConceptId, ScopeId, TaskId};
     use crate::core::payload::Args;
+
+    #[test]
+    fn a_failure_says_why_rather_than_that_it_failed() {
+        let blocked = Event::Blocked {
+            reason: BlockReason::ProviderFailed {
+                provider: "openai".into(),
+                detail: "the API key was rejected".into(),
+            },
+        };
+        assert_eq!(
+            plain(&blocked).unwrap(),
+            "openai could not answer: the API key was rejected"
+        );
+        // The finish carries no message of its own, so the reason is not repeated.
+        assert!(
+            plain(&Event::TaskFinished {
+                id: TaskId::new(0),
+                status: crate::core::vocab::TaskStatus::Failed,
+            })
+            .is_none()
+        );
+    }
 
     #[test]
     fn plain_hides_internal_bookkeeping() {
