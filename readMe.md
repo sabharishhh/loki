@@ -79,6 +79,26 @@ That builds the core first, then opens `app/` in Xcode. Then, once:
 
 Xcode stores that in `app/.swiftpm/`, which is gitignored, so your key never reaches the repo.
 
+### Opening the whole repo instead
+
+`make xcode` opens `app/` on its own, which always gives a scheme and keeps Cargo's thousands of
+build files out of the sidebar. Opening the whole `loki/` folder works too: Xcode detects
+`app/Package.swift` as a nested package and the scheme still comes from it. Pick **LokiApp** in the
+scheme selector at the top left before `Cmd-R`.
+
+Either way, these are build output and tooling, not source:
+
+| Folder | What it is |
+|---|---|
+| `build/` | The assembled `Loki.app` |
+| `target/` | Cargo output |
+| `.agent/`, `.claude/`, `.agents/` | Working docs and agent skills |
+
+**Clicking `build/Loki.app` in Xcode shows "Failed to create archivableRepresentation".** That is
+expected. It is a compiled bundle, not source, and Xcode cannot display it. Nothing is wrong.
+
+### Rust changes need a rebuild first
+
 **Xcode does not know about Cargo.** If you change Rust code, run `make core` (or
 `cargo build -p loki-ffi`) before hitting `Cmd-R`, otherwise Xcode links the previous build.
 
