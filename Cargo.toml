@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/loki-core", "crates/loki-ffi", "crates/loki-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+authors = ["Sabharish"]
+
+[workspace.dependencies]
+loki-core = { path = "crates/loki-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

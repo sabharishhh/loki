@@ -1,0 +1,15 @@
+[package]
+name = "loki-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "C ABI bridge between the Loki core and the Mac app."
+
+[lib]
+name = "loki_ffi"
+crate-type = ["staticlib"]
+
+[dependencies]
+loki-core.workspace = true

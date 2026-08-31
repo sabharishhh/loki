@@ -21,3 +21,7 @@ docs/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Assembled app bundle
+/build/

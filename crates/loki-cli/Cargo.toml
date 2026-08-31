@@ -1,0 +1,12 @@
+[package]
+name = "loki-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dev harness. Drives the core without the Mac app."
+
+[dependencies]
+loki-core.workspace = true
+tokio.workspace = true

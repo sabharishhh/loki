@@ -1,0 +1,4 @@
+module CLoki {
+    header "loki.h"
+    export *
+}

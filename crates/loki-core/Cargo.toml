@@ -1,0 +1,15 @@
+[package]
+name = "loki-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Loki core. Ring 0 (locked) and Ring 1 (versioned ports)."
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
