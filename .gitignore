@@ -7,6 +7,7 @@ docs/
 
 # Agent-maintained working documentation
 .agent/
+CLAUDE.md
 
 # macOS
 .DS_Store
