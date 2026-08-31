@@ -4,10 +4,10 @@
 //! mirror the documented request and SSE shapes.
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+
+use super::sse::{self, EventParser};
 
 use crate::core::vocab::{Cents, CostModel, Locality};
 use crate::ports::model::{
@@ -95,75 +95,19 @@ impl ModelProvider for Anthropic {
                 .send() => result.map_err(|e| ModelError::Transport(e.to_string()))?,
         };
 
-        let response = check_status(response).await?;
-        Ok(Box::pin(decode(response, cancel)))
+        let response = sse::check_status(response).await?;
+        Ok(Box::pin(sse::decode(response, cancel, Parser)))
     }
 }
 
-async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, ModelError> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
+/// Anthropic's SSE payloads.
+struct Parser;
 
-    let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .map(std::time::Duration::from_secs);
-    let body = response.text().await.unwrap_or_default();
-
-    Err(match status.as_u16() {
-        400 => ModelError::BadRequest(body),
-        401 | 403 => ModelError::Unauthorized,
-        429 => ModelError::RateLimited(retry_after),
-        status => ModelError::Upstream { status, body },
-    })
-}
-
-/// Turns the SSE body into chunks, ending as soon as the token is cancelled.
-fn decode(
-    response: reqwest::Response,
-    cancel: CancellationToken,
-) -> impl futures_core::Stream<Item = Result<Chunk, ModelError>> + Send + 'static {
-    async_stream::stream! {
-        let mut events = response.bytes_stream().eventsource();
-
-        loop {
-            let event = tokio::select! {
-                () = cancel.cancelled() => {
-                    yield Ok(Chunk::Done(StopReason::Cancelled));
-                    return;
-                }
-                event = events.next() => event,
-            };
-
-            let Some(event) = event else { return };
-            let event = match event {
-                Ok(event) => event,
-                Err(e) => {
-                    yield Err(ModelError::Transport(e.to_string()));
-                    return;
-                }
-            };
-
-            match serde_json::from_str::<WireEvent>(&event.data) {
-                Ok(wire) => {
-                    for chunk in wire.into_chunks() {
-                        let done = matches!(chunk, Chunk::Done(_));
-                        yield Ok(chunk);
-                        if done {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    yield Err(ModelError::Protocol(e.to_string()));
-                    return;
-                }
-            }
-        }
+impl EventParser for Parser {
+    fn parse(&mut self, data: &str) -> Result<Vec<Chunk>, ModelError> {
+        serde_json::from_str::<WireEvent>(data)
+            .map(WireEvent::into_chunks)
+            .map_err(|e| ModelError::Protocol(e.to_string()))
     }
 }
 
