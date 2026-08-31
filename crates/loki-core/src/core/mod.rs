@@ -6,6 +6,7 @@
 //! Built so far:
 //!
 //! - [`ids`] holds the identifier newtypes the event stream uses.
+//! - [`vocab`] holds the small closed sets the events are described in.
 //!
 //! Planned, not built yet:
 //!
@@ -18,3 +19,4 @@
 //! - `checkpoint` is session-scoped resume points.
 
 pub mod ids;
+pub mod vocab;

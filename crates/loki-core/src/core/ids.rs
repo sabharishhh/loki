@@ -1,96 +1,131 @@
 //! Identifiers used across the event stream.
 //!
-//! Each is a newtype over `u64` rather than a bare `u64`, so the compiler refuses to let one be
-//! passed where another is expected. Ids are generated per run and are not stable across
-//! restarts. Nothing on disk refers to them.
-//!
-//! [`IdGen`] hands them out. Take ids from it rather than building them by hand.
+//! Newtypes rather than bare integers, so the compiler rejects passing one where another is
+//! expected. Ids are per run and are not stable across restarts. Nothing on disk refers to them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Identifies one task, meaning one thing the user asked for.
-///
-/// A task begins when a message arrives and ends when the loop produces a final answer, or when
-/// the user starts something different. The Activity screen shows one row per task, and
-/// interrupting and resuming both act on a task.
-///
-/// A task record belongs only to the current run. Nothing outside it can reach in and change it
-/// mid-run, which is what makes checkpoints trustworthy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TaskId(u64);
+macro_rules! counter_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name(u64);
 
-impl TaskId {
-    /// Wraps a raw number as a task id.
+        impl $name {
+            #[must_use]
+            pub const fn new(raw: u64) -> Self {
+                Self(raw)
+            }
+
+            #[must_use]
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
+
+counter_id! {
+    /// One thing the user asked for, from the message that started it to the final answer.
     ///
-    /// Prefer taking ids from the generator rather than building them by hand. This exists for
-    /// tests and for rebuilding an id that crossed the bridge.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
+    /// Interrupt and resume both act on a task, and the Activity screen shows one row per task.
+    TaskId
+}
+
+counter_id! {
+    /// A stretch of work that holds resources while it runs. Scopes nest.
+    ///
+    /// A scope that never closes is a leaked resource, visible as an unclosed rail in the thread.
+    ScopeId
+}
+
+counter_id! {
+    /// One step inside a task, usually a single tool call.
+    ///
+    /// Checkpoints record results per step, which is what lets a resume keep work rather than
+    /// redo it.
+    StepId
+}
+
+counter_id! {
+    /// One action that changed something outside the app.
+    ///
+    /// Tier 2 actions are journaled under this id and undone by it.
+    ActionId
+}
+
+/// Names one concept document in the memory bundle, by path relative to the bundle root.
+///
+/// For example `people/meera.md`. Unlike the counter ids this is stable, because it is what the
+/// file is actually called.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConceptId(String);
+
+impl ConceptId {
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
     }
 
-    /// The raw number inside, for serializing or for crossing the C ABI.
-    pub const fn get(self) -> u64 {
-        self.0
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-/// Identifies one scope, meaning a stretch of work that holds resources while it runs.
-///
-/// Scopes nest. A tool call opens one, and a code-mode script opens one containing the calls it
-/// makes. Each renders as a vertical rail in the thread, drawing while open and closing when the
-/// resources are released.
-///
-/// A scope that never closes is a leaked resource, and because it is drawn, the user sees it
-/// before we find it in a log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ScopeId(u64);
+/// Content hash of a fetched page, used to address it in the evidence store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContentHash(String);
 
-impl ScopeId {
-    /// Wraps a raw number as a scope id.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
+impl ContentHash {
+    #[must_use]
+    pub fn new(hex: impl Into<String>) -> Self {
+        Self(hex.into())
     }
 
-    /// The raw number inside, for serializing or for crossing the C ABI.
-    pub const fn get(self) -> u64 {
-        self.0
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 /// Hands out unique ids for one run.
 ///
-/// Shared by every part of the core that opens a task or a scope, so it is used from many threads
-/// at once. Each counter is atomic, meaning an increment cannot be interleaved with another and
-/// produce a duplicate.
-///
-/// Counters are separate per type, so task ids and scope ids each run 0, 1, 2 and stay easy to
-/// read in a trace. Two ids of different types sharing a number is harmless, because the compiler
-/// will not let the two types meet.
-///
-/// Numbering restarts at zero on every run. Nothing persisted refers to these.
+/// Shared across threads, so every counter is atomic. Counters are separate per type, which keeps
+/// each sequence dense and readable in a trace.
 #[derive(Debug, Default)]
 pub struct IdGen {
     next_task: AtomicU64,
     next_scope: AtomicU64,
+    next_step: AtomicU64,
+    next_action: AtomicU64,
 }
 
 impl IdGen {
-    /// A generator starting from zero.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             next_task: AtomicU64::new(0),
             next_scope: AtomicU64::new(0),
+            next_step: AtomicU64::new(0),
+            next_action: AtomicU64::new(0),
         }
     }
 
-    /// The next task id. Never returns the same value twice.
     pub fn task(&self) -> TaskId {
         TaskId::new(self.next_task.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// The next scope id. Never returns the same value twice.
     pub fn scope(&self) -> ScopeId {
         ScopeId::new(self.next_scope.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn step(&self) -> StepId {
+        StepId::new(self.next_step.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn action(&self) -> ActionId {
+        ActionId::new(self.next_action.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -101,26 +136,11 @@ mod tests {
     #[test]
     fn wraps_and_unwraps() {
         assert_eq!(TaskId::new(7).get(), 7);
-        assert_eq!(ScopeId::new(7).get(), 7);
+        assert_eq!(
+            ConceptId::new("people/meera.md").as_str(),
+            "people/meera.md"
+        );
     }
-
-    #[test]
-    fn same_type_compares_by_value() {
-        assert_eq!(TaskId::new(1), TaskId::new(1));
-        assert_ne!(TaskId::new(1), TaskId::new(2));
-    }
-
-    #[test]
-    fn usable_as_a_map_key() {
-        use std::collections::HashMap;
-        let mut open = HashMap::new();
-        open.insert(ScopeId::new(1), "github");
-        assert_eq!(open.get(&ScopeId::new(1)), Some(&"github"));
-    }
-
-    // Note: `TaskId::new(1) == ScopeId::new(1)` does not compile, which is the whole point of
-    // these newtypes. There is no test for it here because a compile error cannot be asserted
-    // with an ordinary test.
 
     #[test]
     fn ids_are_sequential_from_zero() {
@@ -135,8 +155,17 @@ mod tests {
         let ids = IdGen::new();
         ids.task();
         ids.task();
-        // Scope numbering is unaffected by how many tasks were handed out.
         assert_eq!(ids.scope(), ScopeId::new(0));
+        assert_eq!(ids.step(), StepId::new(0));
+        assert_eq!(ids.action(), ActionId::new(0));
+    }
+
+    #[test]
+    fn usable_as_a_map_key() {
+        use std::collections::HashMap;
+        let mut open = HashMap::new();
+        open.insert(ScopeId::new(1), "github");
+        assert_eq!(open.get(&ScopeId::new(1)), Some(&"github"));
     }
 
     #[test]
