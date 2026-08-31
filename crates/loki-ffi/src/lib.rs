@@ -113,10 +113,13 @@ unsafe fn as_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 ///
 /// Returns null if any argument is invalid or the runtime cannot start.
 ///
+/// `model` may be null, which uses the provider's default.
+///
 /// # Safety
-/// `api_key` must be a valid NUL-terminated string. `user_data` is passed back to both callbacks
-/// unchanged and must remain valid, and safe to use from any thread, until `loki_core_free`.
-/// The callbacks are invoked from runtime worker threads, not the caller's thread.
+/// `api_key` must be a valid NUL-terminated string, and `model` must be null or one. `user_data`
+/// is passed back to both callbacks unchanged and must remain valid, and safe to use from any
+/// thread, until `loki_core_free`. The callbacks are invoked from runtime worker threads, not the
+/// caller's thread.
 ///
 /// The key is taken here as an argument only until `SecretStore` lands. It is then read from the
 /// Keychain and this parameter goes away.
@@ -124,6 +127,7 @@ unsafe fn as_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 pub unsafe extern "C" fn loki_core_new(
     provider: LokiProvider,
     api_key: *const c_char,
+    model: *const c_char,
     event: LokiEventCallback,
     token: LokiTokenCallback,
     user_data: *mut c_void,
@@ -132,14 +136,22 @@ pub unsafe extern "C" fn loki_core_new(
     let Some(api_key) = (unsafe { as_str(api_key) }) else {
         return std::ptr::null_mut();
     };
+    // SAFETY: contract above. Null is allowed and means "the provider's default".
+    let model = unsafe { as_str(model) };
 
     let provider: Arc<dyn ModelProvider> = match provider {
         LokiProvider::Anthropic => match Anthropic::new(api_key) {
-            Ok(p) => Arc::new(p),
+            Ok(p) => Arc::new(match model {
+                Some(m) => p.with_model(m),
+                None => p,
+            }),
             Err(_) => return std::ptr::null_mut(),
         },
         LokiProvider::Openai => match Openai::new(api_key) {
-            Ok(p) => Arc::new(p),
+            Ok(p) => Arc::new(match model {
+                Some(m) => p.with_model(m),
+                None => p,
+            }),
             Err(_) => return std::ptr::null_mut(),
         },
     };
@@ -387,6 +399,7 @@ mod tests {
             loki_core_new(
                 LokiProvider::Anthropic,
                 key.as_ptr(),
+                std::ptr::null(),
                 count_event,
                 count_token,
                 std::ptr::null_mut(),
@@ -421,12 +434,33 @@ mod tests {
             loki_core_new(
                 LokiProvider::Anthropic,
                 std::ptr::null(),
+                std::ptr::null(),
                 count_event,
                 count_token,
                 std::ptr::null_mut(),
             )
         };
         assert!(core.is_null());
+    }
+
+    #[test]
+    fn a_named_model_is_accepted() {
+        let key = CString::new("test-key").unwrap();
+        let model = CString::new("gpt-5-mini").unwrap();
+        // SAFETY: both strings are valid for this call.
+        let core = unsafe {
+            loki_core_new(
+                LokiProvider::Openai,
+                key.as_ptr(),
+                model.as_ptr(),
+                count_event,
+                count_token,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!core.is_null());
+        // SAFETY: `core` is live and not yet freed.
+        unsafe { loki_core_free(core) };
     }
 
     #[test]

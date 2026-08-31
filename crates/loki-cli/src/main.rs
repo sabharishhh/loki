@@ -50,18 +50,48 @@ impl TokenSink for Stdout {
     }
 }
 
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// `LOKI_PROVIDER` picks between the two when both keys are set. `LOKI_MODEL` overrides the
+/// provider's default model.
 fn provider() -> Result<Arc<dyn ModelProvider>, String> {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        return Anthropic::new(key)
-            .map(|p| Arc::new(p) as Arc<dyn ModelProvider>)
-            .map_err(|e| e.to_string());
+    let model = env("LOKI_MODEL");
+    let anthropic = env("ANTHROPIC_API_KEY");
+    let openai = env("OPENAI_API_KEY");
+
+    let build_anthropic = |key: String| -> Result<Arc<dyn ModelProvider>, String> {
+        let p = Anthropic::new(key).map_err(|e| e.to_string())?;
+        Ok(Arc::new(match &model {
+            Some(m) => p.with_model(m),
+            None => p,
+        }))
+    };
+    let build_openai = |key: String| -> Result<Arc<dyn ModelProvider>, String> {
+        let p = Openai::new(key).map_err(|e| e.to_string())?;
+        Ok(Arc::new(match &model {
+            Some(m) => p.with_model(m),
+            None => p,
+        }))
+    };
+
+    match env("LOKI_PROVIDER").as_deref() {
+        Some("openai") => {
+            build_openai(openai.ok_or("LOKI_PROVIDER is openai but OPENAI_API_KEY is not set")?)
+        }
+        Some("anthropic") => build_anthropic(
+            anthropic.ok_or("LOKI_PROVIDER is anthropic but ANTHROPIC_API_KEY is not set")?,
+        ),
+        Some(other) => Err(format!(
+            "unknown LOKI_PROVIDER {other}, use anthropic or openai"
+        )),
+        None => match (anthropic, openai) {
+            (Some(key), _) => build_anthropic(key),
+            (None, Some(key)) => build_openai(key),
+            (None, None) => Err("set ANTHROPIC_API_KEY or OPENAI_API_KEY".to_owned()),
+        },
     }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        return Openai::new(key)
-            .map(|p| Arc::new(p) as Arc<dyn ModelProvider>)
-            .map_err(|e| e.to_string());
-    }
-    Err("set ANTHROPIC_API_KEY or OPENAI_API_KEY".to_owned())
 }
 
 #[tokio::main]

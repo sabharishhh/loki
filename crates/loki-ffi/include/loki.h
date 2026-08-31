@@ -48,11 +48,14 @@ typedef void (*LokiTokenCallback)(const char *text, void *user_data);
  * user_data is passed back to both callbacks unchanged and must stay valid, and safe to use from
  * any thread, until loki_core_free.
  *
+ * model may be NULL, which uses the provider's default.
+ *
  * api_key is an argument only until SecretStore lands. It is then read from the Keychain and this
  * parameter goes away.
  */
 LokiCore *loki_core_new(LokiProvider provider,
                         const char *api_key,
+                        const char *model,
                         LokiEventCallback event,
                         LokiTokenCallback token,
                         void *user_data);

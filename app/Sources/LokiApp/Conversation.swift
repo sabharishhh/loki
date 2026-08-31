@@ -57,19 +57,35 @@ final class Conversation {
     private let core: Core?
     private var streaming: Turn.ID?
 
-    /// The key is read from the environment until `SecretStore` lands in Phase 4.
+    /// Reads the provider and key from the environment until `SecretStore` lands in Phase 4.
+    ///
+    /// `LOKI_PROVIDER` picks between `anthropic` and `openai` when both keys are present.
+    /// `LOKI_MODEL` overrides the provider's default model.
     init() {
         let environment = ProcessInfo.processInfo.environment
-        if let key = environment["ANTHROPIC_API_KEY"], !key.isEmpty {
-            core = try? Core(provider: .anthropic, apiKey: key)
-        } else if let key = environment["OPENAI_API_KEY"], !key.isEmpty {
-            core = try? Core(provider: .openai, apiKey: key)
-        } else {
-            core = nil
-        }
+        let model = environment["LOKI_MODEL"].flatMap { $0.isEmpty ? nil : $0 }
+        let anthropic = environment["ANTHROPIC_API_KEY"].flatMap { $0.isEmpty ? nil : $0 }
+        let openai = environment["OPENAI_API_KEY"].flatMap { $0.isEmpty ? nil : $0 }
 
-        if core == nil {
-            lastError = "No model key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY and relaunch."
+        switch environment["LOKI_PROVIDER"]?.lowercased() {
+        case "openai":
+            core = openai.flatMap { try? Core(provider: .openai, apiKey: $0, model: model) }
+            if core == nil { lastError = "LOKI_PROVIDER is openai but OPENAI_API_KEY is not set." }
+        case "anthropic":
+            core = anthropic.flatMap { try? Core(provider: .anthropic, apiKey: $0, model: model) }
+            if core == nil {
+                lastError = "LOKI_PROVIDER is anthropic but ANTHROPIC_API_KEY is not set."
+            }
+        default:
+            // No preference stated. Whichever key exists, Anthropic first.
+            if let key = anthropic {
+                core = try? Core(provider: .anthropic, apiKey: key, model: model)
+            } else if let key = openai {
+                core = try? Core(provider: .openai, apiKey: key, model: model)
+            } else {
+                core = nil
+                lastError = "No model key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY and relaunch."
+            }
         }
     }
 

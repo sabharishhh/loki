@@ -33,9 +33,27 @@ A model key is the only credential. Put it in your shell:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
+# or
+export OPENAI_API_KEY=sk-...
 ```
 
-`OPENAI_API_KEY` works too. This is temporary. The key moves to the macOS Keychain in Phase 4.
+Three variables control which provider runs:
+
+| Variable | Effect |
+|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic key |
+| `OPENAI_API_KEY` | OpenAI key |
+| `LOKI_PROVIDER` | `anthropic` or `openai`. Only needed when both keys are set |
+| `LOKI_MODEL` | Overrides the provider's default model |
+
+With both keys set and no `LOKI_PROVIDER`, Anthropic wins. Naming a provider whose key is missing
+is reported rather than silently falling back.
+
+**OpenAI defaults are unverified.** The adapter defaults to `gpt-5` with a 400k context, and
+pricing defaults to zero so the ledger under-reports rather than inventing a number. Set
+`LOKI_MODEL` to a model you actually have access to. See Q-4 in `.agent/LOG.md`.
+
+This is all temporary. The key moves to the macOS Keychain in Phase 4.
 
 ### The core alone, no UI
 
@@ -74,8 +92,12 @@ That builds the core first, then opens `app/` in Xcode. Then, once:
 
 1. **Product > Scheme > Edit Scheme** (or `Cmd-<`).
 2. Select **Run** in the left column, then the **Arguments** tab.
-3. Under **Environment Variables**, click **+** and add `ANTHROPIC_API_KEY` with your key.
+3. Under **Environment Variables**, click **+** and add your key: `ANTHROPIC_API_KEY` or
+   `OPENAI_API_KEY`. Add `LOKI_PROVIDER` and `LOKI_MODEL` as further rows if you need them.
 4. Close. `Cmd-R` now runs the app with the key.
+
+Each row has a checkbox, so you can keep both providers configured and tick whichever you want
+without retyping keys.
 
 Xcode stores that in `app/.swiftpm/`, which is gitignored, so your key never reaches the repo.
 

@@ -84,7 +84,8 @@ public final class Core: Sendable {
         return String(cString: ptr)
     }
 
-    public init(provider: Provider, apiKey: String) throws {
+    /// - Parameter model: the provider's default when nil.
+    public init(provider: Provider, apiKey: String, model: String? = nil) throws {
         var eventContinuation: AsyncStream<CoreEvent>.Continuation!
         let events = AsyncStream<CoreEvent>(bufferingPolicy: .unbounded) {
             eventContinuation = $0
@@ -98,9 +99,17 @@ public final class Core: Sendable {
             Sinks(events: eventContinuation, tokens: tokenContinuation)
         )
 
-        guard let handle = apiKey.withCString({ key in
-            loki_core_new(provider.raw, key, eventBridge, tokenBridge, sinks.toOpaque())
-        }) else {
+        let created = apiKey.withCString { key in
+            if let model {
+                model.withCString { m in
+                    loki_core_new(provider.raw, key, m, eventBridge, tokenBridge, sinks.toOpaque())
+                }
+            } else {
+                loki_core_new(provider.raw, key, nil, eventBridge, tokenBridge, sinks.toOpaque())
+            }
+        }
+
+        guard let handle = created else {
             sinks.release()
             throw CoreError.couldNotStart
         }
