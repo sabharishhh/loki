@@ -1,0 +1,23 @@
+# Personal research vault
+docs/
+
+# Agent tooling and skills
+.claude/
+.agents/
+
+# Agent-maintained working documentation
+.agent/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Rust
+/target
+**/*.rs.bk
+
+# Swift / Xcode
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
