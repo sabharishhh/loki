@@ -3,7 +3,9 @@
 //! A port exists only where something crosses to the outside world. If both sides of an
 //! interface are code we own and will never swap, it is a function call, not a port.
 //!
-//! Planned ports, none implemented yet:
+//! Built so far: [`model`], [`tool`].
+//!
+//! Planned:
 //!
 //! | Port             | Adapters that will implement it                          |
 //! |------------------|----------------------------------------------------------|
@@ -14,3 +16,6 @@
 //! | `SearchBackend`  | FTS5, local embeddings                                   |
 //! | `SecretStore`    | macOS Keychain                                           |
 //! | `EventSink`      | plain renderer, trace renderer, ledger, undo journal     |
+
+pub mod model;
+pub mod tool;
