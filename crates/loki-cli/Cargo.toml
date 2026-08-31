@@ -9,4 +9,5 @@ description = "Dev harness. Drives the core without the Mac app."
 
 [dependencies]
 loki-core.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "io-std"] }
+tokio-util.workspace = true
