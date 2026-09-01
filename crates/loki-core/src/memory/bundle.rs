@@ -368,6 +368,26 @@ macro_rules! read_ops {
             concept_paths(self.root)
         }
 
+        /// Concept paths under `scratch/`, which are all `draft` and never reach a prompt.
+        ///
+        /// Separate from [`concepts`] so a caller has to opt in. The index takes both, because
+        /// import's review screen searches exactly what the prompt path must not see.
+        ///
+        /// # Errors
+        /// Fails if the bundle cannot be walked.
+        pub fn scratch_concepts(&self) -> Result<Vec<String>, BundleError> {
+            match markdown_files(self.root, SCRATCH) {
+                Ok(paths) => Ok(paths),
+                // No scratch directory yet is not an error, it is an empty working area.
+                Err(_) => Ok(Vec::new()),
+            }
+        }
+
+        /// The bundle root, for callers that need to stat a file rather than read it.
+        pub const fn root(&self) -> &Path {
+            self.root
+        }
+
         /// Commits newest first. What the memory timeline is built from.
         ///
         /// # Errors
