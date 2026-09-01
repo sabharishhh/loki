@@ -8,9 +8,9 @@
 //! escaping the root has to be impossible rather than merely discouraged.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use super::concept::{self, RawConcept};
+use super::history::{self, Change, Revision, RevisionId};
 
 /// The layout from section 9.3.
 const DIRECTORIES: [&str; 4] = ["people", "projects", "preferences", "episodes"];
@@ -367,14 +367,7 @@ impl Bundle {
     }
 
     fn init_git(&self) -> Result<(), BundleError> {
-        if self.root.join(".git").exists() {
-            return Ok(());
-        }
-        self.git(&["init", "--quiet"])?;
-        // Local identity, so a commit never depends on the user's global git config.
-        self.git(&["config", "user.name", "Loki"])?;
-        self.git(&["config", "user.email", "loki@localhost"])?;
-        Ok(())
+        history::init(&self.root)
     }
 
     /// Stages everything and commits, if anything changed.
@@ -384,46 +377,68 @@ impl Bundle {
     /// # Errors
     /// Fails if git refuses.
     pub fn commit(&self, message: &str) -> Result<bool, BundleError> {
-        self.git(&["add", "-A"])?;
-        if self.git(&["diff", "--cached", "--quiet"]).is_ok() {
-            return Ok(false);
-        }
-        self.git(&["commit", "--quiet", "-m", message])?;
-        Ok(true)
+        history::commit(&self.root, message)
     }
 
     /// How many commits the bundle has.
     ///
     /// # Errors
-    /// Fails if git refuses.
+    /// Fails if the history cannot be read.
     pub fn commit_count(&self) -> Result<usize, BundleError> {
-        match self.git(&["rev-list", "--count", "HEAD"]) {
-            Ok(out) => Ok(out.trim().parse().unwrap_or(0)),
-            // No commits yet is not a failure.
-            Err(_) => Ok(0),
-        }
+        Ok(history::history(&self.root, usize::MAX)?.len())
     }
 
-    /// Runs git in the bundle. Shelling out rather than linking libgit2: the surface is init, add,
-    /// commit, diff and revert, and git is present on any Mac with the developer tools.
-    fn git(&self, args: &[&str]) -> Result<String, BundleError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .map_err(|e| BundleError::Git {
-                operation: args.first().unwrap_or(&"?").to_string(),
-                detail: e.to_string(),
-            })?;
+    /// Commits newest first. What the memory timeline is built from.
+    ///
+    /// # Errors
+    /// Fails if the history cannot be read.
+    pub fn history(&self, limit: usize) -> Result<Vec<Revision>, BundleError> {
+        history::history(&self.root, limit)
+    }
 
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            Err(BundleError::Git {
-                operation: args.first().unwrap_or(&"?").to_string(),
-                detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            })
-        }
+    /// A file as it stood at a revision.
+    ///
+    /// Answers what Loki believed at a point in time, which one timeline of the present cannot.
+    ///
+    /// # Errors
+    /// Fails if the revision or the path is unknown.
+    pub fn read_at(&self, path: &str, revision: &RevisionId) -> Result<String, BundleError> {
+        self.resolve(path)?;
+        history::read_at(&self.root, path, revision)
+    }
+
+    /// A concept as it stood at a revision.
+    ///
+    /// # Errors
+    /// Fails if the revision is unknown or the file does not parse.
+    pub fn load_concept_at(
+        &self,
+        path: &str,
+        revision: &RevisionId,
+    ) -> Result<RawConcept, BundleError> {
+        let text = self.read_at(path, revision)?;
+        concept::parse(&text).map_err(|source| BundleError::Parse {
+            path: path.to_owned(),
+            source,
+        })
+    }
+
+    /// What a revision changed.
+    ///
+    /// # Errors
+    /// Fails if the revision is unknown.
+    pub fn changed_in(&self, revision: &RevisionId) -> Result<Vec<Change>, BundleError> {
+        history::changed_in(&self.root, revision)
+    }
+
+    /// Undoes a revision by appending a commit that reverses it.
+    ///
+    /// Section 14.3: memory undo is git revert on a consolidation commit. A compensating action,
+    /// never a deletion, so the timeline can still show that something was undone.
+    ///
+    /// # Errors
+    /// Fails if the revision is unknown or the revert conflicts.
+    pub fn revert(&self, revision: &RevisionId) -> Result<(), BundleError> {
+        history::revert(&self.root, revision)
     }
 }

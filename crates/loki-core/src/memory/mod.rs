@@ -6,3 +6,4 @@ pub mod bundle;
 pub mod claim;
 pub mod concept;
 pub mod gate;
+pub mod history;

@@ -7,6 +7,7 @@ use jiff::civil::date;
 use loki_core::memory::bundle::{Bundle, BundleError, SCRATCH};
 use loki_core::memory::claim::Claim;
 use loki_core::memory::concept::{Frontmatter, RawConcept, Status};
+use loki_core::memory::history::ChangeKind;
 
 /// A bundle in a fresh directory, removed when the guard drops.
 struct Temp {
@@ -269,4 +270,172 @@ fn a_copied_bundle_carries_everything() {
     assert_eq!(moved.commit_count().unwrap(), 1);
 
     let _ = std::fs::remove_dir_all(&copy_dir);
+}
+
+// History. Not a feature: the timeline is the trust surface, and memory undo is a revert.
+
+#[test]
+fn history_reads_newest_first() {
+    let temp = Temp::new("history");
+    temp.bundle.write("people/meera.md", "platform\n").unwrap();
+    temp.bundle.commit("learned: platform team").unwrap();
+    temp.bundle.write("people/meera.md", "infra\n").unwrap();
+    temp.bundle.commit("corrected: infra team").unwrap();
+
+    let history = temp.bundle.history(10).expect("history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].message, "corrected: infra team");
+    assert_eq!(history[1].message, "learned: platform team");
+    assert!(history[0].at >= history[1].at);
+}
+
+/// Commits written inside one second have identical timestamps, which a consolidation touching
+/// several files will produce. Ordering must still be parent-last.
+#[test]
+fn history_is_ordered_even_when_commits_share_a_timestamp() {
+    let temp = Temp::new("same-second");
+    for n in 0..6 {
+        temp.bundle
+            .write("people/meera.md", &format!("version {n}\n"))
+            .unwrap();
+        temp.bundle.commit(&format!("commit {n}")).unwrap();
+    }
+
+    let history = temp.bundle.history(10).expect("history");
+    let messages: Vec<&str> = history.iter().map(|r| r.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "commit 5", "commit 4", "commit 3", "commit 2", "commit 1", "commit 0"
+        ]
+    );
+}
+
+#[test]
+fn history_on_an_empty_bundle_is_empty_not_an_error() {
+    let temp = Temp::new("history-empty");
+    assert!(temp.bundle.history(10).expect("history").is_empty());
+    assert_eq!(temp.bundle.commit_count().unwrap(), 0);
+}
+
+/// One timeline of the present cannot answer this. Git can.
+#[test]
+fn a_file_can_be_read_as_it_stood_at_an_older_revision() {
+    let temp = Temp::new("read-at");
+    temp.bundle
+        .write("people/meera.md", "Works on the platform team\n")
+        .unwrap();
+    temp.bundle.commit("march").unwrap();
+    temp.bundle
+        .write("people/meera.md", "Works on the infra team\n")
+        .unwrap();
+    temp.bundle.commit("august").unwrap();
+
+    let history = temp.bundle.history(10).unwrap();
+    let march = &history[1].id;
+
+    assert_eq!(
+        temp.bundle
+            .read_at("people/meera.md", march)
+            .unwrap()
+            .trim(),
+        "Works on the platform team"
+    );
+    assert_eq!(
+        temp.bundle.read("people/meera.md").unwrap().trim(),
+        "Works on the infra team"
+    );
+}
+
+#[test]
+fn a_concept_can_be_parsed_as_it_stood_at_a_revision() {
+    let temp = Temp::new("concept-at");
+    let mut front = Frontmatter::new("Meera", date(2026, 1, 1));
+    front.status = Status::Stable;
+
+    let mut old = RawConcept::new(front.clone());
+    old.add(
+        "Role",
+        Claim::stated("Works on platform", date(2026, 3, 12)),
+    );
+    temp.bundle.save_concept("people/meera.md", &old).unwrap();
+    temp.bundle.commit("march").unwrap();
+
+    let mut new = RawConcept::new(front);
+    new.add("Role", Claim::stated("Works on infra", date(2026, 7, 15)));
+    temp.bundle.save_concept("people/meera.md", &new).unwrap();
+    temp.bundle.commit("august").unwrap();
+
+    let march = temp.bundle.history(10).unwrap()[1].id.clone();
+    let then = temp
+        .bundle
+        .load_concept_at("people/meera.md", &march)
+        .expect("load at revision");
+    assert_eq!(then, old);
+}
+
+#[test]
+fn a_revision_reports_what_it_changed() {
+    let temp = Temp::new("changed");
+    temp.bundle.write("people/meera.md", "one\n").unwrap();
+    temp.bundle.commit("first").unwrap();
+    temp.bundle.write("people/meera.md", "two\n").unwrap();
+    temp.bundle.write("people/rahul.md", "new\n").unwrap();
+    temp.bundle.commit("second").unwrap();
+
+    let head = temp.bundle.history(1).unwrap()[0].id.clone();
+    let mut changes = temp.bundle.changed_in(&head).expect("changed");
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].path, "people/meera.md");
+    assert_eq!(changes[0].kind, ChangeKind::Modified);
+    assert_eq!(changes[1].path, "people/rahul.md");
+    assert_eq!(changes[1].kind, ChangeKind::Added);
+}
+
+/// Section 14.3. Undo is a compensating action appended, never a deletion.
+#[test]
+fn reverting_restores_the_content_and_keeps_the_history() {
+    let temp = Temp::new("revert");
+    temp.bundle
+        .write("people/meera.md", "Works on the platform team\n")
+        .unwrap();
+    temp.bundle.commit("march").unwrap();
+    temp.bundle
+        .write("people/meera.md", "Works on the infra team\n")
+        .unwrap();
+    temp.bundle.commit("a wrong correction").unwrap();
+
+    let bad = temp.bundle.history(1).unwrap()[0].id.clone();
+    temp.bundle.revert(&bad).expect("revert");
+
+    // Content is back.
+    assert_eq!(
+        temp.bundle.read("people/meera.md").unwrap().trim(),
+        "Works on the platform team"
+    );
+
+    // And nothing was erased. Three commits, with the mistake still visible.
+    let history = temp.bundle.history(10).unwrap();
+    assert_eq!(history.len(), 3);
+    assert!(history[0].message.starts_with("Revert"));
+    assert_eq!(history[1].message, "a wrong correction");
+}
+
+#[test]
+fn the_bundle_is_usable_again_after_a_revert() {
+    let temp = Temp::new("revert-then-write");
+    temp.bundle.write("people/meera.md", "one\n").unwrap();
+    temp.bundle.commit("first").unwrap();
+    temp.bundle.write("people/meera.md", "two\n").unwrap();
+    temp.bundle.commit("second").unwrap();
+
+    let second = temp.bundle.history(1).unwrap()[0].id.clone();
+    temp.bundle.revert(&second).expect("revert");
+
+    // A revert leaves git in a special state unless it is cleaned up. Prove it was.
+    temp.bundle.write("people/meera.md", "three\n").unwrap();
+    assert!(temp.bundle.commit("third").expect("commit after revert"));
+    assert_eq!(temp.bundle.history(1).unwrap()[0].message, "third");
 }

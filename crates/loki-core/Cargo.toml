@@ -24,6 +24,7 @@ dirs.workspace = true
 serde_yaml_ng.workspace = true
 jiff.workspace = true
 strsim.workspace = true
+git2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
