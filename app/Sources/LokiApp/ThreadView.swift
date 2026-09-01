@@ -41,27 +41,33 @@ struct ThreadView: View {
 }
 
 private struct TurnView: View {
+    /// How much of the column a user turn leaves clear on its left. Sets where a long one wraps.
+    private static let userTurnGutter: CGFloat = 0.25
+
     let turn: Turn
 
     var body: some View {
         switch turn.speaker {
         case .user:
-            Text(turn.text)
-                .font(Theme.Text.body)
-                .lineSpacing(Theme.Text.bodyLineSpacing)
-                .foregroundStyle(Theme.Colors.onInverted)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, Theme.Space.l)
-                .padding(.vertical, Theme.Space.m)
-                .background(Theme.Colors.inverted, in: .rect(cornerRadius: Theme.Radius.bubble))
-                // Short of the measure, so a long instruction wraps into a block rather than
-                // running the full width and losing the asymmetry with the assistant's prose.
-                .frame(maxWidth: Theme.Size.measure * 0.75, alignment: .leading)
-                // Set hard against the right edge of the column, not merely indented from the
-                // left. The two speakers have to occupy different sides for the page to read as
-                // a conversation at a glance.
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            // A leading spacer, not a trailing frame. `frame(maxWidth:alignment:)` expands to
+            // its maximum and then aligns the text inside that box, so a short turn ended up a
+            // whole cap-width short of the right edge. A spacer lets the box hug its text and
+            // pushes it against the column edge, and its minimum is what makes a long turn wrap.
+            HStack(spacing: 0) {
+                Spacer(minLength: Theme.Size.measure * Self.userTurnGutter)
+                Text(turn.text)
+                    .font(Theme.Text.body)
+                    .lineSpacing(Theme.Text.bodyLineSpacing)
+                    .foregroundStyle(Theme.Colors.onInverted)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Theme.Space.l)
+                    .padding(.vertical, Theme.Space.m)
+                    .background(
+                        Theme.Colors.inverted,
+                        in: .rect(cornerRadius: Theme.Radius.bubble)
+                    )
+            }
 
         case .assistant:
             // Full measure, no container. Prose, because it is prose.
