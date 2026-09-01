@@ -21,7 +21,7 @@ use jiff::civil::Date;
 
 use super::bundle::{Bundle, BundleError, SCRATCH};
 use super::claim::{Claim, Source};
-use super::concept::{self, Frontmatter, RawConcept, Status};
+use super::concept::{Frontmatter, RawConcept, Status};
 use super::index::{Index, IndexError};
 use super::reconcile::{self, Precedence, Promotion, Reference};
 use super::resolve::{self, Kind, Matcher, Resolution, ResolveError};
@@ -406,44 +406,6 @@ fn summary_line(report: &Report) -> String {
         report.archived.len()
     )
 }
-
-/// Renders a run as plain-language lines for `log.md`, which the timeline and the session summary
-/// both read (§17.3, §17.4).
-///
-/// The sentence §9.5 exists to make writable: what replaced what, and how long we were wrong.
-#[must_use]
-pub fn log_lines(report: &Report, concepts: &[(String, RawConcept)], today: Date) -> Vec<String> {
-    let mut lines = Vec::new();
-    for decided in &report.decisions {
-        if decided.outcome != Precedence::Replace {
-            continue;
-        }
-        let wrong_for = concepts
-            .iter()
-            .find(|(path, _)| *path == decided.concept)
-            .and_then(|(_, concept)| {
-                concept
-                    .claims()
-                    .find(|c| c.text == decided.held)
-                    .and_then(|c| c.validity.wrong_for_days())
-            });
-        let tail = match wrong_for {
-            Some(days) if days > 0 => format!(", and I was wrong about it for {days} days"),
-            _ => String::new(),
-        };
-        lines.push(format!(
-            "{today}: {} replaced {}{tail}.",
-            decided.incoming, decided.held
-        ));
-    }
-    for surfaced in &report.surfaced {
-        lines.push(format!("{today}: needs you, {surfaced}."));
-    }
-    lines
-}
-
-/// Re-exported so callers do not have to reach into two modules to build a run.
-pub use concept::Section;
 
 /// Extraction on the Utility role (§22.2).
 ///

@@ -14,6 +14,7 @@ use super::gate::TierScope;
 use super::index::{Index, IndexError, Origin, Query, Recalled, Session, Use};
 use super::reconcile::Reference;
 use super::resolve::Matcher;
+use super::timeline;
 use super::working_set::{self, WorkingSetError};
 
 /// Claims a single turn may carry. Precision over recall (§10.1): a wrong memory costs more than
@@ -154,6 +155,102 @@ impl Memory {
         Ok(self.index.record_use(&uses)?)
     }
 
+    /// Marks a claim wrong, from the rail's one-click `not true` (§9.9).
+    ///
+    /// Confidence collapses and the claim is flagged. Nothing is deleted by a tap: §9.10 says
+    /// nothing is removed by heuristic, and a misfired click must be recoverable.
+    ///
+    /// # Errors
+    /// Fails if the concept cannot be read or written.
+    pub async fn contradict(&self, path: &str, ordinal: u32) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+        for (at, claim) in concept.claims_mut().enumerate() {
+            if u32::try_from(at).is_ok_and(|n| n == ordinal) {
+                claim.contradicted();
+            }
+        }
+        {
+            let writer = self.bundle.writer().await;
+            writer.save_concept(path, &concept)?;
+            writer.commit(&format!("Marked wrong: {path}"))?;
+        }
+        {
+            let reader = self.bundle.reader().await;
+            self.index.sync(&reader)?;
+        }
+        Ok(())
+    }
+
+    /// The timeline, newest first (§17.3).
+    ///
+    /// Reads `log.md`, which is the record. Rendering from anywhere else would let the screen and
+    /// the file disagree, and being able to check the work is the whole point of the surface.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read.
+    pub async fn timeline(&self, limit: usize) -> Result<Vec<String>, MemoryError> {
+        let reader = self.bundle.reader().await;
+        let text = reader.read(super::bundle::LOG).unwrap_or_default();
+        let mut rows: Vec<String> = text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- "))
+            .map(str::to_owned)
+            .collect();
+        rows.reverse();
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Past sessions, newest first, for the sidebar.
+    ///
+    /// Read off `episodes/`, because that is where a session actually is. A separate list would be
+    /// a second record to keep in step.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read.
+    pub async fn sessions(&self, limit: usize) -> Result<Vec<String>, MemoryError> {
+        let reader = self.bundle.reader().await;
+        let mut days: Vec<String> = reader
+            .ls("episodes")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| name.strip_suffix(".md").map(str::to_owned))
+            .collect();
+        days.sort_unstable();
+        days.reverse();
+        days.truncate(limit);
+        Ok(days)
+    }
+
+    /// Loads the concepts a run touched, for the timeline's correction pairs.
+    async fn load_touched(&self, report: &Report) -> Vec<(String, super::concept::RawConcept)> {
+        let mut paths: Vec<String> = report.decisions.iter().map(|d| d.concept.clone()).collect();
+        paths.extend(report.promoted.iter().cloned());
+        paths.sort_unstable();
+        paths.dedup();
+
+        let mut out = Vec::with_capacity(paths.len());
+        let reader = self.bundle.reader().await;
+        for path in paths {
+            if let Ok(concept) = reader.load_concept(&path) {
+                out.push((path, concept));
+            }
+        }
+        out
+    }
+
+    /// The rows this run added to the timeline, for the session summary (§17.4).
+    ///
+    /// # Errors
+    /// Never fails; the signature matches its siblings.
+    pub async fn timeline_rows(&self, report: &Report, today: Date) -> Vec<timeline::Entry> {
+        let concepts = self.load_touched(report).await;
+        timeline::rows(report, &concepts, today)
+    }
+
     /// Closes the session: consolidate this episode, regenerate the working set, forget the raw
     /// turns (§9.8, D-045).
     ///
@@ -183,6 +280,14 @@ impl Memory {
             today,
         )
         .await?;
+
+        // The timeline is written before the working set, so a crash between the two leaves the
+        // user able to see what changed rather than only its effect.
+        let concepts = self.load_touched(&report).await;
+        let rows = timeline::rows(&report, &concepts, today);
+        {
+            timeline::append(&self.bundle, &rows, today).await?;
+        }
 
         working_set::generate(&self.bundle, &self.index, self.scope, today).await?;
         {

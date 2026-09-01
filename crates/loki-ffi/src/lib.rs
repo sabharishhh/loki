@@ -23,9 +23,11 @@ use loki_core::core::prompt::{Prefix, Standing};
 use loki_core::core::sink::{Broadcast, EventSink};
 use loki_core::core::vocab::Cents;
 use loki_core::core::vocab::Locality;
+use loki_core::memory::consolidate::ModelExtractor;
 use loki_core::memory::gate::TierScope;
 use loki_core::memory::handle::Memory;
-use loki_core::memory::index::Index;
+use loki_core::memory::index::{Index, Recalled};
+use loki_core::memory::resolve::ModelMatcher;
 use loki_core::ports::model::ModelProvider;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -96,6 +98,10 @@ pub struct LokiCore {
     core: Arc<AsyncMutex<Loop>>,
     cancel: std::sync::Mutex<CancellationToken>,
     ledger: Option<Arc<Ledger>>,
+    /// Held alongside the loop so the memory screens can read the store without a turn running.
+    memory: Option<Arc<Memory>>,
+    /// What pre-fetch surfaced on the last turn, for the `In play` rail (§9.2 of the design).
+    recalled: std::sync::Mutex<Vec<Recalled>>,
 }
 
 const SYSTEM: &str = "You are Loki, a personal assistant that runs on the user's Mac. \
@@ -199,10 +205,10 @@ pub unsafe extern "C" fn loki_core_new(
     // first turn. A store that will not open leaves a working assistant with no recall rather
     // than no assistant: the conversation is the floor, and memory is what it earns on top.
     let mut core = core;
-    runtime.block_on(async {
-        if let Some(memory) = open_memory().await {
-            let _ = core.attach_memory(memory).await;
-        }
+    let memory = runtime.block_on(async {
+        let memory = open_memory().await?;
+        core.attach_memory(Arc::clone(&memory)).await.ok()?;
+        Some(memory)
     });
 
     Box::into_raw(Box::new(LokiCore {
@@ -210,6 +216,8 @@ pub unsafe extern "C" fn loki_core_new(
         core: Arc::new(AsyncMutex::new(core)),
         cancel: std::sync::Mutex::new(CancellationToken::new()),
         ledger,
+        memory,
+        recalled: std::sync::Mutex::new(Vec::new()),
     }))
 }
 
@@ -439,6 +447,166 @@ pub unsafe extern "C" fn loki_string_free(ptr: *mut c_char) {
     }
     // SAFETY: the caller contract above guarantees this came from `CString::into_raw`.
     drop(unsafe { CString::from_raw(ptr) });
+}
+
+/// What pre-fetch surfaced for the last turn, as JSON, for the `In play` rail.
+///
+/// A rail that shows what memory contributed is how the user can tell precision is working, and
+/// it is where `not true` lives. Returns `[]` when memory is off or nothing was recalled.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_recalled(core: *mut LokiCore) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("[]");
+    };
+    let recalled = core
+        .recalled
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default();
+    let rows: Vec<_> = recalled
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "path": r.path,
+                "name": r.name,
+                "text": r.text,
+                "ordinal": r.ordinal,
+                "score": r.score.value(),
+                "fromSession": r.origin == loki_core::memory::index::Origin::Session,
+            })
+        })
+        .collect();
+    json_string(&serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Marks a recalled claim wrong (§9.9, and the rail's one-click `not true`).
+///
+/// Drops its confidence and flags it, rather than deleting. Nothing is removed by a single tap:
+/// the timeline is where a claim is actually edited or deleted.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. `path` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_not_true(
+    core: *mut LokiCore,
+    path: *const c_char,
+    ordinal: u32,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    // SAFETY: contract above.
+    let Some(path) = (unsafe { as_str(path) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return LokiStatus::InvalidArgument;
+    };
+    let memory = Arc::clone(memory);
+    let path = path.to_owned();
+    core.runtime.block_on(async move {
+        match memory.contradict(&path, ordinal).await {
+            Ok(()) => LokiStatus::Ok,
+            Err(_) => LokiStatus::NotReady,
+        }
+    })
+}
+
+/// The memory timeline, newest first, as JSON (§17.3).
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_timeline(core: *mut LokiCore, limit: u32) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("[]");
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return json_string("[]");
+    };
+    let memory = Arc::clone(memory);
+    let text = core
+        .runtime
+        .block_on(async move { memory.timeline(limit as usize).await.unwrap_or_default() });
+    json_string(&serde_json::to_string(&text).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Past sessions, newest first, as JSON, for the sidebar (§9.1 of the design system).
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_sessions(core: *mut LokiCore, limit: u32) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("[]");
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return json_string("[]");
+    };
+    let memory = Arc::clone(memory);
+    let rows = core
+        .runtime
+        .block_on(async move { memory.sessions(limit as usize).await.unwrap_or_default() });
+    json_string(&serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Closes the session and returns the summary lines as JSON (§17.4).
+///
+/// Up to three lines, and an empty array when nothing happened. Silence is the design: a card
+/// saying "learned nothing today" teaches people to ignore the card.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("[]");
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return json_string("[]");
+    };
+    let memory = Arc::clone(memory);
+    let loop_handle = Arc::clone(&core.core);
+    let lines = core.runtime.block_on(async move {
+        let guard = loop_handle.lock().await;
+        let provider = guard.provider();
+        let extractor = ModelExtractor::new(provider.as_ref(), CancellationToken::new());
+        let matcher = ModelMatcher::new(provider.as_ref(), CancellationToken::new());
+        drop(guard);
+
+        let today = jiff::Zoned::now().date();
+        let Ok(report) = memory
+            .close(
+                &extractor,
+                &matcher,
+                &loki_core::memory::consolidate::Unbounded,
+                today,
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let rows = memory.timeline_rows(&report, today).await;
+        loki_core::memory::timeline::summary(&rows)
+    });
+    json_string(&serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Hands a string to Swift. Null on an interior nul byte, which the caller treats as empty.
+fn json_string(text: &str) -> *mut c_char {
+    CString::new(text).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
 /// Opens the memory store for this session.

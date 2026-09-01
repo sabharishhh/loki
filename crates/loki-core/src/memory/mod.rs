@@ -12,4 +12,5 @@ pub mod history;
 pub mod index;
 pub mod reconcile;
 pub mod resolve;
+pub mod timeline;
 pub mod working_set;

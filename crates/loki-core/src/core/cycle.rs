@@ -130,6 +130,12 @@ impl Loop {
         self.budget
     }
 
+    /// The provider, for the Utility-role calls consolidation makes at session close.
+    #[must_use]
+    pub fn provider(&self) -> Arc<dyn ModelProvider> {
+        Arc::clone(&self.provider)
+    }
+
     #[must_use]
     pub const fn checkpoint(&self) -> &Checkpoint {
         &self.checkpoint
