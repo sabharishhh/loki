@@ -23,10 +23,13 @@ struct ThreadView: View {
                         ErrorRow(message: error)
                     }
                 }
-                .frame(maxWidth: Theme.Size.measure, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // Capped at the measure, padded, then centred, in that order. The same three
+                // steps the composer takes, so the column's edges line up with the field's and
+                // a right-set turn lands on the same rule as the send button.
+                .frame(maxWidth: Theme.Size.measure)
                 .padding(.horizontal, Theme.Space.xl)
                 .padding(.vertical, Theme.Space.xxl)
+                .frame(maxWidth: .infinity)
             }
             .onChange(of: conversation.entries.last?.id) {
                 guard let last = conversation.entries.last else { return }
@@ -49,12 +52,15 @@ private struct TurnView: View {
                 .foregroundStyle(Theme.Colors.onInverted)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, Theme.Space.m)
-                .padding(.vertical, Theme.Space.s)
-                .background(Theme.Colors.inverted, in: .rect(cornerRadius: Theme.Radius.panel))
-                // Short of the measure, so a long instruction still breaks before the edge and
-                // the asymmetry with the assistant's full-width prose stays legible.
-                .frame(maxWidth: Theme.Size.measure * 0.82, alignment: .leading)
+                .padding(.horizontal, Theme.Space.l)
+                .padding(.vertical, Theme.Space.m)
+                .background(Theme.Colors.inverted, in: .rect(cornerRadius: Theme.Radius.bubble))
+                // Short of the measure, so a long instruction wraps into a block rather than
+                // running the full width and losing the asymmetry with the assistant's prose.
+                .frame(maxWidth: Theme.Size.measure * 0.75, alignment: .leading)
+                // Set hard against the right edge of the column, not merely indented from the
+                // left. The two speakers have to occupy different sides for the page to read as
+                // a conversation at a glance.
                 .frame(maxWidth: .infinity, alignment: .trailing)
 
         case .assistant:
