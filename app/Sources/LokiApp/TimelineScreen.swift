@@ -82,10 +82,18 @@ private struct TimelineRow: View {
                 .frame(maxHeight: .infinity)
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                Text(parsed.kind)
-                    .font(Theme.Text.micro)
-                    .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                HStack(spacing: Theme.Space.s) {
+                    Text(parsed.kind)
+                        .font(Theme.Text.micro)
+                        .kerning(Theme.Text.microTracking)
+                        .foregroundStyle(Theme.Colors.faint)
+                    if !parsed.subject.isEmpty {
+                        Text(parsed.subject)
+                            .font(Theme.Text.micro)
+                            .kerning(Theme.Text.microTracking)
+                            .foregroundStyle(Theme.Colors.muted)
+                    }
+                }
 
                 if let old = parsed.replaced {
                     Text(old)
@@ -126,6 +134,7 @@ private struct TimelineRow: View {
 /// parse would be lying about the file it claims to reflect.
 private struct Parsed {
     let kind: String
+    let subject: String
     let live: String
     let replaced: String?
     let dates: String?
@@ -147,10 +156,18 @@ private struct Parsed {
             accent = Theme.Colors.line
         }
 
+        // "learned, Sabharish, name: the user's name is Sabharish" splits at the last colon
+        // before the statement, so the subject survives as its own line.
+        let head = sentence.prefix { $0 != ":" }
         let body = sentence
             .drop(while: { $0 != ":" })
             .dropFirst()
             .trimmingCharacters(in: .whitespaces)
+        subject = head
+            .split(separator: ",")
+            .dropFirst()
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: " · ")
 
         let quoted = Parsed.quotes(in: body)
         live = quoted.first ?? body

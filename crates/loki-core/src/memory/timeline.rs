@@ -40,6 +40,10 @@ pub struct Entry {
     pub day: Date,
     pub kind: Kind,
     pub concept: String,
+    /// The entity as a person reads it, rather than its path.
+    pub name: String,
+    /// Which property of the entity this sets.
+    pub attribute: String,
     pub text: String,
     /// World time: when the live claim started being true.
     pub from: Option<Date>,
@@ -49,6 +53,26 @@ pub struct Entry {
     pub replaced_to: Option<Date>,
     /// How long the old claim was believed after it stopped being true.
     pub wrong_for_days: Option<i64>,
+}
+
+impl Entry {
+    /// The entity and property this row is about, for the sentence.
+    ///
+    /// Falls back to the path, because a row that cannot name its subject is still better than a
+    /// row that names nothing.
+    #[must_use]
+    pub fn subject(&self) -> String {
+        let who = if self.name.is_empty() {
+            self.concept.clone()
+        } else {
+            self.name.clone()
+        };
+        if self.attribute.is_empty() {
+            who
+        } else {
+            format!("{who}, {}", self.attribute.replace('_', " "))
+        }
+    }
 }
 
 /// Renders a consolidation run as timeline rows.
@@ -72,6 +96,8 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
                 day,
                 kind: Kind::Corrected,
                 concept: decided.concept.clone(),
+                name: concept.map(|c| c.front.name.clone()).unwrap_or_default(),
+                attribute: live.map(|c| c.attribute.clone()).unwrap_or_default(),
                 text: decided.incoming.clone(),
                 from: live.map(|c| c.validity.valid_from),
                 replaced: Some(decided.held.clone()),
@@ -83,6 +109,8 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
                 day,
                 kind: Kind::NeedsYou,
                 concept: decided.concept.clone(),
+                name: concept.map(|c| c.front.name.clone()).unwrap_or_default(),
+                attribute: live.map(|c| c.attribute.clone()).unwrap_or_default(),
                 text: decided.incoming.clone(),
                 from: live.map(|c| c.validity.valid_from),
                 replaced: Some(decided.held.clone()),
@@ -110,6 +138,10 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
             day,
             kind: if held { Kind::Noted } else { Kind::Learned },
             concept: path.clone(),
+            name: concept.map(|c| c.front.name.clone()).unwrap_or_default(),
+            attribute: concept
+                .and_then(|c| c.claims().next().map(|m| m.attribute.clone()))
+                .unwrap_or_default(),
             text,
             from: None,
             replaced: None,
@@ -120,15 +152,18 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
     }
 
     for path in &report.promoted {
-        let text = concepts
-            .iter()
-            .find(|(p, _)| p == path)
-            .and_then(|(_, c)| c.claims().next().map(|m| m.text.clone()))
+        let concept = concepts.iter().find(|(p, _)| p == path).map(|(_, c)| c);
+        let text = concept
+            .and_then(|c| c.claims().next().map(|m| m.text.clone()))
             .unwrap_or_default();
         out.push(Entry {
             day,
             kind: Kind::Learned,
             concept: path.clone(),
+            name: concept.map(|c| c.front.name.clone()).unwrap_or_default(),
+            attribute: concept
+                .and_then(|c| c.claims().next().map(|m| m.attribute.clone()))
+                .unwrap_or_default(),
             text,
             from: None,
             replaced: None,
@@ -165,8 +200,8 @@ pub async fn append(bundle: &Bundle, entries: &[Entry], day: Date) -> Result<(),
 #[must_use]
 pub fn render(entry: &Entry) -> String {
     match entry.kind {
-        Kind::Learned => format!("learned, {}: {}", entry.concept, entry.text),
-        Kind::Noted => format!("noted, {}: {}", entry.concept, entry.text),
+        Kind::Learned => format!("learned, {}: {}", entry.subject(), entry.text),
+        Kind::Noted => format!("noted, {}: {}", entry.subject(), entry.text),
         Kind::NeedsYou => format!(
             "needs you, {}: \"{}\" against \"{}\", and neither is being used",
             entry.concept,
@@ -217,6 +252,8 @@ mod tests {
             day: date(2026, 8, 29),
             kind: Kind::Corrected,
             concept: "people/sabharish.md".to_string(),
+            name: "Sabharish".to_string(),
+            attribute: "team".to_string(),
             text: "on the infra team".to_string(),
             from: Some(date(2026, 7, 15)),
             replaced: Some("on the design team".to_string()),
@@ -248,6 +285,26 @@ mod tests {
     fn the_summary_is_capped_at_three_lines() {
         let entries: Vec<Entry> = (0..7).map(|_| corrected()).collect();
         assert_eq!(summary(&entries).len(), 3);
+    }
+
+    /// A row has to say who and what, or it reads as a bare value with no meaning.
+    #[test]
+    fn a_row_names_its_subject_and_property() {
+        let mut entry = corrected();
+        entry.kind = Kind::Learned;
+        entry.text = "Sabharish".to_string();
+        entry.attribute = "name".to_string();
+        let line = render(&entry);
+        assert!(line.contains("Sabharish, name"), "{line}");
+    }
+
+    #[test]
+    fn a_row_with_no_name_falls_back_to_its_path() {
+        let mut entry = corrected();
+        entry.kind = Kind::Learned;
+        entry.name = String::new();
+        entry.attribute = String::new();
+        assert!(render(&entry).contains("people/sabharish.md"));
     }
 
     #[test]

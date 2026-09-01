@@ -472,8 +472,20 @@ Rules:
 - `stated` means the user said it about themselves or their world. `inferred` means you worked it
   out. Prefer `inferred` when unsure, since a stated fact is trusted immediately.
 - The date is when the fact started being true, not today. Use `-` if the transcript does not say.
-- Write the fact as a short statement, not a sentence about the conversation. Phrase the same
-  property the same way each time.
+- The fact must be a complete statement that still makes sense on its own, with the entity in it.
+  It is shown to the user and put into a prompt with no surrounding context, so a bare value is
+  useless. Write it as `Sabharish is a computer science graduate`, never as the bare value
+  `computer science graduate`, and never as just the name.
+- Phrase the same property the same way each time, so a later mention supersedes rather than
+  reading as a second fact.
+
+Example, for a transcript where the user says they are Sabharish, a computer science graduate who
+has just moved to Bangalore, and that they want short replies:
+
+  Sabharish | person | name | stated | - | The user's name is Sabharish
+  Sabharish | person | education | stated | - | Sabharish is a computer science graduate
+  Sabharish | person | city | stated | - | Sabharish lives in Bangalore
+  reply length | preference | reply_style | stated | - | Sabharish prefers short replies
 - If the transcript states nothing durable, output nothing at all.";
 
 #[async_trait]
