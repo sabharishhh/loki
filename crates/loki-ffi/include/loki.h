@@ -76,6 +76,23 @@ LokiStatus loki_add_standing(LokiCore *core, const char *text, bool persistent);
 uint64_t loki_spend_today(LokiCore *core);
 uint64_t loki_spend_month(LokiCore *core);
 
+/* Memory. Every char* result must be freed with loki_string_free. */
+
+/* What pre-fetch surfaced for the last turn, as a JSON array. "[]" when memory is off. */
+char *loki_recalled(LokiCore *core);
+
+/* Marks a recalled claim wrong. Drops its confidence; deletes nothing. */
+LokiStatus loki_not_true(LokiCore *core, const char *path, uint32_t ordinal);
+
+/* The memory timeline, newest first, as a JSON array of sentences. */
+char *loki_timeline(LokiCore *core, uint32_t limit);
+
+/* Past sessions, newest first, as a JSON array of day strings. */
+char *loki_sessions(LokiCore *core, uint32_t limit);
+
+/* Consolidates the session and returns up to three summary lines as a JSON array. */
+char *loki_end_session(LokiCore *core);
+
 /* Phase 4. Returns LOKI_UNSUPPORTED until the tool registry exists. */
 LokiStatus loki_confirm_action(LokiCore *core, uint64_t action, bool approved);
 

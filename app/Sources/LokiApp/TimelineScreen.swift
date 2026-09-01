@@ -133,7 +133,10 @@ private struct Parsed {
 
     init(_ sentence: String) {
         let lower = sentence.lowercased()
-        if lower.hasPrefix("corrected") {
+        if lower.hasPrefix("noted") {
+            kind = "noted, not yet used"
+            accent = Theme.State.holding.color
+        } else if lower.hasPrefix("corrected") {
             kind = "corrected"
             accent = Theme.Colors.line
         } else if lower.hasPrefix("needs you") {

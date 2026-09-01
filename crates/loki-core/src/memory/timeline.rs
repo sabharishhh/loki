@@ -23,6 +23,12 @@ pub enum Kind {
     Learned,
     /// A claim replaced another. The row §9.5 exists to make writable.
     Corrected,
+    /// A new entity was written, and is held as `draft` until it earns `stable` (§9.8).
+    ///
+    /// Shown rather than hidden. It is the most common thing that happens after you say
+    /// something, and a timeline that stays empty while files are being written is not a trust
+    /// surface, it is a lie about the store it claims to reflect.
+    Noted,
     /// Two claims conflicted and neither was used. One tap.
     NeedsYou,
 }
@@ -89,6 +95,28 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
         }
     }
 
+    for path in &report.created {
+        let text = concepts
+            .iter()
+            .find(|(p, _)| p == path)
+            .and_then(|(_, c)| c.claims().next().map(|m| m.text.clone()))
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(Entry {
+            day,
+            kind: Kind::Noted,
+            concept: path.clone(),
+            text,
+            from: None,
+            replaced: None,
+            replaced_from: None,
+            replaced_to: None,
+            wrong_for_days: None,
+        });
+    }
+
     for path in &report.promoted {
         let text = concepts
             .iter()
@@ -136,6 +164,7 @@ pub async fn append(bundle: &Bundle, entries: &[Entry], day: Date) -> Result<(),
 pub fn render(entry: &Entry) -> String {
     match entry.kind {
         Kind::Learned => format!("learned, {}: {}", entry.concept, entry.text),
+        Kind::Noted => format!("noted, {}: {}", entry.concept, entry.text),
         Kind::NeedsYou => format!(
             "needs you, {}: \"{}\" against \"{}\", and neither is being used",
             entry.concept,

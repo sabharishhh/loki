@@ -229,6 +229,7 @@ impl Memory {
     async fn load_touched(&self, report: &Report) -> Vec<(String, super::concept::RawConcept)> {
         let mut paths: Vec<String> = report.decisions.iter().map(|d| d.concept.clone()).collect();
         paths.extend(report.promoted.iter().cloned());
+        paths.extend(report.created.iter().cloned());
         paths.sort_unstable();
         paths.dedup();
 
