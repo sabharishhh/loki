@@ -27,6 +27,8 @@ final class Dictation {
     private(set) var status: Status = .idle
     /// Text so far this utterance, including the volatile tail.
     private(set) var transcript = ""
+    /// Recent input loudness, 0 to 1, oldest first. Drives the waveform.
+    private(set) var levels: [Float] = []
 
     /// Fires the moment speech is detected, before transcription finishes.
     ///
@@ -48,6 +50,7 @@ final class Dictation {
         status = .preparing
         transcript = ""
         finalized = ""
+        levels = []
 
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             status = .denied
@@ -75,7 +78,14 @@ final class Dictation {
 
     private func begin() async throws {
         let locale = Locale.current
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+        // Volatile results are what make the field fill in as you speak. The `.transcription`
+        // preset omits them, so the utterance only appears on release and the app looks dead.
+        let transcriber = SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults],
+            attributeOptions: []
+        )
         let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: .medium),
                                       reportResults: true)
         let modules: [any SpeechModule] = [transcriber, detector]
@@ -167,8 +177,17 @@ final class Dictation {
         guard session.canAddInput(input) else { throw DictationError.noInputDevice }
         session.addInput(input)
 
+        let (levels, levelContinuation) = AsyncStream<Float>.makeStream()
+        tasks.append(Task { [weak self] in
+            for await level in levels { self?.push(level) }
+        })
+
         let output = AVCaptureAudioDataOutput()
-        let pump = AudioPump(target: target, continuation: continuation)
+        let pump = AudioPump(
+            target: target,
+            continuation: continuation,
+            levels: levelContinuation
+        )
         output.setSampleBufferDelegate(pump, queue: pump.queue)
         guard session.canAddOutput(output) else { throw DictationError.noInputDevice }
         session.addOutput(output)
@@ -186,12 +205,23 @@ final class Dictation {
 
     private var pump: AudioPump?
 
+    /// Keeps a short rolling window, which is all a waveform needs.
+    private func push(_ level: Float) {
+        levels.append(level)
+        if levels.count > Self.waveformBars {
+            levels.removeFirst(levels.count - Self.waveformBars)
+        }
+    }
+
+    static let waveformBars = 32
+
     private func teardown() async {
         session?.stopRunning()
         session = nil
         pump = nil
         inputContinuation?.finish()
         inputContinuation = nil
+        levels = []
         await analyzer?.cancelAndFinishNow()
         analyzer = nil
         tasks.forEach { $0.cancel() }
@@ -213,11 +243,17 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     private let target: AVAudioFormat
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
+    private let levels: AsyncStream<Float>.Continuation
     private var converter: AVAudioConverter?
 
-    init(target: AVAudioFormat, continuation: AsyncStream<AnalyzerInput>.Continuation) {
+    init(
+        target: AVAudioFormat,
+        continuation: AsyncStream<AnalyzerInput>.Continuation,
+        levels: AsyncStream<Float>.Continuation
+    ) {
         self.target = target
         self.continuation = continuation
+        self.levels = levels
     }
 
     func captureOutput(
@@ -226,8 +262,22 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         from connection: AVCaptureConnection
     ) {
         guard let source = Self.pcmBuffer(from: sampleBuffer) else { return }
+        levels.yield(Self.loudness(of: source))
         guard let converted = convert(source) else { return }
         continuation.yield(AnalyzerInput(buffer: converted))
+    }
+
+    /// Root mean square of the buffer, scaled so ordinary speech fills most of the range.
+    private static func loudness(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
+        let frames = Int(buffer.frameLength)
+        var sum: Float = 0
+        for i in 0..<frames {
+            sum += channel[i] * channel[i]
+        }
+        let rms = (sum / Float(frames)).squareRoot()
+        // Speech sits well below full scale, so a linear meter barely moves. Compress it.
+        return min(1, (rms * 12).squareRoot())
     }
 
     private func convert(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

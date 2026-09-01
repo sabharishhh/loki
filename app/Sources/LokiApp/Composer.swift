@@ -15,17 +15,32 @@ struct Composer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             HStack(spacing: Theme.Space.m) {
-                Image(systemName: isListening ? "mic.fill" : "mic")
-                    .font(.system(size: 13))
-                    .foregroundStyle(isListening ? Theme.State.reading.color : Theme.Colors.faint)
+                Button(action: toggleTalking) {
+                    Image(systemName: isListening ? "mic.fill" : "mic")
+                        .font(.system(size: 13))
+                        .foregroundStyle(
+                            isListening ? Theme.State.reading.color : Theme.Colors.faint
+                        )
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .help(isListening ? "Stop dictating" : "Dictate. Or hold F")
+                .accessibilityLabel(isListening ? "Stop dictating" : "Start dictating")
 
-                TextField(placeholder, text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Text.body)
-                    .foregroundStyle(Theme.Colors.ink)
-                    .lineLimit(1...6)
-                    .focused($focused)
-                    .onSubmit(submit)
+                if isListening && draft.isEmpty {
+                    // A waveform, not a placeholder. Silence should still look like listening.
+                    Waveform(levels: conversation.dictation.levels)
+                        .frame(height: 18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TextField(placeholder, text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Text.body)
+                        .foregroundStyle(Theme.Colors.ink)
+                        .lineLimit(1...6)
+                        .focused($focused)
+                        .onSubmit(submit)
+                }
 
                 Button(action: primaryAction) {
                     Image(systemName: isRunning ? "stop.fill" : "arrow.up")
@@ -79,7 +94,6 @@ struct Composer: View {
 
     private var placeholder: String {
         switch conversation.composer {
-        case .listening: "Listening"
         case .needsYou: "Waiting on you"
         default: "Ask, or hold F to talk"
         }
@@ -126,9 +140,7 @@ struct Composer: View {
             guard !Task.isCancelled else { return }
             // Take back the character the tap already typed, and keep the rest as a prefix so
             // holding F mid-sentence does not discard what is there.
-            draftBeforeTalk = draft.hasSuffix("f") ? String(draft.dropLast()) : draft
-            draft = draftBeforeTalk
-            conversation.startDictation()
+            startTalking(keeping: draft.hasSuffix("f") ? String(draft.dropLast()) : draft)
         }
     }
 
@@ -136,6 +148,27 @@ struct Composer: View {
         holdTimer?.cancel()
         holdTimer = nil
         guard isListening else { return }
+        stopTalking()
+    }
+
+    /// The mic button. Click to start, click again to stop.
+    ///
+    /// Hold F is faster once you know it, but a button is the only affordance a new user has.
+    private func toggleTalking() {
+        if isListening {
+            stopTalking()
+        } else {
+            startTalking(keeping: draft)
+        }
+    }
+
+    private func startTalking(keeping prefix: String) {
+        draftBeforeTalk = prefix
+        draft = prefix
+        conversation.startDictation()
+    }
+
+    private func stopTalking() {
         Task {
             let text = await conversation.stopDictation()
             draft = (draftBeforeTalk + " " + text).trimmingCharacters(in: .whitespaces)
@@ -167,6 +200,34 @@ struct Composer: View {
         guard !text.isEmpty else { return }
         draft = ""
         conversation.send(text)
+    }
+}
+
+/// Live input level while dictating.
+///
+/// Exists because on-device transcription has a lag before the first words land, and without any
+/// feedback the app looks dead while it is in fact listening.
+struct Waveform: View {
+    let levels: [Float]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(0..<Dictation.waveformBars, id: \.self) { index in
+                Capsule()
+                    .fill(Theme.State.reading.color)
+                    .frame(width: 2, height: height(at: index))
+            }
+        }
+        .animation(.linear(duration: 0.08), value: levels.count)
+        .accessibilityLabel("Listening")
+    }
+
+    /// Bars fill from the right, so the newest sample is nearest the cursor.
+    private func height(at index: Int) -> CGFloat {
+        let offset = Dictation.waveformBars - levels.count
+        guard index >= offset else { return 2 }
+        let level = levels[index - offset]
+        return max(2, CGFloat(level) * 18)
     }
 }
 
