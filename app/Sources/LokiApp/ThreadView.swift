@@ -2,8 +2,9 @@ import SwiftUI
 
 /// The thread.
 ///
-/// No bubbles. The mental model is supervision, not conversation, and a bubble would give the eye
-/// a second vertical spine competing with the rail.
+/// The user's turn sits right in an inverted box and the assistant's runs full measure with no
+/// container. Two sides, one spine: only the instruction is boxed, so the record still reads as
+/// prose rather than as a chat log.
 struct ThreadView: View {
     let conversation: Conversation
 
@@ -42,18 +43,19 @@ private struct TurnView: View {
     var body: some View {
         switch turn.speaker {
         case .user:
-            // Indented behind a rule, reading as a quoted instruction.
-            HStack(alignment: .top, spacing: Theme.Space.m) {
-                Rectangle()
-                    .fill(Theme.Colors.line)
-                    .frame(width: Theme.Size.rail)
-                Text(turn.text)
-                    .font(Theme.Text.body)
-                    .lineSpacing(Theme.Text.bodyLineSpacing)
-                    .foregroundStyle(Theme.Colors.muted)
-                    .textSelection(.enabled)
-            }
-            .fixedSize(horizontal: false, vertical: true)
+            Text(turn.text)
+                .font(Theme.Text.body)
+                .lineSpacing(Theme.Text.bodyLineSpacing)
+                .foregroundStyle(Theme.Colors.onInverted)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, Theme.Space.m)
+                .padding(.vertical, Theme.Space.s)
+                .background(Theme.Colors.inverted, in: .rect(cornerRadius: Theme.Radius.panel))
+                // Short of the measure, so a long instruction still breaks before the edge and
+                // the asymmetry with the assistant's full-width prose stays legible.
+                .frame(maxWidth: Theme.Size.measure * 0.82, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
         case .assistant:
             // Full measure, no container. Prose, because it is prose.

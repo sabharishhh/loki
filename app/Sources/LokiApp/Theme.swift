@@ -14,6 +14,10 @@ enum Theme {
         static let muted = adaptive(light: 0x5A616B, dark: 0x98A0AB)
         static let faint = adaptive(light: 0x8B929C, dark: 0x666E79)
         static let line = adaptive(light: 0xDCE0E5, dark: 0x24282E)
+        /// Canvas inverted, carrying the user's own words. Light box in dark mode and
+        /// dark box in light mode, so the instruction reads as spoken input, not record.
+        static let inverted = adaptive(light: 0x1B1E23, dark: 0xE9EBEF)
+        static let onInverted = adaptive(light: 0xF1F2F4, dark: 0x16181C)
     }
 
     /// The four machine states. Each pairs with a glyph and a word, so colour is never the only cue.
