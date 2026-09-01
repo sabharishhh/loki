@@ -27,13 +27,12 @@ struct Composer: View {
             field
             hints
         }
-        // Capped at the reading measure and left-aligned, matching the thread above it. The
-        // design system caps prose at 68ch and never centres it, so the composer sits under the
-        // text rather than in the middle of the window.
-        .frame(maxWidth: Theme.Size.measure, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Capped at the reading measure and centred in the window. Sabharish's call, overriding
+        // the design system's never-centre rule for the composer.
+        .frame(maxWidth: Theme.Size.measure)
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.l)
+        .frame(maxWidth: .infinity)
         .background(.regularMaterial)
         .onAppear {
             focused = true
