@@ -46,6 +46,17 @@ final class Dictation {
 
     var isListening: Bool { status == .listening }
 
+    /// Whether a recording is underway, including the moment before the first audio arrives.
+    ///
+    /// The control reads this rather than `isListening`. Starting takes a beat, and a second
+    /// click in that window was being swallowed, which left the microphone on with no way off.
+    var isRecording: Bool { status == .preparing || status == .listening }
+
+    /// The most recent levels, for a compact meter.
+    func recentLevels(_ count: Int) -> [Float] {
+        Array(levels.suffix(count))
+    }
+
     /// Begins an utterance. Idempotent.
     ///
     /// A previous failure is not a reason to refuse the next attempt, so `.unavailable` and
