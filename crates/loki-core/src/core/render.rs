@@ -148,6 +148,7 @@ pub fn trace(event: &Event) -> String {
             tokens_in,
             tokens_out,
             cost,
+            ..
         } => format!(
             "ModelCall {provider} role={role:?} locality={locality:?} in={tokens_in} out={tokens_out} cost={}c",
             cost.charge(*tokens_in, *tokens_out).get()

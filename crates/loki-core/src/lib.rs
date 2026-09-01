@@ -9,11 +9,15 @@
 //! - [`adapters`] is Ring 2, free to add. Implementations of ports. Ring 2 never talks to Ring 2.
 //!
 //! The dependency rule runs one way. `adapters` depends on `ports`. `core` depends on `ports`.
-//! Nothing depends on `adapters`.
+//! Nothing depends on `adapters`, which `tests/rings.rs` checks rather than trusting.
 
 pub mod adapters;
 pub mod core;
+pub mod error;
 pub mod ports;
+pub mod runtime;
+
+pub use error::Error;
 
 /// Crate version, surfaced across the bridge so the app can prove the core is linked.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

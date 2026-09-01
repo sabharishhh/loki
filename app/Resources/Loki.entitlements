@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Dictation. Audio never leaves the machine. -->
+    <key>com.apple.security.device.audio-input</key>          <true/>
+    <!-- Talking to the model provider. -->
+    <key>com.apple.security.network.client</key>              <true/>
+    <!-- The memory bundle and the user's own documents, chosen by the user. -->
+    <key>com.apple.security.files.user-selected.read-write</key> <true/>
+</dict>
+</plist>

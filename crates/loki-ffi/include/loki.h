@@ -72,6 +72,10 @@ LokiStatus loki_interrupt(LokiCore *core);
 /* Adds a standing instruction, which compaction can never remove. */
 LokiStatus loki_add_standing(LokiCore *core, const char *text, bool persistent);
 
+/* Spend today and this month, in millionths of a cent. Zero if the ledger is unavailable. */
+uint64_t loki_spend_today(LokiCore *core);
+uint64_t loki_spend_month(LokiCore *core);
+
 /* Phase 4. Returns LOKI_UNSUPPORTED until the tool registry exists. */
 LokiStatus loki_confirm_action(LokiCore *core, uint64_t action, bool approved);
 

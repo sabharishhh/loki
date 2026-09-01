@@ -154,8 +154,10 @@ Hold **F** in the composer to dictate, release to stop. A tap still types `f`; o
 Transcription is on device via `SpeechAnalyzer`. Audio never leaves the Mac and never crosses the
 bridge; the Rust core receives text only. macOS asks for microphone access the first time.
 
-Apple Silicon only. The global `opt+space` hotkey is not built yet, because it needs accessibility
-permission and its own onboarding step.
+Press **opt+space** from any app to bring Loki forward. If another app already owns those keys the
+registration is skipped and the menu bar still works.
+
+Apple Silicon only.
 
 ## Everyday commands
 
@@ -166,6 +168,26 @@ make test       # tests only
 make fmt        # format Rust
 make clean      # remove build output
 ```
+
+## Releasing
+
+`.github/workflows/ci.yml` runs fmt, clippy, tests and a release build on every push, and uploads
+the app as an artifact.
+
+The notarization job runs on `main` and skips itself until these repository secrets exist:
+
+| Secret | What |
+|---|---|
+| `APPLE_CERTIFICATE_P12` | Developer ID Application certificate, base64 encoded |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | For example `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | Apple ID email |
+| `APPLE_TEAM_ID` | Ten character team id |
+| `APPLE_APP_PASSWORD` | App-specific password, not your Apple ID password |
+
+`scripts/notarize.sh` does the same thing locally. Entitlements are in
+`app/Resources/Loki.entitlements`: microphone for dictation, network for the provider, and
+user-selected files.
 
 ## Documentation
 

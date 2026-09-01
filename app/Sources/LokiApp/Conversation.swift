@@ -66,7 +66,8 @@ enum Entry: Identifiable {
 final class Conversation {
     private(set) var entries: [Entry] = []
     private(set) var composer: ComposerState = .idle
-    private(set) var spentCents: UInt64 = 0
+    /// Spend today, in millionths of a cent. Refreshed when a turn ends.
+    private(set) var spentToday: UInt64 = 0
     private(set) var lastError: String?
 
     let dictation = Dictation()
@@ -237,7 +238,7 @@ final class Conversation {
             appendStep(Step(verb: "recall", detail: "\(count) concepts"))
 
         case "budget_warning":
-            if let spent = fields["spent"] as? UInt64 { spentCents = spent }
+            refreshSpend()
 
         case "blocked":
             composer = .needsYou
@@ -251,6 +252,8 @@ final class Conversation {
         case "task_finished":
             composer = .idle
             streaming = nil
+            // Event-driven, not polled. Principle 8 forbids a timer for this.
+            refreshSpend()
             // A blocked event already said why. Only speak up if nothing did.
             if fields["status"] as? String == "failed", lastError == nil {
                 lastError = "That did not work."
@@ -259,6 +262,10 @@ final class Conversation {
         default:
             break
         }
+    }
+
+    private func refreshSpend() {
+        spentToday = core?.spentToday ?? 0
     }
 
     private func markOpenScopesInterrupted() {

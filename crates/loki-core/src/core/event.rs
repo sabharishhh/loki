@@ -48,12 +48,14 @@ pub enum Event {
         ms: u64,
     },
     Searched {
+        task: TaskId,
         query: String,
         provider: String,
         hits: u32,
         cost: CostModel,
     },
     Fetched {
+        task: TaskId,
         url: String,
         hash: ContentHash,
         cost: CostModel,
@@ -74,6 +76,7 @@ pub enum Event {
         concept_id: ConceptId,
     },
     ModelCall {
+        task: TaskId,
         provider: String,
         role: ModelRole,
         locality: Locality,
@@ -107,8 +110,9 @@ pub enum Event {
 impl Event {
     /// The task this event belongs to, where the event names one.
     ///
-    /// Scope and tool events do not carry a task id. The loop knows the task from context, and
-    /// duplicating it on every variant would be noise.
+    /// Every billable event carries it, so cost can be attributed without inferring the task from
+    /// the order events arrived in. Scope and tool events do not: the loop knows the task from
+    /// context and duplicating it everywhere would be noise.
     #[must_use]
     pub const fn task(&self) -> Option<TaskId> {
         match self {
@@ -116,6 +120,9 @@ impl Event {
             | Self::Interrupted { id, .. }
             | Self::Resumed { id, .. }
             | Self::TaskFinished { id, .. } => Some(*id),
+            Self::Searched { task, .. }
+            | Self::Fetched { task, .. }
+            | Self::ModelCall { task, .. } => Some(*task),
             _ => None,
         }
     }
@@ -168,6 +175,7 @@ mod tests {
                 concept_id: ConceptId::new("people/meera.md"),
             },
             Event::ModelCall {
+                task: TaskId::new(0),
                 provider: "anthropic".into(),
                 role: ModelRole::Primary,
                 locality: Locality::Cloud,
@@ -179,6 +187,7 @@ mod tests {
                 },
             },
             Event::Fetched {
+                task: TaskId::new(0),
                 url: "https://example.com".into(),
                 hash: ContentHash::new("deadbeef"),
                 cost: CostModel::Free,
@@ -215,6 +224,7 @@ mod tests {
                 status: TaskStatus::Completed,
             },
             Event::Searched {
+                task: TaskId::new(0),
                 query: "colocation tariff".into(),
                 provider: "rquest".into(),
                 hits: 9,
@@ -245,6 +255,16 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event"], "scope_closed");
         assert_eq!(json["ms"], 12);
+    }
+
+    #[test]
+    fn every_billable_event_names_its_task() {
+        for event in sample().into_iter().filter(Event::is_billable) {
+            assert!(
+                event.task().is_some(),
+                "billable event with no task: {event:?}"
+            );
+        }
     }
 
     #[test]

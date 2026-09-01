@@ -91,6 +91,7 @@ pub struct LokiCore {
     runtime: Runtime,
     core: Arc<AsyncMutex<Loop>>,
     cancel: std::sync::Mutex<CancellationToken>,
+    ledger: Option<Arc<Ledger>>,
 }
 
 const SYSTEM: &str = "You are Loki, a personal assistant that runs on the user's Mac. \
@@ -171,15 +172,15 @@ pub unsafe extern "C" fn loki_core_new(
     // runs, it just does not remember what it spent.
     let (ledger, spent) = Ledger::default_path()
         .and_then(|path| {
-            let ledger = Ledger::open(&path)?;
+            let ledger = Arc::new(Ledger::open(&path)?);
             let spent = ledger.spent_this_month()?;
-            Ok((Some(Arc::new(ledger) as Arc<dyn EventSink>), spent))
+            Ok((Some(ledger), spent))
         })
         .unwrap_or((None, 0));
 
     let mut events = Broadcast::new().with(Arc::clone(&callbacks) as Arc<dyn EventSink>);
-    if let Some(ledger) = ledger {
-        events = events.with(ledger);
+    if let Some(ledger) = &ledger {
+        events = events.with(Arc::clone(ledger) as Arc<dyn EventSink>);
     }
 
     let core = Loop::new(
@@ -194,6 +195,7 @@ pub unsafe extern "C" fn loki_core_new(
         runtime,
         core: Arc::new(AsyncMutex::new(core)),
         cancel: std::sync::Mutex::new(CancellationToken::new()),
+        ledger,
     }))
 }
 
@@ -294,6 +296,41 @@ pub unsafe extern "C" fn loki_add_standing(
         handle.lock().await.add_standing(instruction);
     });
     LokiStatus::Ok
+}
+
+/// Spend today, in millionths of a cent. Returns 0 if the ledger is unavailable.
+///
+/// Micro-cents rather than cents because one call costs a fraction of a cent, and the interface
+/// should be able to show a running figure rather than a long run of zeroes.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_spend_today(core: *mut LokiCore) -> u64 {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return 0;
+    };
+    core.ledger
+        .as_ref()
+        .and_then(|l| l.spent_today().ok())
+        .unwrap_or(0)
+}
+
+/// Spend this calendar month, in millionths of a cent. What the ceiling is measured against.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_spend_month(core: *mut LokiCore) -> u64 {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return 0;
+    };
+    core.ledger
+        .as_ref()
+        .and_then(|l| l.spent_this_month().ok())
+        .unwrap_or(0)
 }
 
 /// Approves or rejects a Tier 3 action. Requires the tool registry, which is Phase 4.
@@ -506,6 +543,15 @@ mod tests {
             assert_eq!(loki_add_standing(core, text.as_ptr(), true), LokiStatus::Ok);
             assert_eq!(loki_interrupt(core), LokiStatus::Ok);
             loki_core_free(core);
+        }
+    }
+
+    #[test]
+    fn spend_queries_are_safe_on_a_null_core() {
+        // SAFETY: null is explicitly allowed and must return zero rather than crash.
+        unsafe {
+            assert_eq!(loki_spend_today(std::ptr::null_mut()), 0);
+            assert_eq!(loki_spend_month(std::ptr::null_mut()), 0);
         }
     }
 

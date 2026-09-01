@@ -37,7 +37,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// menu bar, which is a shortcut back to it, not the way in.
     func applicationDidFinishLaunching(_ notification: Notification) {
         uiTrace("3 didFinishLaunching policy=\(NSApp.activationPolicy().rawValue)")
+
+        // A clash means another app already owns these keys. Not an error: the menu bar and the
+        // window both still work, so carry on and say so in the trace.
+        let claimed = GlobalHotkey.optionSpace.register { [weak self] in self?.openThread() }
+        uiTrace("hotkey opt+space claimed=\(claimed)")
+
         openThread()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        GlobalHotkey.optionSpace.unregister()
     }
 
     /// Reopening from Finder or the Dock shows the thread rather than doing nothing.
@@ -86,11 +96,12 @@ private struct TopBar: View {
                 .kerning(Theme.Text.titleTracking)
                 .foregroundStyle(Theme.Colors.ink)
             Spacer()
-            Text("core \(Core.version)")
+            Text(Money.short(conversation.spentToday) + " today")
                 .font(Theme.Text.meta)
                 .kerning(Theme.Text.metaTracking)
                 .monospacedDigit()
                 .foregroundStyle(Theme.Colors.faint)
+                .help("Spend today. core \(Core.version)")
         }
         // Leave room for the traffic lights, since the titlebar is transparent.
         .padding(.leading, 78)

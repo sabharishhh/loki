@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Build and test
+    # Apple Silicon. The core pins aarch64-apple-darwin and the app targets macOS 26.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.app
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # rust-toolchain.toml pins the version, so this installs exactly that.
+      - name: Rust toolchain
+        run: rustup show
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the app
+        run: ./scripts/build-app.sh release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Loki.app
+          path: build/Loki.app
+
+  notarize:
+    name: Sign and notarize
+    needs: check
+    runs-on: macos-15
+    # Only on main, and only once the signing secrets exist. Until then this skips rather than
+    # failing every run, so the pipeline is in place before the certificates are.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Are the signing secrets present?
+        id: secrets
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Signing secrets not set. See readMe.md for the list. Skipping."
+          fi
+
+      - name: Select Xcode
+        if: steps.secrets.outputs.ready == 'true'
+        run: sudo xcode-select -switch /Applications/Xcode_26.app
+
+      - name: Import the signing certificate
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          PASSWORD="$(uuidgen)"
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build
+        if: steps.secrets.outputs.ready == 'true'
+        run: ./scripts/build-app.sh release
+
+      - name: Sign, notarize and staple
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./scripts/notarize.sh build/Loki.app
+
+      - uses: actions/upload-artifact@v4
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          name: Loki-notarized.app
+          path: build/Loki.app

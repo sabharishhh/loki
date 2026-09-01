@@ -138,6 +138,12 @@ public final class Core: Sendable {
         if let error = CoreError(loki_interrupt(handle)) { throw error }
     }
 
+    /// Spend today, in millionths of a cent. Zero if the ledger is unavailable.
+    public var spentToday: UInt64 { loki_spend_today(handle) }
+
+    /// Spend this calendar month, in millionths of a cent.
+    public var spentThisMonth: UInt64 { loki_spend_month(handle) }
+
     /// Adds an instruction that compaction can never remove.
     public func addStanding(_ text: String, persistent: Bool = false) throws {
         let status = text.withCString { loki_add_standing(handle, $0, persistent) }

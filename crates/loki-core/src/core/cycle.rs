@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::budget::{Budget, Verdict};
 use super::checkpoint::Checkpoint;
 use super::event::Event;
-use super::ids::IdGen;
+use super::ids::{IdGen, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
@@ -191,7 +191,7 @@ impl Loop {
         };
 
         self.close_scope(scope, started);
-        self.record_spend(&outcome.usage);
+        self.record_spend(task, &outcome.usage);
 
         if !outcome.text.is_empty() {
             self.turn.push(Message::assistant(&outcome.text));
@@ -270,7 +270,7 @@ impl Loop {
         });
     }
 
-    fn record_spend(&mut self, usage: &Usage) {
+    fn record_spend(&mut self, task: TaskId, usage: &Usage) {
         let caps = self.provider.caps();
         self.budget.record_micros(
             caps.cost
@@ -278,6 +278,7 @@ impl Loop {
         );
 
         self.events.emit(&Event::ModelCall {
+            task,
             provider: self.provider.id().to_owned(),
             role: ModelRole::Primary,
             locality: caps.locality,

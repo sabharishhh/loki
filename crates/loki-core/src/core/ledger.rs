@@ -86,11 +86,6 @@ CREATE INDEX IF NOT EXISTS spend_task ON spend(task);
 /// Append-only spend history.
 pub struct Ledger {
     conn: Mutex<Connection>,
-    /// The task events are currently attributed to.
-    ///
-    /// `ModelCall` carries no task id, so the task is tracked from the surrounding
-    /// `TaskStarted` and `TaskFinished`. Correct because the loop runs one task at a time.
-    current: Mutex<Option<TaskId>>,
 }
 
 impl Ledger {
@@ -129,7 +124,6 @@ impl Ledger {
         conn.execute_batch(SCHEMA).map_err(LedgerError::Open)?;
         Ok(Self {
             conn: Mutex::new(conn),
-            current: Mutex::new(None),
         })
     }
 
@@ -196,6 +190,24 @@ impl Ledger {
         .map_err(LedgerError::Read)
     }
 
+    /// Spend so far today, local time.
+    ///
+    /// # Errors
+    /// Fails if the query fails.
+    ///
+    /// # Panics
+    /// If another thread panicked while holding the connection.
+    pub fn spent_today(&self) -> Result<u64, LedgerError> {
+        let conn = self.conn.lock().expect("ledger poisoned");
+        conn.query_row(
+            "SELECT COALESCE(SUM(micro_cents), 0) FROM spend
+             WHERE date(at, 'unixepoch', 'localtime') = date('now', 'localtime')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(LedgerError::Read)
+    }
+
     /// Daily totals, most recent first.
     ///
     /// # Errors
@@ -238,28 +250,13 @@ impl Ledger {
         )
         .map_err(LedgerError::Read)
     }
-
-    fn task(&self) -> Option<TaskId> {
-        *self.current.lock().expect("ledger poisoned")
-    }
-
-    fn set_task(&self, task: Option<TaskId>) {
-        *self.current.lock().expect("ledger poisoned") = task;
-    }
 }
 
 impl EventSink for Ledger {
     fn emit(&self, event: &Event) {
         let entry = match event {
-            Event::TaskStarted { id, .. } => {
-                self.set_task(Some(*id));
-                return;
-            }
-            Event::TaskFinished { .. } => {
-                self.set_task(None);
-                return;
-            }
             Event::ModelCall {
+                task,
                 provider,
                 role,
                 tokens_in,
@@ -268,7 +265,7 @@ impl EventSink for Ledger {
                 ..
             } => Entry {
                 at: now(),
-                task: self.task(),
+                task: Some(*task),
                 kind: Kind::Model,
                 provider: provider.clone(),
                 role: Some(*role),
@@ -276,9 +273,14 @@ impl EventSink for Ledger {
                 tokens_out: *tokens_out,
                 micro_cents: cost.charge_micros(*tokens_in, *tokens_out),
             },
-            Event::Searched { provider, cost, .. } => Entry {
+            Event::Searched {
+                task,
+                provider,
+                cost,
+                ..
+            } => Entry {
                 at: now(),
-                task: self.task(),
+                task: Some(*task),
                 kind: Kind::Search,
                 provider: provider.clone(),
                 role: None,
@@ -286,9 +288,9 @@ impl EventSink for Ledger {
                 tokens_out: 0,
                 micro_cents: flat(*cost),
             },
-            Event::Fetched { cost, .. } => Entry {
+            Event::Fetched { task, cost, .. } => Entry {
                 at: now(),
-                task: self.task(),
+                task: Some(*task),
                 kind: Kind::Fetch,
                 provider: "ladder".to_owned(),
                 role: None,
@@ -342,6 +344,7 @@ mod tests {
 
     fn model_call() -> Event {
         Event::ModelCall {
+            task: TaskId::new(7),
             provider: "openai".into(),
             role: ModelRole::Primary,
             locality: Locality::Cloud,
@@ -368,6 +371,7 @@ mod tests {
         let ledger = Ledger::in_memory().unwrap();
         for _ in 0..1000 {
             ledger.emit(&Event::ModelCall {
+                task: TaskId::new(1),
                 provider: "openai".into(),
                 role: ModelRole::Utility,
                 locality: Locality::Cloud,
@@ -381,28 +385,44 @@ mod tests {
     }
 
     #[test]
-    fn spend_is_attributed_to_the_surrounding_task() {
+    fn spend_is_attributed_to_the_task_the_event_names() {
         let ledger = Ledger::in_memory().unwrap();
-        ledger.emit(&Event::TaskStarted {
-            id: TaskId::new(7),
-            summary: String::new(),
-        });
         ledger.emit(&model_call());
-        ledger.emit(&Event::TaskFinished {
-            id: TaskId::new(7),
-            status: TaskStatus::Completed,
-        });
-
         assert_eq!(ledger.by_task(TaskId::new(7)).unwrap(), 5_200_000);
         assert_eq!(ledger.by_task(TaskId::new(8)).unwrap(), 0);
     }
 
+    /// Interleaved tasks must not cross-attribute. This is what reading the id off the event
+    /// buys over inferring it from the order events arrive in.
     #[test]
-    fn spend_outside_a_task_is_still_recorded() {
+    fn overlapping_tasks_keep_their_own_costs() {
         let ledger = Ledger::in_memory().unwrap();
-        ledger.emit(&model_call());
-        assert_eq!(ledger.spent_since(0).unwrap(), 5_200_000);
-        assert_eq!(ledger.by_task(TaskId::new(0)).unwrap(), 0);
+        let call = |task: u64| Event::ModelCall {
+            task: TaskId::new(task),
+            provider: "openai".into(),
+            role: ModelRole::Primary,
+            locality: Locality::Cloud,
+            tokens_in: 1_000_000,
+            tokens_out: 0,
+            cost: terra(),
+        };
+        ledger.emit(&Event::TaskStarted {
+            id: TaskId::new(1),
+            summary: String::new(),
+        });
+        ledger.emit(&Event::TaskStarted {
+            id: TaskId::new(2),
+            summary: String::new(),
+        });
+        ledger.emit(&call(1));
+        ledger.emit(&call(2));
+        ledger.emit(&Event::TaskFinished {
+            id: TaskId::new(1),
+            status: TaskStatus::Completed,
+        });
+
+        assert_eq!(ledger.by_task(TaskId::new(1)).unwrap(), 400_000_000);
+        assert_eq!(ledger.by_task(TaskId::new(2)).unwrap(), 400_000_000);
     }
 
     #[test]
@@ -420,6 +440,7 @@ mod tests {
         let ledger = Ledger::in_memory().unwrap();
         ledger.emit(&model_call());
         assert_eq!(ledger.spent_this_month().unwrap(), 5_200_000);
+        assert_eq!(ledger.spent_today().unwrap(), 5_200_000);
 
         let days = ledger.by_day(30).unwrap();
         assert_eq!(days.len(), 1);
