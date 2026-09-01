@@ -42,7 +42,6 @@ final class Dictation {
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var tasks: [Task<Void, Never>] = []
-    private var finalized = ""
 
     var isListening: Bool { status == .listening }
 
@@ -65,7 +64,6 @@ final class Dictation {
         guard canStart else { return }
         status = .preparing
         transcript = ""
-        finalized = ""
         levels = []
 
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
@@ -155,12 +153,15 @@ final class Dictation {
 
     private func begin() async throws {
         let locale = Locale.current
-        // Volatile results are what make the field fill in as you speak. The `.transcription`
-        // preset omits them, so the utterance only appears on release and the app looks dead.
-        let transcriber = SpeechTranscriber(
+        // `DictationTranscriber`, not `SpeechTranscriber`. The latter is long-form and emits
+        // nothing for the first four seconds, so a prompt-length utterance finishes before any
+        // text arrives. Measured on a 1.6s clip: first partial at 0.86s here, 1.80s there, which
+        // is after the audio has already ended.
+        let transcriber = DictationTranscriber(
             locale: locale,
-            transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
+            contentHints: [.shortForm],
+            transcriptionOptions: [.punctuation],
+            reportingOptions: [.volatileResults, .frequentFinalization],
             attributeOptions: []
         )
         let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: .medium),
@@ -201,17 +202,13 @@ final class Dictation {
 
     /// Bridges the transcriber's throwing sequence into a plain stream of text.
     private func transcriberResults(
-        _ transcriber: SpeechTranscriber
+        _ transcriber: DictationTranscriber
     ) -> AsyncStream<(String, Bool)> {
         AsyncStream { continuation in
             Task {
                 do {
                     for try await result in transcriber.results {
-                        let text = String(result.text.characters)
-                        // A volatile result is revised as more audio arrives. Only a finalized
-                        // one is appended, otherwise the draft would stutter.
-                        let isFinal = result.resultsFinalizationTime >= result.range.end
-                        continuation.yield((text, isFinal))
+                        continuation.yield((String(result.text.characters), result.isFinal))
                     }
                 } catch {}
                 continuation.finish()
@@ -232,13 +229,11 @@ final class Dictation {
         }
     }
 
+    /// Every result, volatile or final, carries the whole utterance so far, so this replaces
+    /// rather than appends. Verified on an 18s utterance: one final, 265 characters, the lot.
     private func absorb(_ result: (text: String, isFinal: Bool)) {
-        if result.isFinal {
-            finalized += result.text
-            transcript = finalized
-        } else {
-            transcript = finalized + result.text
-        }
+        uiTrace("dictation absorb final=\(result.isFinal) chars=\(result.text.count)")
+        transcript = result.text
     }
 
     private func startCapture(
