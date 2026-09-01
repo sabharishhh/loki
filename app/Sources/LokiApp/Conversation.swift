@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import LokiCore
 import Observation
 
@@ -69,6 +70,13 @@ final class Conversation {
     /// Spend today, in millionths of a cent. Refreshed when a turn ends.
     private(set) var spentToday: UInt64 = 0
     private(set) var lastError: String?
+    /// What memory put in play for the last turn, for the rail.
+    private(set) var recalled: [RecalledClaim] = []
+    /// Up to three lines at session close, and nothing when nothing happened (§17.4).
+    private(set) var summary: [String] = []
+
+    /// The per-turn cap the rail counts against. Mirrors `RECALL_CAP` in the core.
+    static let recallCap = 5
 
     let dictation = Dictation()
 
@@ -112,6 +120,38 @@ final class Conversation {
     }
 
     var isReady: Bool { core != nil }
+
+    /// Past sessions, newest first, for the sidebar.
+    func sessions() -> [String] {
+        core?.sessions() ?? []
+    }
+
+    /// The memory timeline, newest first.
+    func timeline() -> [String] {
+        core?.timeline() ?? []
+    }
+
+    /// Marks a recalled claim wrong, and drops it from the rail so the tap has a visible effect.
+    ///
+    /// Nothing is deleted. Confidence collapses and the claim is flagged, which is recoverable if
+    /// the click was a mistake.
+    func markNotTrue(_ claim: RecalledClaim) {
+        guard !claim.fromSession else { return }
+        try? core?.notTrue(path: claim.path, ordinal: claim.ordinal)
+        withAnimation(Theme.Motion.standard) {
+            recalled.removeAll { $0.id == claim.id }
+        }
+    }
+
+    /// Consolidates the session and shows the summary, if there is one worth showing.
+    ///
+    /// Silence when nothing happened: a card that says "learned nothing today" teaches people to
+    /// ignore the card.
+    func endSession() async {
+        guard let core else { return }
+        let lines = await Task.detached { core.endSession() }.value
+        withAnimation(Theme.Motion.standard) { summary = lines }
+    }
 
     /// Speaking during a task is an interrupt.
     ///
@@ -254,6 +294,7 @@ final class Conversation {
             streaming = nil
             // Event-driven, not polled. Principle 8 forbids a timer for this.
             refreshSpend()
+            refreshRecalled()
             // A blocked event already said why. Only speak up if nothing did.
             if fields["status"] as? String == "failed", lastError == nil {
                 lastError = "That did not work."
@@ -266,6 +307,15 @@ final class Conversation {
 
     private func refreshSpend() {
         spentToday = core?.spentToday ?? 0
+    }
+
+    /// Reads what pre-fetch used on the turn that just finished.
+    ///
+    /// Read after the turn rather than before it, because the rail's job is to show what the
+    /// answer was actually built from, not what was on offer.
+    private func refreshRecalled() {
+        let found = core?.recalled ?? []
+        withAnimation(Theme.Motion.standard) { recalled = found }
     }
 
     private func markOpenScopesInterrupted() {

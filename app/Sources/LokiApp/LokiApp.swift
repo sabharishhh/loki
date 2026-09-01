@@ -74,39 +74,7 @@ struct ThreadWindow: View {
     let conversation: Conversation
 
     var body: some View {
-        VStack(spacing: 0) {
-            TopBar(conversation: conversation)
-            Divider().overlay(Theme.Colors.line)
-            ThreadView(conversation: conversation)
-            Composer(conversation: conversation)
-        }
-        .background(Theme.Colors.canvas)
-        .frame(minWidth: 620, minHeight: 420)
-        .task { conversation.observe() }
+        Shell(conversation: conversation)
     }
 }
 
-private struct TopBar: View {
-    let conversation: Conversation
-
-    var body: some View {
-        HStack(spacing: Theme.Space.m) {
-            Text("Loki")
-                .font(Theme.Text.title)
-                .kerning(Theme.Text.titleTracking)
-                .foregroundStyle(Theme.Colors.ink)
-            Spacer()
-            Text(Money.short(conversation.spentToday) + " today")
-                .font(Theme.Text.meta)
-                .kerning(Theme.Text.metaTracking)
-                .monospacedDigit()
-                .foregroundStyle(Theme.Colors.faint)
-                .help("Spend today. core \(Core.version)")
-        }
-        // Leave room for the traffic lights, since the titlebar is transparent.
-        .padding(.leading, 78)
-        .padding(.trailing, Theme.Space.l)
-        .padding(.vertical, Theme.Space.m)
-        .background(.regularMaterial)
-    }
-}

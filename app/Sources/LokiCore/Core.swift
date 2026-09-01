@@ -149,6 +149,55 @@ public final class Core: Sendable {
         let status = text.withCString { loki_add_standing(handle, $0, persistent) }
         if let error = CoreError(status) { throw error }
     }
+
+    /// What memory contributed to the last turn. Empty when it contributed nothing.
+    public var recalled: [RecalledClaim] {
+        decode(loki_recalled(handle)) ?? []
+    }
+
+    /// The memory timeline, newest first.
+    public func timeline(limit: Int = 200) -> [String] {
+        decode(loki_timeline(handle, UInt32(limit))) ?? []
+    }
+
+    /// Past sessions, newest first.
+    public func sessions(limit: Int = 60) -> [String] {
+        decode(loki_sessions(handle, UInt32(limit))) ?? []
+    }
+
+    /// Marks a recalled claim wrong. Drops its confidence; deletes nothing.
+    public func notTrue(path: String, ordinal: UInt32) throws {
+        let status = path.withCString { loki_not_true(handle, $0, ordinal) }
+        if let error = CoreError(status) { throw error }
+    }
+
+    /// Consolidates the session and returns up to three summary lines.
+    ///
+    /// Empty when nothing was learned, which is the design rather than a failure.
+    public func endSession() -> [String] {
+        decode(loki_end_session(handle)) ?? []
+    }
+
+    /// Decodes a JSON string the core allocated, and frees it either way.
+    private func decode<T: Decodable>(_ pointer: UnsafeMutablePointer<CChar>?) -> T? {
+        guard let pointer else { return nil }
+        defer { loki_string_free(pointer) }
+        guard let data = String(cString: pointer).data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+/// One claim pre-fetch surfaced for a turn.
+public struct RecalledClaim: Decodable, Sendable, Identifiable, Equatable {
+    public let path: String
+    public let name: String
+    public let text: String
+    public let ordinal: UInt32
+    public let score: Double
+    /// Whether it came from earlier in this same conversation rather than from stored memory.
+    public let fromSession: Bool
+
+    public var id: String { "\(path)#\(ordinal)" }
 }
 
 /// Continuations reachable from the C callbacks.

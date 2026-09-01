@@ -22,6 +22,10 @@ struct ThreadView: View {
                     if let error = conversation.lastError {
                         ErrorRow(message: error)
                     }
+
+                    if !conversation.summary.isEmpty {
+                        SessionSummary(lines: conversation.summary)
+                    }
                 }
                 // Capped at the measure, padded, then centred, in that order. The same three
                 // steps the composer takes, so the column's edges line up with the field's and
@@ -92,5 +96,47 @@ private struct ErrorRow: View {
         .padding(Theme.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.State.needsYou.tint, in: .rect(cornerRadius: Theme.Radius.control))
+    }
+}
+
+/// What was learned this session (§17.4).
+///
+/// Inline at the end of the thread, not a modal. Up to three lines, and it never appears at all
+/// when nothing happened: a card that says "learned nothing today" teaches people to ignore the
+/// card, which costs the differentiator its only daily showing.
+struct SessionSummary: View {
+    let lines: [String]
+
+    @State private var shown = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            Text("Learned today")
+                .font(Theme.Text.micro)
+                .kerning(Theme.Text.microTracking)
+                .foregroundStyle(Theme.Colors.faint)
+
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(Theme.Text.body)
+                    .lineSpacing(Theme.Text.bodyLineSpacing)
+                    .foregroundStyle(Theme.Colors.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(Theme.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.panel))
+        .overlay(alignment: .leading) {
+            // The same rail the thread uses, so the card reads as part of the record rather than
+            // as a notification arriving on top of it.
+            Rectangle()
+                .fill(Theme.Colors.line)
+                .frame(width: Theme.Size.rail)
+        }
+        .clipShape(.rect(cornerRadius: Theme.Radius.panel))
+        .opacity(shown ? 1 : 0)
+        .offset(y: shown ? 0 : 8)
+        .onAppear { withAnimation(Theme.Motion.panel) { shown = true } }
     }
 }
