@@ -10,6 +10,7 @@ struct LokiApp: App {
 
     var body: some Scene {
         MenuBarExtra {
+            let _ = uiTrace("2 MenuBarExtra content built")
             MenuBarView(conversation: delegate.conversation, onOpen: delegate.openThread)
         } label: {
             Image(systemName: "square.fill")
@@ -27,11 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let conversation = Conversation()
     private var thread: ThreadWindowController?
 
+    override init() {
+        super.init()
+        uiTrace("1 AppDelegate.init")
+    }
+
+    /// The thread is the product. It opens on launch rather than waiting to be found in the
+    /// menu bar, which is a shortcut back to it, not the way in.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Handy while developing: skip the menu bar click on every run.
-        if ProcessInfo.processInfo.environment["LOKI_OPEN_AT_LAUNCH"] != nil {
-            openThread()
-        }
+        uiTrace("3 didFinishLaunching policy=\(NSApp.activationPolicy().rawValue)")
+        openThread()
     }
 
     /// Reopening from Finder or the Dock shows the thread rather than doing nothing.
@@ -47,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func openThread() {
+        uiTrace("5 AppDelegate.openThread")
         let thread = thread ?? ThreadWindowController(conversation: conversation)
         self.thread = thread
         thread.show()

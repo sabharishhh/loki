@@ -72,8 +72,24 @@ Set `LOKI_TRACE=1` to see every event instead of the plain view.
 make run
 ```
 
-Builds `Loki.app` and launches it with your shell's environment, so the key comes through.
-Look for the small square in the menu bar, then **Open Loki**.
+Builds `Loki.app` and launches it with your shell's environment, so the key comes through. The
+thread window opens straight away. The square in the menu bar is a shortcut back to it.
+
+**Keep the key on the same line as the command.** A newline turns it into a shell variable that is
+never exported, and the app starts with no key:
+
+```bash
+# wrong: the app never sees the key
+OPENAI_API_KEY=sk-...
+LOKI_PROVIDER=openai ./build/Loki.app/Contents/MacOS/Loki
+
+# right
+OPENAI_API_KEY=sk-... LOKI_PROVIDER=openai ./build/Loki.app/Contents/MacOS/Loki
+
+# or export it once
+export OPENAI_API_KEY=sk-...
+make run
+```
 
 Note that double-clicking `Loki.app` in Finder will not work yet: a Finder launch inherits no
 shell environment, so the app starts with no key and says so. Launch it from a terminal, or use
@@ -124,8 +140,6 @@ expected. It is a compiled bundle, not source, and Xcode cannot display it. Noth
 **Xcode does not know about Cargo.** If you change Rust code, run `make core` (or
 `cargo build -p loki-ffi`) before hitting `Cmd-R`, otherwise Xcode links the previous build.
 
-Set `LOKI_OPEN_AT_LAUNCH=1` in the scheme to skip the menu bar click and get the thread window on
-every run.
 
 Running from Xcode gives you the real menu bar behaviour with no Dock icon, because
 `app/Resources/Info.plist` is embedded into the executable at link time. `Cmd-R` and
@@ -156,3 +170,4 @@ make clean      # remove build output
 
 `docs/` is the source of truth for the architecture and is not tracked here.
 `.agent/` holds the working plan and decision log, also untracked.
+

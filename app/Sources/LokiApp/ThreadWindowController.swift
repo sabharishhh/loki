@@ -24,7 +24,11 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
     /// the menu bar popover, and that panel is still dismissing when the action fires. Ordering a
     /// window in underneath a closing panel loses the race.
     func show() {
-        DispatchQueue.main.async { [self] in present() }
+        uiTrace("6 show, hopping to next runloop")
+        DispatchQueue.main.async { [self] in
+            uiTrace("7 present on next runloop")
+            present()
+        }
     }
 
     private func present() {
@@ -63,6 +67,11 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        uiTrace(
+            "8 revealed visible=\(window.isVisible) key=\(window.isKeyWindow) "
+                + "frame=\(window.frame) screens=\(NSScreen.screens.count) "
+                + "active=\(NSApp.isActive)"
+        )
     }
 
     /// Closing hides the window. The conversation outlives it, so reopening resumes the thread.

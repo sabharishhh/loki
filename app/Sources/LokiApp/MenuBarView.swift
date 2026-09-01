@@ -23,7 +23,10 @@ struct MenuBarView: View {
 
             Divider().overlay(Theme.Colors.line)
 
-            Button("Open Loki", action: onOpen)
+            Button("Open Loki") {
+                uiTrace("4 Open Loki button fired")
+                onOpen()
+            }
                 .buttonStyle(.borderless)
                 .font(Theme.Text.body)
 

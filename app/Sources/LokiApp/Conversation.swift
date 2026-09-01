@@ -87,11 +87,15 @@ final class Conversation {
         switch environment["LOKI_PROVIDER"]?.lowercased() {
         case "openai":
             core = openai.flatMap { try? Core(provider: .openai, apiKey: $0, model: model) }
-            if core == nil { lastError = "LOKI_PROVIDER is openai but OPENAI_API_KEY is not set." }
+            if core == nil {
+                lastError = "LOKI_PROVIDER is openai but OPENAI_API_KEY is not set. "
+                    + "In a terminal it must be on the same line as the command, or exported."
+            }
         case "anthropic":
             core = anthropic.flatMap { try? Core(provider: .anthropic, apiKey: $0, model: model) }
             if core == nil {
-                lastError = "LOKI_PROVIDER is anthropic but ANTHROPIC_API_KEY is not set."
+                lastError = "LOKI_PROVIDER is anthropic but ANTHROPIC_API_KEY is not set. "
+                    + "In a terminal it must be on the same line as the command, or exported."
             }
         default:
             // No preference stated. Whichever key exists, Anthropic first.
