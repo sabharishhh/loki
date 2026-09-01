@@ -101,9 +101,9 @@ enum Theme {
         static let control: CGFloat = 6
         static let panel: CGFloat = 10
         static let window: CGFloat = 14
-        /// The user's turn. Rounder than a panel, because a short instruction should read as one
-        /// object rather than as a boxed paragraph.
-        static let bubble: CGFloat = 18
+        /// The user's turn. The same 14px step as the window rather than a fourth value, so the
+        /// radius lock stays a three-value scale and the box stops short of being a pill.
+        static let bubble: CGFloat = 14
     }
 
     enum Size {
