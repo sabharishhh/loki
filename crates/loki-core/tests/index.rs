@@ -188,6 +188,7 @@ async fn drafts_are_searchable_but_never_prompt_eligible() {
             scope: TierScope::normal(Locality::Cloud),
             visibility: Visibility::Everything,
             today: TODAY,
+            session: None,
         })
         .expect("recall");
     assert!(
@@ -217,6 +218,7 @@ async fn private_claims_need_a_scope_that_asks_for_them() {
             scope: TierScope::including_private(Locality::Cloud),
             visibility: Visibility::PromptEligible,
             today: TODAY,
+            session: None,
         })
         .expect("recall");
     assert!(
@@ -241,6 +243,7 @@ async fn link_distance_breaks_a_tie_between_equal_matches() {
             scope: TierScope::normal(Locality::Cloud),
             visibility: Visibility::PromptEligible,
             today: TODAY,
+            session: None,
         })
         .expect("recall");
 

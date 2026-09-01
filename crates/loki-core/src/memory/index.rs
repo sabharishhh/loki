@@ -22,7 +22,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -100,6 +100,19 @@ pub struct Query<'a> {
     pub scope: TierScope,
     pub visibility: Visibility,
     pub today: Date,
+    /// The session in progress, if its own turns should be searched too (D-043).
+    pub session: Option<Session<'a>>,
+}
+
+/// Which turns of the live session recall may see.
+///
+/// Only what has left the window. Turns still in the prompt are already there, so retrieving them
+/// is waste and it breaks the §8.1 cache the frozen prefix exists to protect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Session<'a> {
+    pub id: &'a str,
+    /// The first ordinal still inside the live window. Turns below it are eligible.
+    pub window_starts_at: u32,
 }
 
 impl<'a> Query<'a> {
@@ -113,7 +126,15 @@ impl<'a> Query<'a> {
             scope,
             visibility: Visibility::PromptEligible,
             today,
+            session: None,
         }
+    }
+
+    /// Also searches the live session's turns that have fallen out of the window.
+    #[must_use]
+    pub const fn spanning(mut self, session: Session<'a>) -> Self {
+        self.session = Some(session);
+        self
     }
 }
 
@@ -131,9 +152,22 @@ impl Score {
     }
 }
 
+/// Where a recalled line came from.
+///
+/// One union, two origins (D-043). The user never sees the difference, but the caller does: only
+/// a claim has a file to record a use against, and only a claim can be corrected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A consolidated claim, from any session.
+    Claim,
+    /// A raw turn from the session in progress, not yet consolidated.
+    Session,
+}
+
 /// One retrieved claim, with everything a caller needs to cite it or record its use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recalled {
+    pub origin: Origin,
     pub path: String,
     pub name: String,
     pub heading: String,
@@ -188,6 +222,67 @@ pub struct Candidate {
     pub path: String,
     pub name: String,
     pub why: Blocking,
+}
+
+/// Adds matching turns from the live session to the results.
+///
+/// Scored on keyword coverage alone. A turn has no usage count, no links, and its recency is the
+/// conversation's own order rather than a date, so the other three signals have nothing to say.
+fn recall_turns(
+    db: &Connection,
+    query: &Query<'_>,
+    session: Session<'_>,
+    query_terms: &[String],
+    out: &mut Vec<Recalled>,
+) -> Result<(), IndexError> {
+    let candidates = TURNS_FTS
+        .search(db, query.text, query.limit.saturating_mul(4).max(32))
+        .map_err(IndexError::Read)?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = db
+        .prepare("SELECT session, ordinal, speaker, text FROM turn WHERE id = ?1")
+        .map_err(IndexError::Read)?;
+
+    for (rowid, bm25) in candidates {
+        let row = stmt
+            .query_row(params![rowid], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u32>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .optional()
+            .map_err(IndexError::Read)?;
+        let Some((id, ordinal, speaker, text)) = row else {
+            continue;
+        };
+        if id != session.id || ordinal >= session.window_starts_at {
+            continue;
+        }
+        // Same keyword signal as a claim, and only that signal, so the two are comparable where
+        // they overlap without a turn borrowing standing it has not earned.
+        #[allow(clippy::cast_possible_truncation)]
+        let strength = 1.0 - (bm25 as f32 / KEYWORD_SCALE).exp().min(1.0);
+        let covered = coverage(query_terms, &text, &speaker);
+        let keyword = W_COVERAGE * covered.clamp(0.0, 1.0) + W_BM25 * strength;
+        out.push(Recalled {
+            origin: Origin::Session,
+            path: format!("{id}#{ordinal}"),
+            name: speaker,
+            heading: String::new(),
+            ordinal,
+            text,
+            status: Status::Stable,
+            privacy: Privacy::Normal,
+            score: Score((W_KEYWORD * keyword).clamp(0.0, 1.0)),
+        });
+    }
+    Ok(())
 }
 
 /// Keeps the strongest reason a candidate was surfaced, since one entity can match several ways.
@@ -282,6 +377,9 @@ impl Corpus {
 }
 
 const CLAIMS_FTS: Corpus = Corpus::new("claim_fts");
+/// The live session's turns. A second corpus rather than a second index, so recall reads one
+/// union and the caller never has to know which side answered (D-043).
+const TURNS_FTS: Corpus = Corpus::new("turn_fts");
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -297,6 +395,14 @@ CREATE TABLE IF NOT EXISTS concept (
     stale_after INTEGER,
     mtime       INTEGER NOT NULL,
     len         INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS turn (
+    id       INTEGER PRIMARY KEY,
+    session  TEXT    NOT NULL,
+    ordinal  INTEGER NOT NULL,
+    speaker  TEXT    NOT NULL,
+    text     TEXT    NOT NULL,
+    UNIQUE(session, ordinal)
 );
 CREATE TABLE IF NOT EXISTS claim (
     id          INTEGER PRIMARY KEY,
@@ -394,6 +500,7 @@ impl Index {
         }
         db.execute_batch(SCHEMA).map_err(IndexError::Open)?;
         CLAIMS_FTS.create(db).map_err(IndexError::Open)?;
+        TURNS_FTS.create(db).map_err(IndexError::Open)?;
         db.execute(
             "INSERT INTO meta(key, value) VALUES ('schema', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -508,9 +615,6 @@ impl Index {
         let candidates = CLAIMS_FTS
             .search(&db, query.text, query.limit.saturating_mul(8).max(64))
             .map_err(IndexError::Read)?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
 
         let distances = link_distances(&db, query.context)?;
         let query_terms = terms(query.text);
@@ -564,6 +668,7 @@ impl Index {
             let covered = coverage(&query_terms, &row.text, &row.name);
             let score = combine(bm25, covered, today - row.learned, row.uses, hops);
             out.push(Recalled {
+                origin: Origin::Claim,
                 path: row.path,
                 name: row.name,
                 heading: row.heading,
@@ -578,13 +683,91 @@ impl Index {
             }
         }
 
+        if let Some(session) = query.session {
+            recall_turns(&db, query, session, &query_terms, &mut out)?;
+        }
+
         out.sort_by(|a, b| {
             b.score
                 .0
                 .total_cmp(&a.score.0)
                 .then_with(|| a.path.cmp(&b.path))
         });
+        out.truncate(query.limit);
         Ok(out)
+    }
+
+    /// Records a turn of the session in progress, so it is retrievable before consolidation runs.
+    ///
+    /// An FTS insert, no model call. §8.1 says memory writes apply to the next session, which
+    /// leaves a long session unable to recall its own beginning; this is what closes that
+    /// (D-043). Re-recording the same ordinal replaces it rather than duplicating.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be written.
+    pub fn record_turn(
+        &self,
+        session: &str,
+        ordinal: u32,
+        speaker: &str,
+        text: &str,
+    ) -> Result<(), IndexError> {
+        let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let tx = db.transaction().map_err(IndexError::Write)?;
+        {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM turn WHERE session = ?1 AND ordinal = ?2",
+                    params![session, ordinal],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(IndexError::Read)?;
+            if let Some(id) = existing {
+                TURNS_FTS.remove(&tx, id).map_err(IndexError::Write)?;
+                tx.execute("DELETE FROM turn WHERE id = ?1", params![id])
+                    .map_err(IndexError::Write)?;
+            }
+            tx.execute(
+                "INSERT INTO turn(session, ordinal, speaker, text) VALUES (?1, ?2, ?3, ?4)",
+                params![session, ordinal, speaker, text],
+            )
+            .map_err(IndexError::Write)?;
+            let id = tx.last_insert_rowid();
+            TURNS_FTS
+                .put(&tx, id, speaker, text)
+                .map_err(IndexError::Write)?;
+        }
+        tx.commit().map_err(IndexError::Write)
+    }
+
+    /// Drops a session's turns once it has been consolidated into claims.
+    ///
+    /// The claims are the durable record from then on, and §9.2 keeps raw past turns out of the
+    /// automatic corpus (D-045). Deliberate `mem_grep` still reaches the episode file.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be written.
+    pub fn forget_session(&self, session: &str) -> Result<(), IndexError> {
+        let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let tx = db.transaction().map_err(IndexError::Write)?;
+        {
+            let mut stmt = tx
+                .prepare("SELECT id FROM turn WHERE session = ?1")
+                .map_err(IndexError::Read)?;
+            let ids: Vec<i64> = stmt
+                .query_map(params![session], |r| r.get(0))
+                .map_err(IndexError::Read)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(IndexError::Read)?;
+            drop(stmt);
+            for id in ids {
+                TURNS_FTS.remove(&tx, id).map_err(IndexError::Write)?;
+            }
+            tx.execute("DELETE FROM turn WHERE session = ?1", params![session])
+                .map_err(IndexError::Write)?;
+        }
+        tx.commit().map_err(IndexError::Write)
     }
 
     /// Records that claims were retrieved and used.
@@ -657,6 +840,32 @@ impl Index {
 
     /// How many claims are indexed. For tests and the Activity screen.
     ///
+    /// Concept paths ordered by how much they are actually used, most first.
+    ///
+    /// What the working set is built from: the cap has to fall on what you rely on least, not on
+    /// whatever the filesystem happened to list last.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn most_used(&self, limit: usize) -> Result<Vec<String>, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let mut stmt = db
+            .prepare(
+                "SELECT c.path, COALESCE(SUM(m.usage_count + m.uses_pending), 0) AS uses
+                 FROM concept c LEFT JOIN claim m ON m.concept = c.id
+                 WHERE c.status = 'stable'
+                 GROUP BY c.id
+                 ORDER BY uses DESC, c.mtime DESC, c.path
+                 LIMIT ?1",
+            )
+            .map_err(IndexError::Read)?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| r.get::<_, String>(0))
+            .map_err(IndexError::Read)?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(IndexError::Read)
+    }
+
     /// The blocking step of §9.4: cheap filtering to at most `limit` candidates, no model call.
     ///
     /// Four signals, strongest first: exact name, alias, near name by normalized distance, and
