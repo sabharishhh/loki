@@ -43,6 +43,9 @@ pub struct Memory {
     scope: TierScope,
     /// Turns recorded so far. The next ordinal, and the window boundary, are read off this.
     turns: Mutex<u32>,
+    /// Turns recorded when the last close ran. Closing twice with nothing said between is a
+    /// no-op, so putting the window away does not cost a model call each time.
+    consolidated_at: Mutex<u32>,
 }
 
 impl Memory {
@@ -69,6 +72,7 @@ impl Memory {
             episode: format!("episodes/{today}.md"),
             scope,
             turns: Mutex::new(0),
+            consolidated_at: Mutex::new(0),
         })
     }
 
@@ -267,6 +271,18 @@ impl Memory {
         budget: &dyn Budget,
         today: Date,
     ) -> Result<Report, MemoryError> {
+        // Nothing said since the last close means nothing to consolidate.
+        {
+            let turns = *self.turns.lock().unwrap_or_else(|e| e.into_inner());
+            let done = *self
+                .consolidated_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if turns == done {
+                return Ok(Report::default());
+            }
+        }
+
         let episodes = [Episode {
             path: self.episode.clone(),
             reference: Reference::Live(today),
@@ -298,7 +314,14 @@ impl Memory {
         // Only once the claims exist. Dropping the turns first would lose the session if
         // consolidation failed partway.
         if report.remaining.is_empty() {
-            self.index.forget_session(&self.session)?;
+            // The turns stay in the live corpus, because the session may continue: closing the
+            // window is a session boundary, not the end of the conversation. They are dropped
+            // when the process ends.
+            let turns = *self.turns.lock().unwrap_or_else(|e| e.into_inner());
+            *self
+                .consolidated_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = turns;
         }
         Ok(report)
     }

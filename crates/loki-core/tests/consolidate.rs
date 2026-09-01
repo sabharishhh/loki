@@ -523,3 +523,31 @@ async fn a_stated_first_mention_is_usable_at_once() {
         "a fact the user stated has to be usable without being said twice"
     );
 }
+
+/// Closing a session twice, or resuming a paused import, must not duplicate what it already knows.
+#[tokio::test]
+async fn re_consolidating_an_episode_does_not_duplicate_its_claims() {
+    let store = Store::new("idempotent", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![candidate(
+            "Sabharish",
+            "is a computer science graduate",
+            date(2026, 1, 1),
+            Source::Stated,
+        )],
+    )]);
+    let episodes = [episode("episodes/a.md", date(2026, 1, 1))];
+
+    store.go(&episodes, &extractor, &Unbounded).await;
+    store.go(&episodes, &extractor, &Unbounded).await;
+    store.go(&episodes, &extractor, &Unbounded).await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        concept.claims().count(),
+        1,
+        "the same fact three times is one claim: {:?}",
+        concept.claims().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+}

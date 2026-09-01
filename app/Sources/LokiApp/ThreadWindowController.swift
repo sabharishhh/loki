@@ -82,10 +82,16 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
     /// Closing hides the window and drops Loki back to the menu bar.
     ///
     /// The conversation outlives the window, so reopening resumes the same thread.
+    ///
+    /// This is also where consolidation runs. §9.8 says it runs at session close, and for a menu
+    /// bar app that is putting the window away, not quitting: an accessory app can go weeks
+    /// without being quit, and a memory that only learns on quit never learns. It is a no-op when
+    /// nothing has been said since the last time, so closing repeatedly costs nothing.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         NSApp.setActivationPolicy(.accessory)
         uiTrace("9 window closed, back to accessory")
+        Task { await conversation.endSession() }
         return false
     }
 }

@@ -306,11 +306,15 @@ fn merge(
         .map(|held| (held.text.clone(), held.clone()));
 
     let Some((held_text, held)) = conflict else {
-        let occurrences =
-            1 + u32::try_from(concept.claims().filter(|c| c.text == claim.text).count())
-                .unwrap_or(u32::MAX);
-        let decision = reconcile::promotion(&claim, occurrences, false);
-        concept.add(&candidate.heading, claim);
+        let seen = u32::try_from(concept.claims().filter(|c| c.text == claim.text).count())
+            .unwrap_or(u32::MAX);
+        let decision = reconcile::promotion(&claim, seen.saturating_add(1), false);
+        // Saying the same thing twice is a second occurrence, not a second claim. Without this a
+        // re-consolidated episode duplicates every fact in it, which happens whenever a session
+        // closes twice or §11.5 resumes a paused import.
+        if seen == 0 {
+            concept.add(&candidate.heading, claim);
+        }
         if decision == Promotion::Auto && concept.front.status == Status::Draft {
             concept.front.status = Status::Stable;
             report.promoted.push(path.to_owned());
