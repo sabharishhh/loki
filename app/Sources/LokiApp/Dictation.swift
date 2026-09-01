@@ -42,6 +42,10 @@ final class Dictation {
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var tasks: [Task<Void, Never>] = []
+    /// The provisional text, from the fast transcriber. What the field shows while you speak.
+    private var heard = Transcript()
+    /// The finished text, from the accurate transcriber. What the draft ends up holding.
+    private var spoken = Transcript()
 
     var isListening: Bool { status == .listening }
 
@@ -64,6 +68,8 @@ final class Dictation {
         guard canStart else { return }
         status = .preparing
         transcript = ""
+        heard = Transcript()
+        spoken = Transcript()
         levels = []
 
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
@@ -97,7 +103,14 @@ final class Dictation {
         await finalize()
         releaseAnalyzer()
 
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The accurate transcriber is the one whose words are kept. It falls behind while you
+        // speak and catches up on the flush, so it is only read here. If it produced nothing at
+        // all, the provisional text is better than losing the utterance.
+        let accurate = spoken.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provisional = heard.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = accurate.isEmpty ? provisional : accurate
+
+        transcript = text
         levels = []
         status = .idle
         return text
@@ -153,20 +166,32 @@ final class Dictation {
 
     private func begin() async throws {
         let locale = Locale.current
-        // `DictationTranscriber`, not `SpeechTranscriber`. The latter is long-form and emits
-        // nothing for the first four seconds, so a prompt-length utterance finishes before any
-        // text arrives. Measured on a 1.6s clip: first partial at 0.86s here, 1.80s there, which
-        // is after the audio has already ended.
-        let transcriber = DictationTranscriber(
+        // Two transcribers, because neither is good at both jobs and one analyzer will run both.
+        //
+        // `DictationTranscriber` is fast: first partial at 0.6s against 4.3s, which is the whole
+        // reason the field can fill while you speak. It is also materially less accurate. On a
+        // recording of "Hey Loki, how are you?" it returned "Halo, how are you?" and dropped the
+        // name outright, where `SpeechTranscriber` got the sentence exactly.
+        //
+        // So the fast one supplies the grey provisional text and the accurate one supplies the
+        // words that are kept. Grey already means "not committed yet", which is exactly the claim
+        // the fast transcriber can support.
+        let fast = DictationTranscriber(
             locale: locale,
             contentHints: [.shortForm],
             transcriptionOptions: [.punctuation],
             reportingOptions: [.volatileResults, .frequentFinalization],
             attributeOptions: []
         )
+        let accurate = SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults],
+            attributeOptions: []
+        )
         let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: .medium),
                                       reportResults: true)
-        let modules: [any SpeechModule] = [transcriber, detector]
+        let modules: [any SpeechModule] = [fast, accurate, detector]
 
         // The model is managed by the OS. This downloads it the first time only.
         if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
@@ -187,8 +212,12 @@ final class Dictation {
         self.analyzer = analyzer
 
         tasks.append(Task { [weak self] in
-            guard let results = self?.transcriberResults(transcriber) else { return }
-            for await text in results { self?.absorb(text) }
+            guard let results = self?.fastResults(fast) else { return }
+            for await segment in results { self?.absorbHeard(segment) }
+        })
+        tasks.append(Task { [weak self] in
+            guard let results = self?.accurateResults(accurate) else { return }
+            for await segment in results { self?.absorbSpoken(segment) }
         })
         tasks.append(Task { [weak self] in
             guard let detections = self?.detectorResults(detector) else { return }
@@ -200,15 +229,38 @@ final class Dictation {
         try startCapture(feeding: continuation, converting: format)
     }
 
-    /// Bridges the transcriber's throwing sequence into a plain stream of text.
-    private func transcriberResults(
-        _ transcriber: DictationTranscriber
-    ) -> AsyncStream<(String, Bool)> {
+    /// Bridges the fast transcriber's throwing sequence into plain segments.
+    private func fastResults(_ transcriber: DictationTranscriber) -> AsyncStream<Segment> {
         AsyncStream { continuation in
             Task {
                 do {
                     for try await result in transcriber.results {
-                        continuation.yield((String(result.text.characters), result.isFinal))
+                        continuation.yield(Segment(
+                            start: result.range.start.seconds,
+                            text: String(result.text.characters),
+                            isFinal: result.isFinal
+                        ))
+                    }
+                } catch {}
+                continuation.finish()
+            }
+        }
+    }
+
+    /// Bridges the accurate transcriber's throwing sequence into plain segments.
+    ///
+    /// It has no `isFinal`, so finality is a comparison: a result is settled once the analyzer
+    /// says it has finalized everything up to the end of that result's range.
+    private func accurateResults(_ transcriber: SpeechTranscriber) -> AsyncStream<Segment> {
+        AsyncStream { continuation in
+            Task {
+                do {
+                    for try await result in transcriber.results {
+                        continuation.yield(Segment(
+                            start: result.range.start.seconds,
+                            text: String(result.text.characters),
+                            isFinal: result.resultsFinalizationTime >= result.range.end
+                        ))
                     }
                 } catch {}
                 continuation.finish()
@@ -229,11 +281,13 @@ final class Dictation {
         }
     }
 
-    /// Every result, volatile or final, carries the whole utterance so far, so this replaces
-    /// rather than appends. Verified on an 18s utterance: one final, 265 characters, the lot.
-    private func absorb(_ result: (text: String, isFinal: Bool)) {
-        uiTrace("dictation absorb final=\(result.isFinal) chars=\(result.text.count)")
-        transcript = result.text
+    private func absorbHeard(_ segment: Segment) {
+        heard.absorb(segment)
+        transcript = heard.text
+    }
+
+    private func absorbSpoken(_ segment: Segment) {
+        spoken.absorb(segment)
     }
 
     private func startCapture(
@@ -413,5 +467,49 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             into: buffer.mutableAudioBufferList
         )
         return status == noErr ? buffer : nil
+    }
+}
+
+/// One result from a transcriber, tagged with where in the utterance it belongs.
+struct Segment {
+    let start: Double
+    let text: String
+    let isFinal: Bool
+}
+
+/// An utterance assembled from segments that arrive out of order and get revised.
+///
+/// A transcriber does not hand back one growing string. It finalizes the utterance in pieces and
+/// keeps revising the piece it is still working on, so each result covers only its own time
+/// range. Keying by range start and rebuilding is the only assembly that survives that: taking
+/// the newest result as the whole transcript loses every earlier piece, which is how "Hey Loki,
+/// how are you?" once ended up in the composer as "?".
+struct Transcript {
+    private var settled: [Double: String] = [:]
+    private var pending: (start: Double, text: String)?
+
+    /// The utterance so far, settled pieces followed by the piece still being revised.
+    var text: String {
+        var pieces = settled.keys.sorted().map { settled[$0, default: ""] }
+        if let pending, settled[pending.start] == nil {
+            pieces.append(pending.text)
+        }
+        // Segments carry their own leading space, so joining adds none and the result is tidied
+        // once at the end.
+        return pieces
+            .joined()
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+    }
+
+    mutating func absorb(_ segment: Segment) {
+        if segment.isFinal {
+            settled[segment.start] = segment.text
+            if pending?.start == segment.start {
+                pending = nil
+            }
+        } else {
+            pending = (segment.start, segment.text)
+        }
     }
 }
