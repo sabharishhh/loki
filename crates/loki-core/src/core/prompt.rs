@@ -110,6 +110,7 @@ impl Prefix {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Turn {
     recalled: Vec<ConceptId>,
+    recall: String,
     history: Vec<Message>,
 }
 
@@ -118,6 +119,7 @@ impl Turn {
     pub const fn new() -> Self {
         Self {
             recalled: Vec::new(),
+            recall: String::new(),
             history: Vec::new(),
         }
     }
@@ -134,6 +136,19 @@ impl Turn {
     #[must_use]
     pub fn recalled(&self) -> &[ConceptId] {
         &self.recalled
+    }
+
+    /// What pre-fetch found, as the text the model will read.
+    ///
+    /// Replaced every turn and never appended to history, because it is derived: letting it
+    /// accumulate would grow the turn zone without bound and re-send stale recall for ever.
+    pub fn set_recall(&mut self, text: impl Into<String>) {
+        self.recall = text.into();
+    }
+
+    #[must_use]
+    pub fn recall(&self) -> &str {
+        &self.recall
     }
 
     #[must_use]
@@ -169,10 +184,20 @@ impl Turn {
 /// Assembles a request from the two zones.
 #[must_use]
 pub fn build(prefix: &Prefix, turn: &Turn, role: ModelRole, max_tokens: u32) -> Request {
+    let mut messages = Vec::with_capacity(turn.history().len() + 1);
+    // Retrieval lands in the turn, never in the prefix. §8.1: the two are compatible only because
+    // of that, and putting it in the prefix would miss the provider cache on every single turn.
+    if !turn.recall().is_empty() {
+        messages.push(Message::user(format!(
+            "What you already know that may bear on this:\n{}",
+            turn.recall()
+        )));
+    }
+    messages.extend_from_slice(turn.history());
     Request {
         role,
         system: prefix.blocks(),
-        messages: turn.history().to_vec(),
+        messages,
         max_tokens,
     }
 }

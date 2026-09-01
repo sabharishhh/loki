@@ -7,6 +7,7 @@ pub mod claim;
 pub mod concept;
 pub mod consolidate;
 pub mod gate;
+pub mod handle;
 pub mod history;
 pub mod index;
 pub mod reconcile;

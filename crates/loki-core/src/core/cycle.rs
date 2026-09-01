@@ -16,6 +16,7 @@ use super::ids::{IdGen, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
+use crate::memory::handle::{self, Memory};
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
 
 /// Receives response text as it arrives.
@@ -46,7 +47,12 @@ pub enum LoopError {
     Model(#[from] ModelError),
     #[error("stopped at the spending limit, {spent:?} of {ceiling:?}")]
     OverBudget { spent: Cents, ceiling: Cents },
+    #[error("memory failed: {0}")]
+    Memory(#[from] crate::memory::handle::MemoryError),
 }
+
+/// How many recent messages stay verbatim in the prompt before recall may reach for them.
+const DEFAULT_WINDOW_KEEPS: u32 = 20;
 
 /// Everything one conversation needs.
 pub struct Loop {
@@ -59,6 +65,12 @@ pub struct Loop {
     budget: Budget,
     checkpoint: Checkpoint,
     max_tokens: u32,
+    /// Memory, when there is any. `None` is a working assistant with no recall, which is what the
+    /// dev harness and every test that is not about memory want.
+    memory: Option<Arc<Memory>>,
+    /// Turns kept verbatim in the prompt. Recall never returns anything inside this, because it
+    /// is already there.
+    window_keeps: u32,
 }
 
 impl Loop {
@@ -80,7 +92,23 @@ impl Loop {
             budget,
             checkpoint: Checkpoint::default(),
             max_tokens: 64_000,
+            memory: None,
+            window_keeps: DEFAULT_WINDOW_KEEPS,
         }
+    }
+
+    /// Gives the loop memory. The working set goes into the frozen prefix once, here, because it
+    /// changes per session and not per turn (§8.1).
+    ///
+    /// # Errors
+    /// Fails if the working set cannot be read.
+    pub async fn with_memory(mut self, memory: Arc<Memory>) -> Result<Self, LoopError> {
+        let working_set = memory.working_set().await.map_err(LoopError::Memory)?;
+        if !working_set.is_empty() {
+            self.prefix.set_working_set(working_set);
+        }
+        self.memory = Some(memory);
+        Ok(self)
     }
 
     #[must_use]
@@ -114,6 +142,28 @@ impl Loop {
         self.turn.compact(keep, summary);
     }
 
+    /// Closes the session: consolidate, regenerate the working set, forget the raw turns.
+    ///
+    /// Runs at session close because the app is already awake, and every session, so the cost
+    /// compounds rather than arriving as one bill (§9.8). Silent when there is no memory.
+    ///
+    /// # Errors
+    /// Fails if consolidation or the working set does.
+    pub async fn end_session(
+        &mut self,
+        extractor: &dyn crate::memory::consolidate::Extractor,
+        matcher: &dyn crate::memory::resolve::Matcher,
+        budget: &dyn crate::memory::consolidate::Budget,
+    ) -> Result<Option<crate::memory::consolidate::Report>, LoopError> {
+        let Some(memory) = self.memory.clone() else {
+            return Ok(None);
+        };
+        let today = jiff::Zoned::now().date();
+        let report = memory.close(extractor, matcher, budget, today).await?;
+        self.prefix.end_session();
+        Ok(Some(report))
+    }
+
     /// Runs one turn.
     ///
     /// # Errors
@@ -132,6 +182,22 @@ impl Loop {
             summary: summarize(&message),
         });
         self.checkpoint = Checkpoint::new(task);
+
+        // Pre-fetch runs on the user's message, before the model call, not as a tool call after
+        // it (§10.1). A round trip on every turn where memory matters is most of where the sense
+        // of already knowing you goes.
+        if let Some(memory) = self.memory.clone() {
+            memory.record("user", &message).await?;
+            let today = jiff::Zoned::now().date();
+            let recalled = memory.recall(&message, self.window_keeps, today)?;
+            if recalled.is_empty() {
+                self.turn.set_recall("");
+            } else {
+                memory.mark_used(&recalled)?;
+                self.turn.set_recall(handle::render(&recalled));
+            }
+        }
+
         self.turn.push(Message::user(message));
 
         match self.budget.check() {
@@ -195,6 +261,9 @@ impl Loop {
 
         if !outcome.text.is_empty() {
             self.turn.push(Message::assistant(&outcome.text));
+            if let Some(memory) = self.memory.clone() {
+                memory.record("loki", &outcome.text).await?;
+            }
         }
 
         match outcome.status {

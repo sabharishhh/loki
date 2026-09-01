@@ -444,3 +444,160 @@ pub fn log_lines(report: &Report, concepts: &[(String, RawConcept)], today: Date
 
 /// Re-exported so callers do not have to reach into two modules to build a run.
 pub use concept::Section;
+
+/// Extraction on the Utility role (§22.2).
+///
+/// One bounded structured call per episode, sharing no prefix with the conversation, so routing it
+/// away from the Primary model costs no cache hit.
+pub struct ModelExtractor<'a> {
+    provider: &'a dyn crate::ports::model::ModelProvider,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl<'a> ModelExtractor<'a> {
+    #[must_use]
+    pub fn new(
+        provider: &'a dyn crate::ports::model::ModelProvider,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self { provider, cancel }
+    }
+}
+
+const EXTRACT_INSTRUCTIONS: &str = "\
+You read a transcript and list the durable facts it states about people, projects and preferences.
+
+One fact per line, exactly this shape and nothing else:
+
+  <entity> | <person|project|preference> | <section> | <stated|inferred> | <YYYY-MM-DD or -> | <the fact>
+
+Rules:
+- Only durable facts. A one-off question, a passing joke or a task instruction is not a fact.
+- `stated` means the user said it about themselves or their world. `inferred` means you worked it
+  out. Prefer `inferred` when unsure.
+- The date is when the fact started being true, not today. Use `-` if the transcript does not say.
+- Write the fact as a short statement, not a sentence about the conversation.
+- If the transcript states nothing durable, output nothing at all.";
+
+#[async_trait]
+impl Extractor for ModelExtractor<'_> {
+    async fn extract(
+        &self,
+        _episode: &str,
+        text: &str,
+    ) -> Result<Vec<Candidate>, ConsolidateError> {
+        use crate::core::vocab::ModelRole;
+        use crate::ports::model::{Chunk, Message, Request, SystemBlock};
+        use futures_util::StreamExt as _;
+
+        let request = Request {
+            role: ModelRole::Utility,
+            system: vec![SystemBlock::new(EXTRACT_INSTRUCTIONS)],
+            messages: vec![Message::user(text.to_owned())],
+            max_tokens: 2_048,
+        };
+        let mut stream = self
+            .provider
+            .complete(request, self.cancel.clone())
+            .await
+            .map_err(|e| ConsolidateError::Extract(e.to_string()))?;
+
+        let mut answer = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let Chunk::Text(piece) =
+                chunk.map_err(|e| ConsolidateError::Extract(e.to_string()))?
+            {
+                answer.push_str(&piece);
+            }
+        }
+        Ok(parse_candidates(&answer))
+    }
+}
+
+/// Reads the extractor's lines.
+///
+/// Tolerant, and it drops what it cannot read rather than failing the run. A malformed line costs
+/// one fact; an error costs the whole session's memory.
+fn parse_candidates(answer: &str) -> Vec<Candidate> {
+    answer
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+            let [surface, kind, heading, source, when, fact] = parts.as_slice() else {
+                return None;
+            };
+            if surface.is_empty() || fact.is_empty() {
+                return None;
+            }
+            Some(Candidate {
+                surface: (*surface).to_owned(),
+                kind: match kind.to_lowercase().as_str() {
+                    "project" => Kind::Project,
+                    "preference" => Kind::Preference,
+                    _ => Kind::Person,
+                },
+                heading: if heading.is_empty() {
+                    "Notes".to_owned()
+                } else {
+                    (*heading).to_owned()
+                },
+                text: (*fact).to_owned(),
+                days_ago: None,
+                valid_from: when.parse::<Date>().ok(),
+                // Anything the extractor will not vouch for is inferred, so §9.7 rule 3 keeps it
+                // below anything the user actually said.
+                source: if source.eq_ignore_ascii_case("stated") {
+                    Source::Stated
+                } else {
+                    Source::Inferred
+                },
+                tags: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extractor_lines_are_read() {
+        let out = parse_candidates(
+            "Meera | person | Role | stated | 2026-07-15 | moved to the infra team\n\
+             Loki | project | Status | inferred | - | is a personal assistant\n",
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].surface, "Meera");
+        assert_eq!(out[0].source, Source::Stated);
+        assert_eq!(out[0].valid_from, Some(jiff::civil::date(2026, 7, 15)));
+        assert_eq!(out[1].kind, Kind::Project);
+        assert_eq!(out[1].valid_from, None);
+    }
+
+    /// A malformed line costs one fact. An error would cost the whole session's memory.
+    #[test]
+    fn unreadable_lines_are_dropped_not_fatal() {
+        let out = parse_candidates(
+            "not a fact line at all\n\
+             | | | | |\n\
+             Dan | person | Notes | stated | - | likes tea\n\
+             Here is my answer:\n",
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].surface, "Dan");
+    }
+
+    #[test]
+    fn an_empty_answer_yields_nothing() {
+        assert!(parse_candidates("").is_empty());
+        assert!(parse_candidates("\n\n").is_empty());
+    }
+
+    /// Anything not explicitly stated must land as inferred, so rule 3 keeps it subordinate.
+    #[test]
+    fn unclear_provenance_defaults_to_inferred() {
+        let out = parse_candidates("Dan | person | Notes | guessed | - | likes tea");
+        assert_eq!(out[0].source, Source::Inferred);
+    }
+}
