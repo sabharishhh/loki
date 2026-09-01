@@ -34,11 +34,12 @@ test:  ## Run every test
 	cargo test --workspace
 
 .PHONY: check
-check:  ## Everything CI would run
+check:  ## Everything CI would run. Fails loudly on the first problem
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
 	cd app && swift build
+	@echo "check passed"
 
 .PHONY: fmt
 fmt:  ## Format the Rust code

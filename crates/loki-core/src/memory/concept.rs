@@ -184,8 +184,9 @@ pub fn parse(text: &str) -> Result<RawConcept, ParseError> {
                 return Err(ParseError::EmptyClaim { line: line_no });
             }
             pending = Some(blank_claim(text));
-        } else if !trimmed.is_empty() && pending.is_some() {
-            let claim = pending.as_mut().expect("checked");
+        } else if let Some(claim) = pending.as_mut()
+            && !trimmed.is_empty()
+        {
             apply_attribute(claim, trimmed, line_no)?;
         }
     }
