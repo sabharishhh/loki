@@ -50,7 +50,9 @@ fn src(module: &str) -> PathBuf {
 fn ring_zero_and_one_do_not_reach_into_ring_two() {
     let mut offences = Vec::new();
 
-    for module in ["core", "ports"] {
+    // `memory` is Ring 0 too: section 6.2 lists the typestate gate among the locked internals.
+    // It was outside this check until an audit noticed, which is how a rule quietly stops holding.
+    for module in ["core", "ports", "memory"] {
         for file in rust_files(&src(module)) {
             for (number, line) in code_lines(&file) {
                 let reaches = line.contains("crate::adapters")
@@ -116,4 +118,8 @@ fn the_check_can_actually_see_the_source() {
         "found almost no source files, so the ring checks prove nothing"
     );
     assert!(!rust_files(&src("adapters")).is_empty());
+    assert!(
+        !rust_files(&src("memory")).is_empty(),
+        "memory is Ring 0 and must be covered"
+    );
 }

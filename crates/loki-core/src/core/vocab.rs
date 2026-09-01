@@ -167,8 +167,10 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockReason {
-    /// The spend ceiling was reached. Checked before a model call, never during one.
+    /// The monthly ceiling was reached. Checked before a model call, never during one.
     BudgetCeiling { spent: Cents, ceiling: Cents },
+    /// The per-session ceiling was reached. A runaway run, not a spent month.
+    SessionCeiling { spent: Cents, ceiling: Cents },
     /// A Tier 3 action is waiting on a confirm.
     AwaitingConfirm { action: String },
     /// Two conflicting claims, neither clearly newer. Neither is used until resolved.

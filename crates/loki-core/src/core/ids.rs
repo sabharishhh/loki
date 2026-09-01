@@ -76,6 +76,26 @@ impl ConceptId {
     }
 }
 
+/// The memory bundle as it stood at a point in time.
+///
+/// A git revision of the bundle. A checkpoint records one so a resume knows what memory looked
+/// like when the task started, rather than assuming it is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SnapshotId(String);
+
+impl SnapshotId {
+    #[must_use]
+    pub fn new(revision: impl Into<String>) -> Self {
+        Self(revision.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Content hash of a fetched page, used to address it in the evidence store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]

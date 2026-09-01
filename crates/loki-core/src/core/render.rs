@@ -50,8 +50,16 @@ pub fn plain(event: &Event) -> Option<String> {
         ),
         Event::Blocked { reason } => match reason {
             BlockReason::BudgetCeiling { spent, .. } => {
-                format!("Paused at your spending limit, {} cents used.", spent.get())
+                format!(
+                    "Paused at your monthly spending limit, {} cents used.",
+                    spent.get()
+                )
             }
+            BlockReason::SessionCeiling { spent, ceiling } => format!(
+                "Paused. This session has spent {} of its {} cent limit.",
+                spent.get(),
+                ceiling.get()
+            ),
             BlockReason::AwaitingConfirm { action } => format!("Waiting on you before {action}."),
             BlockReason::ConflictUnresolved { concept } => {
                 format!("Two things I know about {concept} disagree. Which is right?")

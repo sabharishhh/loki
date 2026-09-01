@@ -94,8 +94,7 @@ impl Ledger {
     /// # Errors
     /// Fails if there is no application support directory.
     pub fn default_path() -> Result<PathBuf, LedgerError> {
-        let base = dirs::data_dir().ok_or(LedgerError::NoHome)?;
-        Ok(base.join("Loki").join("ledger.sqlite"))
+        crate::paths::ledger().map_err(|_| LedgerError::NoHome)
     }
 
     /// Opens or creates the ledger, making the parent directory if needed.

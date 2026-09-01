@@ -4,7 +4,7 @@
 //! in the world". They look similar and do different jobs, so they stay separate: a checkpoint
 //! lives for the session and is not persisted, the journal survives a restart.
 
-use super::ids::{ScopeId, StepId, TaskId};
+use super::ids::{ScopeId, SnapshotId, StepId, TaskId};
 use super::payload::ToolOutput;
 
 /// Where a task had reached.
@@ -13,6 +13,12 @@ pub struct Checkpoint {
     pub task: Option<TaskId>,
     pub step: u32,
     pub results: Vec<(StepId, ToolOutput)>,
+    /// Memory as it stood when the task started.
+    ///
+    /// A resume needs to know whether the store moved underneath it. Without this, reusing a
+    /// step's result assumes memory is unchanged, which a consolidation between the interrupt and
+    /// the resume would make false. `None` before the bundle exists.
+    pub memory_snapshot: Option<SnapshotId>,
     pub open_scopes: Vec<ScopeId>,
 }
 
@@ -23,6 +29,24 @@ impl Checkpoint {
             task: Some(task),
             ..Self::default()
         }
+    }
+
+    /// Records which revision of the memory bundle this task started against.
+    #[must_use]
+    pub fn against_memory(mut self, snapshot: SnapshotId) -> Self {
+        self.memory_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Whether memory has moved since this checkpoint was taken.
+    ///
+    /// A resume that reuses step results must check this. Consolidation between the interrupt and
+    /// the resume can invalidate what a step was based on.
+    #[must_use]
+    pub fn memory_moved(&self, current: &SnapshotId) -> bool {
+        self.memory_snapshot
+            .as_ref()
+            .is_some_and(|taken| taken != current)
     }
 
     /// Records a completed step so a resume can reuse it instead of redoing it.
@@ -112,6 +136,22 @@ mod tests {
         let mut checkpoint = filled();
         assert!(checkpoint.invalidate_from(StepId::new(99)).is_empty());
         assert_eq!(checkpoint.steps().len(), 4);
+    }
+
+    #[test]
+    fn a_checkpoint_notices_memory_moving_underneath_it() {
+        let taken = SnapshotId::new("abc123");
+        let checkpoint = Checkpoint::new(TaskId::new(0)).against_memory(taken.clone());
+
+        assert!(!checkpoint.memory_moved(&taken));
+        assert!(checkpoint.memory_moved(&SnapshotId::new("def456")));
+    }
+
+    #[test]
+    fn a_checkpoint_without_a_snapshot_never_claims_memory_moved() {
+        // Before the bundle exists there is nothing to compare, so reuse is not blocked.
+        let checkpoint = Checkpoint::new(TaskId::new(0));
+        assert!(!checkpoint.memory_moved(&SnapshotId::new("abc123")));
     }
 
     #[test]

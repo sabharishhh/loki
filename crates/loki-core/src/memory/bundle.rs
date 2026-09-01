@@ -72,10 +72,7 @@ impl Bundle {
     /// # Errors
     /// Fails if there is no application support directory.
     pub fn default_root() -> Result<PathBuf, BundleError> {
-        Ok(dirs::data_dir()
-            .ok_or(BundleError::NoHome)?
-            .join("Loki")
-            .join("memory"))
+        crate::paths::memory().map_err(|_| BundleError::NoHome)
     }
 
     /// Opens the bundle, creating the layout and the git repository if they are absent.

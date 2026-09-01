@@ -16,7 +16,11 @@ pub enum Verdict {
     Stop(BlockReason),
 }
 
-/// A monthly ceiling and what has been spent against it.
+/// A monthly ceiling, an optional per-session one, and what has been spent against each.
+///
+/// Two ceilings because they answer different questions. The monthly one is the bill. The session
+/// one is a runaway guard: an import or a long agentic run can spend a month's budget in an
+/// afternoon, and noticing at the month boundary is too late.
 ///
 /// Spend accumulates in micro-cents. A single call costs a fraction of a cent, so rounding each
 /// one to whole cents would record zero on a cheap model and the ceiling would never trip.
@@ -24,6 +28,9 @@ pub enum Verdict {
 pub struct Budget {
     spent_micros: u64,
     ceiling: Cents,
+    /// Spend since this process started, against `session_ceiling`.
+    session_micros: u64,
+    session_ceiling: Option<Cents>,
     warned: bool,
 }
 
@@ -33,8 +40,19 @@ impl Budget {
         Self {
             spent_micros: 0,
             ceiling,
+            session_micros: 0,
+            session_ceiling: None,
             warned: false,
         }
+    }
+
+    /// Adds a per-session cap on top of the monthly one.
+    ///
+    /// Optional, per section 20.2. Without it a single run can spend the whole month.
+    #[must_use]
+    pub const fn with_session_ceiling(mut self, ceiling: Cents) -> Self {
+        self.session_ceiling = Some(ceiling);
+        self
     }
 
     /// A budget that already knows what this month cost.
@@ -45,9 +63,23 @@ impl Budget {
         Self {
             spent_micros,
             ceiling,
+            // A new process is a new session, so session spend restarts at zero.
+            session_micros: 0,
+            session_ceiling: None,
             // A restart mid-month should still warn once, so the flag starts clear.
             warned: false,
         }
+    }
+
+    /// Spend this session so far.
+    #[must_use]
+    pub const fn spent_this_session(self) -> Cents {
+        Cents::new(self.session_micros / MICRO_CENTS_PER_CENT)
+    }
+
+    #[must_use]
+    pub const fn session_ceiling(self) -> Option<Cents> {
+        self.session_ceiling
     }
 
     /// Spend so far, rounded down for display.
@@ -69,12 +101,25 @@ impl Budget {
 
     pub const fn record_micros(&mut self, micros: u64) {
         self.spent_micros = self.spent_micros.saturating_add(micros);
+        self.session_micros = self.session_micros.saturating_add(micros);
     }
 
     /// Whether the next model call may run.
     ///
     /// Warns once per crossing rather than on every call, so a long session does not repeat it.
     pub fn check(&mut self) -> Verdict {
+        // The session cap is checked first. It is the tighter of the two by definition, and a
+        // runaway run should be named as such rather than reported as the month running out.
+        if let Some(session) = self.session_ceiling {
+            let session_micros = session.get().saturating_mul(MICRO_CENTS_PER_CENT);
+            if self.session_micros >= session_micros {
+                return Verdict::Stop(BlockReason::SessionCeiling {
+                    spent: self.spent_this_session(),
+                    ceiling: session,
+                });
+            }
+        }
+
         let ceiling_micros = self.ceiling.get().saturating_mul(MICRO_CENTS_PER_CENT);
 
         if self.spent_micros >= ceiling_micros {
@@ -137,6 +182,50 @@ mod tests {
     fn a_resumed_budget_can_already_be_over() {
         let mut budget = Budget::resuming(Cents::new(1000), 1500 * MICRO_CENTS_PER_CENT);
         assert!(matches!(budget.check(), Verdict::Stop(_)));
+    }
+
+    #[test]
+    fn a_session_ceiling_stops_a_runaway_before_the_month_does() {
+        // A month's worth of headroom, but one session may only spend a tenth of it.
+        let mut budget = Budget::new(Cents::new(10_000)).with_session_ceiling(Cents::new(1000));
+        budget.record_micros(1000 * MICRO_CENTS_PER_CENT);
+
+        match budget.check() {
+            Verdict::Stop(BlockReason::SessionCeiling { ceiling, .. }) => {
+                assert_eq!(ceiling, Cents::new(1000));
+            }
+            other => panic!("expected a session stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_session_cap_is_reported_as_itself_not_as_the_month() {
+        let mut budget = Budget::new(Cents::new(10_000)).with_session_ceiling(Cents::new(100));
+        budget.record_micros(200 * MICRO_CENTS_PER_CENT);
+        // The month is nowhere near spent, so calling this a monthly stop would mislead.
+        assert!(budget.spent() < budget.ceiling());
+        assert!(matches!(
+            budget.check(),
+            Verdict::Stop(BlockReason::SessionCeiling { .. })
+        ));
+    }
+
+    #[test]
+    fn without_a_session_ceiling_only_the_month_applies() {
+        let mut budget = Budget::new(Cents::new(1000));
+        budget.record_micros(5000 * MICRO_CENTS_PER_CENT);
+        assert!(matches!(
+            budget.check(),
+            Verdict::Stop(BlockReason::BudgetCeiling { .. })
+        ));
+    }
+
+    #[test]
+    fn a_resumed_budget_starts_a_fresh_session() {
+        // The month carries over. The session does not.
+        let budget = Budget::resuming(Cents::new(10_000), 9000 * MICRO_CENTS_PER_CENT);
+        assert_eq!(budget.spent(), Cents::new(9000));
+        assert_eq!(budget.spent_this_session(), Cents::ZERO);
     }
 
     #[test]
