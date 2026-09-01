@@ -37,6 +37,19 @@ impl Budget {
         }
     }
 
+    /// A budget that already knows what this month cost.
+    ///
+    /// Without this the ceiling resets on every launch, which makes a monthly limit meaningless.
+    #[must_use]
+    pub const fn resuming(ceiling: Cents, spent_micros: u64) -> Self {
+        Self {
+            spent_micros,
+            ceiling,
+            // A restart mid-month should still warn once, so the flag starts clear.
+            warned: false,
+        }
+    }
+
     /// Spend so far, rounded down for display.
     #[must_use]
     pub const fn spent(self) -> Cents {
@@ -110,6 +123,20 @@ mod tests {
             budget.check(),
             Verdict::Stop(BlockReason::BudgetCeiling { .. })
         ));
+    }
+
+    #[test]
+    fn a_resumed_budget_starts_from_what_the_month_already_cost() {
+        let mut budget = Budget::resuming(Cents::new(1000), 900 * MICRO_CENTS_PER_CENT);
+        assert_eq!(budget.spent(), Cents::new(900));
+        // Already past the warning line, so the first check warns rather than proceeding.
+        assert!(matches!(budget.check(), Verdict::Warn { .. }));
+    }
+
+    #[test]
+    fn a_resumed_budget_can_already_be_over() {
+        let mut budget = Budget::resuming(Cents::new(1000), 1500 * MICRO_CENTS_PER_CENT);
+        assert!(matches!(budget.check(), Verdict::Stop(_)));
     }
 
     #[test]

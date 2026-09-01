@@ -18,8 +18,9 @@ use loki_core::adapters::openai::Openai;
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, TokenSink};
 use loki_core::core::event::Event;
+use loki_core::core::ledger::Ledger;
 use loki_core::core::prompt::{Prefix, Standing};
-use loki_core::core::sink::EventSink;
+use loki_core::core::sink::{Broadcast, EventSink};
 use loki_core::core::vocab::Cents;
 use loki_core::ports::model::ModelProvider;
 use tokio::runtime::Runtime;
@@ -166,12 +167,27 @@ pub unsafe extern "C" fn loki_core_new(
         user_data,
     });
 
+    // The ledger is a second consumer of the same stream. If it cannot be opened the app still
+    // runs, it just does not remember what it spent.
+    let (ledger, spent) = Ledger::default_path()
+        .and_then(|path| {
+            let ledger = Ledger::open(&path)?;
+            let spent = ledger.spent_this_month()?;
+            Ok((Some(Arc::new(ledger) as Arc<dyn EventSink>), spent))
+        })
+        .unwrap_or((None, 0));
+
+    let mut events = Broadcast::new().with(Arc::clone(&callbacks) as Arc<dyn EventSink>);
+    if let Some(ledger) = ledger {
+        events = events.with(ledger);
+    }
+
     let core = Loop::new(
         provider,
-        Arc::clone(&callbacks) as Arc<dyn EventSink>,
+        Arc::new(events),
         callbacks as Arc<dyn TokenSink>,
         Prefix::new(SYSTEM),
-        Budget::new(DEFAULT_CEILING),
+        Budget::resuming(DEFAULT_CEILING, spent),
     );
 
     Box::into_raw(Box::new(LokiCore {

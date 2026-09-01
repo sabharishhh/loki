@@ -13,6 +13,7 @@
 //! - [`render`] turns events into plain sentences or a dense trace.
 //! - [`prompt`] is the two-zone prompt, frozen prefix and turn content.
 //! - [`budget`] is the spend ceiling, checked before a model call.
+//! - [`ledger`] is the persistent spend record, fed by the event stream.
 //! - [`checkpoint`] is session-scoped resume points.
 //! - [`cycle`] is the fixed nine-step loop.
 //!
@@ -27,6 +28,7 @@ pub mod checkpoint;
 pub mod cycle;
 pub mod event;
 pub mod ids;
+pub mod ledger;
 pub mod payload;
 pub mod prompt;
 pub mod render;

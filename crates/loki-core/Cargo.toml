@@ -19,6 +19,8 @@ futures-util.workspace = true
 reqwest.workspace = true
 eventsource-stream.workspace = true
 async-stream.workspace = true
+rusqlite.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

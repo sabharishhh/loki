@@ -11,15 +11,27 @@ use loki_core::adapters::{anthropic::Anthropic, openai::Openai};
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, TokenSink};
 use loki_core::core::event::Event;
+use loki_core::core::ledger::Ledger;
 use loki_core::core::prompt::Prefix;
 use loki_core::core::render;
-use loki_core::core::sink::EventSink;
+use loki_core::core::sink::{Broadcast, EventSink};
 use loki_core::core::vocab::Cents;
 use loki_core::ports::model::ModelProvider;
 use tokio_util::sync::CancellationToken;
 
 const SYSTEM: &str = "You are Loki, a personal assistant that runs on the user's Mac. \
 Answer plainly. Do not use em dashes.";
+
+/// Monthly spend ceiling, in cents.
+const CEILING: Cents = Cents::new(2000);
+
+/// Opens the ledger and reports what this month has already cost.
+fn open_ledger() -> Result<(Option<Arc<dyn EventSink>>, u64), String> {
+    let path = Ledger::default_path().map_err(|e| e.to_string())?;
+    let ledger = Ledger::open(&path).map_err(|e| e.to_string())?;
+    let spent = ledger.spent_this_month().map_err(|e| e.to_string())?;
+    Ok((Some(Arc::new(ledger)), spent))
+}
 
 /// Prints the plain view. The trace view reads the same events.
 struct Plain;
@@ -104,18 +116,31 @@ async fn main() {
         }
     };
 
-    let events: Arc<dyn EventSink> = if std::env::var("LOKI_TRACE").is_ok() {
+    let renderer: Arc<dyn EventSink> = if std::env::var("LOKI_TRACE").is_ok() {
         Arc::new(Trace)
     } else {
         Arc::new(Plain)
     };
 
+    let (ledger, spent) = match open_ledger() {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("ledger unavailable, spend will not be recorded: {e}");
+            (None, 0)
+        }
+    };
+
+    let mut events = Broadcast::new().with(renderer);
+    if let Some(ledger) = ledger {
+        events = events.with(ledger);
+    }
+
     let mut core = Loop::new(
         Arc::clone(&provider),
-        events,
+        Arc::new(events),
         Arc::new(Stdout),
         Prefix::new(SYSTEM),
-        Budget::new(Cents::new(500)),
+        Budget::resuming(CEILING, spent),
     );
 
     let cancel = CancellationToken::new();
@@ -126,7 +151,13 @@ async fn main() {
         }
     });
 
-    eprintln!("loki-core {} via {}", loki_core::VERSION, provider.id());
+    eprintln!(
+        "loki-core {} via {}. {} of {} cents used this month",
+        loki_core::VERSION,
+        provider.id(),
+        spent / loki_core::core::vocab::MICRO_CENTS_PER_CENT,
+        CEILING.get()
+    );
     eprintln!("Type a message. Ctrl-C interrupts, Ctrl-D quits.\n");
 
     loop {
