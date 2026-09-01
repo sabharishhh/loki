@@ -73,6 +73,12 @@ enum Theme {
         static let record = Font.system(size: 15)
         /// The instrument. UI, steps, sidebar.
         static let body = Font.system(size: 13.5)
+        /// A subheading inside a response. h3, since the screen owns h1 and h2 is the title.
+        static let subhead = Font.system(size: 15, weight: .semibold)
+        /// Body at emphasis weight. Table headers and inline strong text in instrument type.
+        static let bodyStrong = Font.system(size: 13.5, weight: .semibold)
+        /// Code, in prose and in a fenced block. Mono, and large enough to read a command in.
+        static let code = Font.system(size: 13, design: .monospaced)
         static let meta = Font.system(size: 11.5, design: .monospaced)
         static let micro = Font.system(size: 10.5, weight: .medium, design: .monospaced)
 

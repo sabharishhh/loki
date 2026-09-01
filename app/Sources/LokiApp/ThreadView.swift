@@ -71,12 +71,8 @@ private struct TurnView: View {
 
         case .assistant:
             // Full measure, no container. Prose, because it is prose.
-            Text(turn.text)
-                .font(Theme.Text.record)
-                .lineSpacing(Theme.Text.recordLineSpacing)
-                .foregroundStyle(Theme.Colors.ink)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            MarkdownText(text: turn.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
