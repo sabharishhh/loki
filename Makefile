@@ -38,6 +38,9 @@ check:  ## Everything CI would run. Fails loudly on the first problem
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
+	@# From a clean .build, so an incremental cache cannot hide a link failure. That is exactly
+	@# how a missing zlib link stayed invisible for several commits.
+	rm -rf app/.build
 	cd app && swift build
 	@echo "check passed"
 

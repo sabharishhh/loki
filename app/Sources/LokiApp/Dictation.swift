@@ -21,6 +21,8 @@ final class Dictation {
         case denied
         case preparing
         case listening
+        /// Flushing the analyzer. Not listening any more, and not ready to start again either.
+        case stopping
         case unavailable(String)
     }
 
@@ -45,8 +47,11 @@ final class Dictation {
     var isListening: Bool { status == .listening }
 
     /// Begins an utterance. Idempotent.
+    ///
+    /// A previous failure is not a reason to refuse the next attempt, so `.unavailable` and
+    /// `.denied` both restart.
     func start() async {
-        guard status == .idle || status == .denied else { return }
+        guard canStart else { return }
         status = .preparing
         transcript = ""
         finalized = ""
@@ -67,13 +72,74 @@ final class Dictation {
     }
 
     /// Ends the utterance and returns the finished text.
+    ///
+    /// Order matters. `finalizeAndFinishThroughEndOfInput` waits for the input sequence to end, so
+    /// the microphone and the input stream have to be closed before it is called. Finalizing
+    /// first waits forever on a stream nothing will ever close, and a stop that never returns
+    /// leaves the mic stuck on and the next utterance appended to this one.
     @discardableResult
     func stop() async -> String {
         guard status == .listening || status == .preparing else { return "" }
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        await teardown()
+        // Held through the flush. A click arriving mid-teardown would otherwise start a session
+        // whose analyzer this teardown then releases.
+        status = .stopping
+
+        endInput()
+        await finalize()
+        releaseAnalyzer()
+
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        levels = []
         status = .idle
-        return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text
+    }
+
+    private var canStart: Bool {
+        switch status {
+        case .idle, .denied, .unavailable: true
+        case .preparing, .listening, .stopping: false
+        }
+    }
+
+    /// Closes the microphone and the input stream. Must happen before finalizing.
+    private func endInput() {
+        if let session {
+            // stopRunning blocks, and the session is not touched again.
+            nonisolated(unsafe) let stopping = session
+            Task.detached { stopping.stopRunning() }
+        }
+        session = nil
+        pump = nil
+        inputContinuation?.finish()
+        inputContinuation = nil
+    }
+
+    /// Flushes the last words out of the analyzer.
+    ///
+    /// With the input already closed this returns in about a tenth of a second, measured. The
+    /// bound is defence: a wedged analyzer must not be able to leave the microphone stuck on.
+    /// Losing the tail of an utterance is recoverable; a stuck microphone is not.
+    ///
+    /// Cancelling the flush does not interrupt it, so the bound cancels a *waiter* instead and
+    /// lets the flush finish on its own. Awaiting a throwing task's value is cancellation-aware,
+    /// which is what makes that work.
+    private func finalize() async {
+        guard let analyzer else { return }
+        let flush = Task.detached { try await analyzer.finalizeAndFinishThroughEndOfInput() }
+
+        let waiter = Task { try await flush.value }
+        let bound = Task {
+            try? await Task.sleep(for: .seconds(2))
+            waiter.cancel()
+        }
+        _ = try? await waiter.value
+        bound.cancel()
+    }
+
+    private func releaseAnalyzer() {
+        analyzer = nil
+        tasks.forEach { $0.cancel() }
+        tasks.removeAll()
     }
 
     private func begin() async throws {
@@ -215,17 +281,12 @@ final class Dictation {
 
     static let waveformBars = 32
 
+    /// Abandons an utterance without flushing. Used when starting failed partway through.
     private func teardown() async {
-        session?.stopRunning()
-        session = nil
-        pump = nil
-        inputContinuation?.finish()
-        inputContinuation = nil
+        endInput()
         levels = []
         await analyzer?.cancelAndFinishNow()
-        analyzer = nil
-        tasks.forEach { $0.cancel() }
-        tasks.removeAll()
+        releaseAnalyzer()
     }
 }
 

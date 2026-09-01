@@ -196,7 +196,22 @@ struct Composer: View {
     }
 
     private func submit() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Sending while the mic is live would carry this recording into the next turn.
+        guard !isListening else {
+            Task {
+                let spoken = await conversation.stopDictation()
+                let combined = (draftBeforeTalk + " " + spoken)
+                    .trimmingCharacters(in: .whitespaces)
+                draftBeforeTalk = ""
+                sendNow(combined)
+            }
+            return
+        }
+        sendNow(draft)
+    }
+
+    private func sendNow(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
         conversation.send(text)
@@ -210,24 +225,41 @@ struct Composer: View {
 struct Waveform: View {
     let levels: [Float]
 
+    private static let minHeight: CGFloat = 2
+    private static let maxHeight: CGFloat = 18
+
     var body: some View {
+        // Bars share the available width rather than taking a fixed one, so the trace reaches the
+        // right edge instead of stopping partway and looking truncated.
         HStack(alignment: .center, spacing: 2) {
             ForEach(0..<Dictation.waveformBars, id: \.self) { index in
                 Capsule()
-                    .fill(Theme.State.reading.color)
-                    .frame(width: 2, height: height(at: index))
+                    .fill(Theme.State.reading.color.opacity(opacity(at: index)))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: height(at: index))
             }
         }
-        .animation(.linear(duration: 0.08), value: levels.count)
+        .frame(maxWidth: .infinity)
+        .animation(.linear(duration: 0.08), value: levels)
         .accessibilityLabel("Listening")
     }
 
-    /// Bars fill from the right, so the newest sample is nearest the cursor.
-    private func height(at index: Int) -> CGFloat {
+    /// Newest sample at the right, so the trace runs toward the send button.
+    private func level(at index: Int) -> Float {
         let offset = Dictation.waveformBars - levels.count
-        guard index >= offset else { return 2 }
-        let level = levels[index - offset]
-        return max(2, CGFloat(level) * 18)
+        guard index >= offset, index - offset < levels.count else { return 0 }
+        return levels[index - offset]
+    }
+
+    private func height(at index: Int) -> CGFloat {
+        Self.minHeight + CGFloat(level(at: index)) * (Self.maxHeight - Self.minHeight)
+    }
+
+    /// The oldest bars fade rather than stopping dead, so the left end reads as history running
+    /// out rather than as the trace being cut.
+    private func opacity(at index: Int) -> Double {
+        let position = Double(index) / Double(max(Dictation.waveformBars - 1, 1))
+        return 0.35 + position * 0.65
     }
 }
 
