@@ -24,7 +24,10 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
     /// the menu bar popover, and that panel is still dismissing when the action fires. Ordering a
     /// window in underneath a closing panel loses the race.
     func show() {
-        uiTrace("6 show, hopping to next runloop")
+        // Become a Dock app before the hop. The policy change needs a run loop pass to land, and
+        // activating inside the same pass finds the app still an accessory and does nothing.
+        NSApp.setActivationPolicy(.regular)
+        uiTrace("6 policy set regular, hopping to next runloop")
         DispatchQueue.main.async { [self] in
             uiTrace("7 present on next runloop")
             present()
@@ -58,25 +61,31 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
         reveal(window)
     }
 
-    /// Brings a window forward from an app that is not, and may never become, active.
+    /// Brings the window forward and puts Loki in the Dock while it is open.
     ///
-    /// `orderFrontRegardless` is the part that matters: an accessory app clicked in the menu bar
-    /// is not the active application, and a plain `makeKeyAndOrderFront` from one is allowed to
-    /// do nothing. Activation comes after, because there has to be a window to activate onto.
+    /// The app ships as `LSUIElement`, which means accessory: no Dock icon, no app menu, and
+    /// never the active application. An accessory app cannot activate itself, so
+    /// `NSApp.activate` alone does nothing and the window never comes forward.
+    ///
+    /// [`show`] switches to `.regular` a run loop pass earlier, which gives the Dock icon, the
+    /// app menu, and real activation. `orderFrontRegardless` stays as the belt to that braces.
     private func reveal(_ window: NSWindow) {
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         uiTrace(
             "8 revealed visible=\(window.isVisible) key=\(window.isKeyWindow) "
-                + "frame=\(window.frame) screens=\(NSScreen.screens.count) "
-                + "active=\(NSApp.isActive)"
+                + "active=\(NSApp.isActive) policy=\(NSApp.activationPolicy().rawValue)"
         )
     }
 
-    /// Closing hides the window. The conversation outlives it, so reopening resumes the thread.
+    /// Closing hides the window and drops Loki back to the menu bar.
+    ///
+    /// The conversation outlives the window, so reopening resumes the same thread.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+        uiTrace("9 window closed, back to accessory")
         return false
     }
 }

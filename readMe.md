@@ -73,7 +73,8 @@ make run
 ```
 
 Builds `Loki.app` and launches it with your shell's environment, so the key comes through. The
-thread window opens straight away. The square in the menu bar is a shortcut back to it.
+thread window opens straight away, and Loki appears in the Dock while it is open. Close the
+window and it drops back to the menu bar with no Dock icon. The square in the menu bar reopens it.
 
 **Keep the key on the same line as the command.** A newline turns it into a shell variable that is
 never exported, and the app starts with no key:
