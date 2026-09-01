@@ -27,6 +27,8 @@ struct LokiApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let conversation = Conversation()
     private var thread: ThreadWindowController?
+    /// Guards against re-entering the close when the reply comes back through the delegate.
+    private var closing = false
 
     override init() {
         super.init()
@@ -44,6 +46,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         uiTrace("hotkey opt+space claimed=\(claimed)")
 
         openThread()
+    }
+
+    /// Consolidation runs at session close, because the app is already awake (§9.8).
+    ///
+    /// `applicationShouldTerminate` rather than `willTerminate`, since the pass makes model calls
+    /// and a delegate that has already returned cannot hold the process open for them. Bounded, so
+    /// a slow provider cannot make quitting feel broken: losing one session's consolidation costs
+    /// a re-derivation, and the episode file is still on disk either way.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !closing else { return .terminateNow }
+        closing = true
+
+        Task { @MainActor in
+            let done = Task { await conversation.endSession() }
+            let bound = Task {
+                try? await Task.sleep(for: .seconds(20))
+                done.cancel()
+            }
+            _ = await done.value
+            bound.cancel()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

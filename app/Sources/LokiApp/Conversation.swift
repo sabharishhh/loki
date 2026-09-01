@@ -17,6 +17,8 @@ struct Step: Identifiable {
     let id = UUID()
     let verb: String
     let detail: String
+    /// What the step returned, when it returned something worth reading.
+    var output: String?
 }
 
 /// A stretch of work that held resources. Renders as a rail in the left gutter.
@@ -26,6 +28,12 @@ struct Scope: Identifiable {
     var state: Theme.State
     var steps: [Step] = []
     var elapsed: UInt64?
+    /// Depth in the scope tree. A nested scope is indented under its parent so a code-mode
+    /// script's calls read as its own steps rather than as a flat list (§13.3).
+    var depth: Int = 0
+    /// A turn cut short. The rail keeps a mark rather than vanishing, because what was kept and
+    /// what was dropped is exactly what a user needs after an interrupt (§18.3).
+    var interrupted = false
 }
 
 /// What the composer is doing.
@@ -257,8 +265,24 @@ final class Conversation {
 
         case "scope_opened":
             guard let id = fields["id"] as? UInt64 else { return }
+            // A scope opened inside another is one level deeper. The core sends the parent, so
+            // the depth is read rather than guessed from arrival order.
+            let parent = fields["parent"] as? UInt64
+            let depth = parent.flatMap { id in
+                entries.compactMap { entry -> Int? in
+                    if case let .scope(scope) = entry, scope.id == id { return scope.depth + 1 }
+                    return nil
+                }.last
+            } ?? 0
             entries.append(
-                .scope(Scope(id: id, kind: fields["kind"] as? String ?? "tool", state: .reading))
+                .scope(
+                    Scope(
+                        id: id,
+                        kind: fields["kind"] as? String ?? "tool",
+                        state: .reading,
+                        depth: depth
+                    )
+                )
             )
 
         case "scope_closed":
@@ -271,7 +295,13 @@ final class Conversation {
         case "tool_called":
             guard let tool = fields["tool"] as? String else { return }
             if fields["tier"] as? String == "irreversible" { composer = .needsYou }
-            appendStep(Step(verb: "call", detail: tool))
+            appendStep(Step(verb: "call", detail: tool, output: fields["args"] as? String))
+
+        case "tool_returned":
+            // The output lands on the step that called it, so the well sits under its own row
+            // rather than at the end of the scope.
+            let summary = fields["summary"] as? String
+            attachOutput(summary)
 
         case "memory_recalled":
             let count = (fields["concept_ids"] as? [String])?.count ?? 0
@@ -288,6 +318,7 @@ final class Conversation {
             composer = .idle
             streaming = nil
             markOpenScopesInterrupted()
+            markCut()
 
         case "task_finished":
             composer = .idle
@@ -316,6 +347,26 @@ final class Conversation {
     private func refreshRecalled() {
         let found = core?.recalled ?? []
         withAnimation(Theme.Motion.standard) { recalled = found }
+    }
+
+    /// Marks the cut, so the thread shows where the turn stopped rather than just stopping.
+    /// Attaches output to the most recent step of the open scope.
+    private func attachOutput(_ output: String?) {
+        guard let output, !output.isEmpty else { return }
+        for index in entries.indices.reversed() {
+            guard case .scope(var scope) = entries[index], !scope.steps.isEmpty else { continue }
+            scope.steps[scope.steps.count - 1].output = output
+            entries[index] = .scope(scope)
+            return
+        }
+    }
+
+    private func markCut() {
+        for index in entries.indices {
+            guard case .scope(var scope) = entries[index], scope.state != .released else { continue }
+            scope.interrupted = true
+            entries[index] = .scope(scope)
+        }
     }
 
     private func markOpenScopesInterrupted() {
