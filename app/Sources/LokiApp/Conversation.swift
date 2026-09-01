@@ -82,6 +82,10 @@ final class Conversation {
     private(set) var recalled: [RecalledClaim] = []
     /// Up to three lines at session close, and nothing when nothing happened (§17.4).
     private(set) var summary: [String] = []
+    /// Whether the turn now running asked Loki to remember something (§8.1).
+    private var captureWhenDone = false
+    /// Set while a capture is in flight, so two turns cannot consolidate at once.
+    private var capturing = false
 
     /// The per-turn cap the rail counts against. Mirrors `RECALL_CAP` in the core.
     static let recallCap = 5
@@ -151,6 +155,17 @@ final class Conversation {
         }
     }
 
+    /// Captures now, because the user asked Loki to remember something (§8.1).
+    ///
+    /// Runs after the reply rather than before it, so the answer is never held up by a pass whose
+    /// result the answer does not need.
+    private func capture() async {
+        guard !capturing else { return }
+        capturing = true
+        await endSession()
+        capturing = false
+    }
+
     /// Consolidates the session and shows the summary, if there is one worth showing.
     ///
     /// Silence when nothing happened: a card that says "learned nothing today" teaches people to
@@ -204,12 +219,31 @@ final class Conversation {
         entries.append(.turn(Turn(speaker: .user, text: text)))
         lastError = nil
         composer = .running
+        // §8.1's exception: an explicit instruction to remember applies to this session, not the
+        // next one. Everything else waits for session close, because a model call per turn buys
+        // little on turns that contain nothing durable.
+        captureWhenDone = Conversation.isExplicitInstruction(text)
         do {
             try core.send(text)
         } catch {
             lastError = String(describing: error)
             composer = .idle
         }
+    }
+
+    /// Whether a message is an instruction to remember something, rather than a passing remark.
+    ///
+    /// Deliberately literal. A heuristic that fires too widely turns every turn into a model call,
+    /// and one that guesses at intent would capture things the user did not ask to keep. When it
+    /// misses, the fact is still captured at session close, so the cost of a miss is a delay
+    /// rather than a loss.
+    static func isExplicitInstruction(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let phrases = [
+            "remember", "note that", "keep in mind", "don't forget", "do not forget",
+            "for future reference", "from now on", "make a note",
+        ]
+        return phrases.contains { lowered.contains($0) }
     }
 
     func interrupt() {
@@ -326,6 +360,10 @@ final class Conversation {
             // Event-driven, not polled. Principle 8 forbids a timer for this.
             refreshSpend()
             refreshRecalled()
+            if captureWhenDone {
+                captureWhenDone = false
+                Task { await capture() }
+            }
             // A blocked event already said why. Only speak up if nothing did.
             if fields["status"] as? String == "failed", lastError == nil {
                 lastError = "That did not work."

@@ -599,6 +599,13 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
             return Vec::new();
         };
         let rows = memory.timeline_rows(&report, today).await;
+
+        // §8.1's one accepted cache miss: what was just learned has to be usable on the very next
+        // turn, not after a relaunch.
+        if !rows.is_empty() {
+            let mut guard = loop_handle.lock().await;
+            let _ = guard.refresh_working_set().await;
+        }
         loki_core::memory::timeline::summary(&rows)
     });
     json_string(&serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_owned()))

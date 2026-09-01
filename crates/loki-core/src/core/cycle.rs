@@ -151,6 +151,25 @@ impl Loop {
         self.turn.compact(keep, summary);
     }
 
+    /// Re-reads the working set into the frozen prefix.
+    ///
+    /// §8.1: an explicit instruction to remember something "regenerates the working set
+    /// immediately and accepts one cache miss". This is that cache miss, taken deliberately and
+    /// only when the user asked for it, rather than on every turn.
+    ///
+    /// # Errors
+    /// Fails if the working set cannot be read.
+    pub async fn refresh_working_set(&mut self) -> Result<(), LoopError> {
+        let Some(memory) = self.memory.clone() else {
+            return Ok(());
+        };
+        let working_set = memory.working_set().await.map_err(LoopError::Memory)?;
+        if !working_set.is_empty() {
+            self.prefix.set_working_set(working_set);
+        }
+        Ok(())
+    }
+
     /// Closes the session: consolidate, regenerate the working set, forget the raw turns.
     ///
     /// Runs at session close because the app is already awake, and every session, so the cost

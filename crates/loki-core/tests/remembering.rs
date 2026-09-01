@@ -402,3 +402,48 @@ async fn a_close_that_runs_out_of_budget_reports_what_is_left() {
     assert_eq!(report.remaining, ["episodes/2026-09-01.md"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §8.1's exception: an explicit instruction has to be usable on the very next turn.
+#[tokio::test]
+async fn what_was_just_learned_reaches_the_next_turns_prompt() {
+    let dir = scratch("immediate");
+    let provider = Recorder::new("Noted.");
+    let memory = memory_at(&dir, "one").await;
+    let mut session = a_loop(provider.clone());
+    session.attach_memory(memory).await.expect("memory");
+
+    session
+        .turn_with(
+            "remember that I moved to the infra team",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    // The capture the app runs when it sees an explicit instruction.
+    session
+        .end_session(
+            &OneFact {
+                surface: "Sabharish".to_string(),
+                fact: "works on the infra team".to_string(),
+            },
+            &FirstMatch,
+            &Unbounded,
+        )
+        .await
+        .expect("capture");
+    session.refresh_working_set().await.expect("refresh");
+
+    session
+        .turn_with("which team am I on?", CancellationToken::new())
+        .await
+        .expect("ask");
+
+    let request = provider.last();
+    let prefix: String = request.system.iter().map(|b| b.text.clone()).collect();
+    assert!(
+        prefix.contains("infra team"),
+        "the working set did not regenerate mid-session: {prefix}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
