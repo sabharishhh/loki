@@ -30,5 +30,6 @@ xcuserdata/
 # Editor state
 .vscode/
 .idea/
+*.xcworkspace/
 # Xcode scheme and workspace state for the SwiftPM package
 app/.swiftpm/
