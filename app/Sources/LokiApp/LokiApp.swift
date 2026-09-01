@@ -1,38 +1,59 @@
+import AppKit
+import Foundation
 import LokiCore
 import SwiftUI
 
 /// Menu bar app. `LSUIElement` in the bundle Info.plist keeps it out of the Dock.
 @main
 struct LokiApp: App {
-    @State private var conversation = Conversation()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(conversation: conversation)
+            MenuBarView(conversation: delegate.conversation, onOpen: delegate.openThread)
         } label: {
             Image(systemName: "square.fill")
         }
         .menuBarExtraStyle(.window)
-
-        Window("Loki", id: "thread") {
-            ThreadWindow(conversation: conversation)
-        }
-        .defaultSize(width: 980, height: 720)
-        .windowResizability(.contentMinSize)
-        // A menu bar app opens on demand, never at launch. Without this the window opens behind
-        // everything when run as a bare binary and not at all from the bundle, which is two
-        // different behaviours for the same code.
-        .defaultLaunchBehavior(.suppressed)
-        .commands {
-            CommandGroup(after: .newItem) {
-                Button("Interrupt") { conversation.interrupt() }
-                    .keyboardShortcut(.escape, modifiers: [])
-            }
-        }
     }
 }
 
-private struct ThreadWindow: View {
+/// Owns everything that outlives a window.
+///
+/// An `NSApplicationDelegate` rather than state on the `App`, because the window has to be
+/// created after the run loop is up. A task scheduled from an initializer never gets there.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let conversation = Conversation()
+    private var thread: ThreadWindowController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Handy while developing: skip the menu bar click on every run.
+        if ProcessInfo.processInfo.environment["LOKI_OPEN_AT_LAUNCH"] != nil {
+            openThread()
+        }
+    }
+
+    /// Reopening from Finder or the Dock shows the thread rather than doing nothing.
+    ///
+    /// Returns false because this handled it. Returning true lets AppKit also run its own reopen,
+    /// which creates a stray untitled window beside ours.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows: Bool
+    ) -> Bool {
+        openThread()
+        return false
+    }
+
+    func openThread() {
+        let thread = thread ?? ThreadWindowController(conversation: conversation)
+        self.thread = thread
+        thread.show()
+    }
+}
+
+struct ThreadWindow: View {
     let conversation: Conversation
 
     var body: some View {
@@ -64,7 +85,9 @@ private struct TopBar: View {
                 .monospacedDigit()
                 .foregroundStyle(Theme.Colors.faint)
         }
-        .padding(.horizontal, Theme.Space.l)
+        // Leave room for the traffic lights, since the titlebar is transparent.
+        .padding(.leading, 78)
+        .padding(.trailing, Theme.Space.l)
         .padding(.vertical, Theme.Space.m)
         .background(.regularMaterial)
     }

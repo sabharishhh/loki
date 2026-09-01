@@ -6,7 +6,7 @@ import SwiftUI
 /// principle 8 forbids.
 struct MenuBarView: View {
     let conversation: Conversation
-    @Environment(\.openWindow) private var openWindow
+    let onOpen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
@@ -23,7 +23,7 @@ struct MenuBarView: View {
 
             Divider().overlay(Theme.Colors.line)
 
-            Button("Open Loki", action: openThread)
+            Button("Open Loki", action: onOpen)
                 .buttonStyle(.borderless)
                 .font(Theme.Text.body)
 
@@ -76,16 +76,6 @@ struct MenuBarView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.panel))
         }
-    }
-
-    /// Opens the thread window and brings it forward.
-    ///
-    /// `LSUIElement` makes this an accessory app, which is never the active application on its
-    /// own. Without the activate call the window is created behind everything and looks like
-    /// nothing happened.
-    private func openThread() {
-        openWindow(id: "thread")
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private var state: Theme.State {

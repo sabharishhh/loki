@@ -1,4 +1,8 @@
-import AVFoundation
+// AVAudioConverterInputBlock is declared @Sendable, but `convert` invokes it synchronously on the
+// calling thread and returns before it can be called again. Nothing it captures escapes or races.
+// AVFAudio predates strict concurrency and carries no annotation saying so. Drop this once the
+// framework is audited.
+@preconcurrency import AVFoundation
 import Foundation
 import Speech
 
@@ -240,18 +244,37 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             return nil
         }
 
-        var consumed = false
+        let input = OneShotInput(source)
         var error: NSError?
-        converter.convert(to: output, error: &error) { _, status in
-            if consumed {
+        converter.convert(to: output, error: &error) { _, status in input.next(status) }
+        return error == nil && output.frameLength > 0 ? output : nil
+    }
+
+    /// Hands a buffer to the converter once, then reports no more data.
+    ///
+    /// A holder rather than a captured `var`, because the converter's input block is `@Sendable`
+    /// and a mutable capture cannot be expressed safely.
+    ///
+    /// Safety invariant: `AVAudioConverter.convert` calls the block synchronously, on the calling
+    /// thread, and returns before it can be called again. One holder is created per conversion
+    /// and never escapes that call, so there is no second reference and nothing to race with.
+    /// A `Mutex` would not help, since putting a non-Sendable buffer into one is itself a send.
+    private final class OneShotInput: @unchecked Sendable {
+        private var buffer: AVAudioPCMBuffer?
+
+        init(_ buffer: AVAudioPCMBuffer) {
+            self.buffer = buffer
+        }
+
+        func next(_ status: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
+            guard let buffer else {
                 status.pointee = .noDataNow
                 return nil
             }
-            consumed = true
+            self.buffer = nil
             status.pointee = .haveData
-            return source
+            return buffer
         }
-        return error == nil && output.frameLength > 0 ? output : nil
     }
 
     private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {

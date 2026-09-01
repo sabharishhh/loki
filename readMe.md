@@ -124,6 +124,9 @@ expected. It is a compiled bundle, not source, and Xcode cannot display it. Noth
 **Xcode does not know about Cargo.** If you change Rust code, run `make core` (or
 `cargo build -p loki-ffi`) before hitting `Cmd-R`, otherwise Xcode links the previous build.
 
+Set `LOKI_OPEN_AT_LAUNCH=1` in the scheme to skip the menu bar click and get the thread window on
+every run.
+
 Running from Xcode gives you the real menu bar behaviour with no Dock icon, because
 `app/Resources/Info.plist` is embedded into the executable at link time. `Cmd-R` and
 `make run` behave the same way.
