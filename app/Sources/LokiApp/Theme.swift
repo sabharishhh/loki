@@ -73,8 +73,18 @@ enum Theme {
         static let record = Font.system(size: 15)
         /// The instrument. UI, steps, sidebar.
         static let body = Font.system(size: 13.5)
-        /// A subheading inside a response. h3, since the screen owns h1 and h2 is the title.
-        static let subhead = Font.system(size: 15, weight: .semibold)
+        /// Headings inside a response, h1 to h6. The full range: an answer can carry its own
+        /// hierarchy, and flattening it loses the structure the model wrote.
+        static func heading(_ level: Int) -> Font {
+            switch level {
+            case 1: Font.system(size: 21, weight: .semibold)
+            case 2: Font.system(size: 17, weight: .semibold)
+            case 3: Font.system(size: 15, weight: .semibold)
+            case 4: Font.system(size: 14, weight: .semibold)
+            case 5: Font.system(size: 13.5, weight: .semibold)
+            default: Font.system(size: 13.5, weight: .medium)
+            }
+        }
         /// Body at emphasis weight. Table headers and inline strong text in instrument type.
         static let bodyStrong = Font.system(size: 13.5, weight: .semibold)
         /// Code, in prose and in a fenced block. Mono, and large enough to read a command in.
