@@ -12,6 +12,7 @@ name = "loki_ffi"
 crate-type = ["staticlib"]
 
 [dependencies]
+jiff.workspace = true
 loki-core.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tokio-util.workspace = true

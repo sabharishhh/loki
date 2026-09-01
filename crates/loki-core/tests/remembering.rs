@@ -175,10 +175,8 @@ async fn a_fact_learned_in_one_session_reaches_the_next_sessions_prompt() {
     {
         let provider = Recorder::new("Noted.");
         let memory = memory_at(&dir, "one").await;
-        let mut first = a_loop(provider)
-            .with_memory(memory)
-            .await
-            .expect("with memory");
+        let mut first = a_loop(provider);
+        first.attach_memory(memory).await.expect("with memory");
         first
             .turn_with("I moved to the infra team", CancellationToken::new())
             .await
@@ -200,7 +198,8 @@ async fn a_fact_learned_in_one_session_reaches_the_next_sessions_prompt() {
     {
         let provider = Recorder::new("Noted.");
         let memory = memory_at(&dir, "two").await;
-        let mut second = a_loop(provider).with_memory(memory).await.expect("memory");
+        let mut second = a_loop(provider);
+        second.attach_memory(memory).await.expect("memory");
         second
             .turn_with("still on infra", CancellationToken::new())
             .await
@@ -220,10 +219,8 @@ async fn a_fact_learned_in_one_session_reaches_the_next_sessions_prompt() {
 
     let provider = Recorder::new("You work on infra.");
     let memory = memory_at(&dir, "three").await;
-    let mut third = a_loop(provider.clone())
-        .with_memory(memory)
-        .await
-        .expect("memory");
+    let mut third = a_loop(provider.clone());
+    third.attach_memory(memory).await.expect("memory");
     third
         .turn_with("which team am I on?", CancellationToken::new())
         .await
@@ -251,10 +248,8 @@ async fn recall_lands_in_the_turn_and_never_in_the_prefix() {
     let dir = scratch("zones");
     let provider = Recorder::new("Sure.");
     let memory = memory_at(&dir, "one").await;
-    let mut session = a_loop(provider.clone())
-        .with_memory(memory)
-        .await
-        .expect("memory");
+    let mut session = a_loop(provider.clone());
+    session.attach_memory(memory).await.expect("memory");
 
     session
         .turn_with("the deploy window is Thursday", CancellationToken::new())
@@ -330,10 +325,8 @@ async fn nothing_recalled_means_no_recall_block() {
     let dir = scratch("cold");
     let provider = Recorder::new("Hello.");
     let memory = memory_at(&dir, "one").await;
-    let mut session = a_loop(provider.clone())
-        .with_memory(memory)
-        .await
-        .expect("memory");
+    let mut session = a_loop(provider.clone());
+    session.attach_memory(memory).await.expect("memory");
 
     session
         .turn_with("hello there", CancellationToken::new())
@@ -351,10 +344,8 @@ async fn turns_are_written_to_the_episode_as_they_happen() {
     let dir = scratch("episode");
     let provider = Recorder::new("Noted.");
     let memory = memory_at(&dir, "one").await;
-    let mut session = a_loop(provider)
-        .with_memory(memory.clone())
-        .await
-        .expect("memory");
+    let mut session = a_loop(provider);
+    session.attach_memory(memory.clone()).await.expect("memory");
 
     session
         .turn_with(
@@ -388,7 +379,8 @@ async fn a_close_that_runs_out_of_budget_reports_what_is_left() {
     let dir = scratch("broke");
     let provider = Recorder::new("Noted.");
     let memory = memory_at(&dir, "one").await;
-    let mut session = a_loop(provider).with_memory(memory).await.expect("memory");
+    let mut session = a_loop(provider);
+    session.attach_memory(memory).await.expect("memory");
     session
         .turn_with("something", CancellationToken::new())
         .await

@@ -100,15 +100,18 @@ impl Loop {
     /// Gives the loop memory. The working set goes into the frozen prefix once, here, because it
     /// changes per session and not per turn (§8.1).
     ///
+    /// Takes `&mut self` rather than consuming: a store that will not open must leave a working
+    /// assistant with no recall, not no assistant.
+    ///
     /// # Errors
     /// Fails if the working set cannot be read.
-    pub async fn with_memory(mut self, memory: Arc<Memory>) -> Result<Self, LoopError> {
+    pub async fn attach_memory(&mut self, memory: Arc<Memory>) -> Result<(), LoopError> {
         let working_set = memory.working_set().await.map_err(LoopError::Memory)?;
         if !working_set.is_empty() {
             self.prefix.set_working_set(working_set);
         }
         self.memory = Some(memory);
-        Ok(self)
+        Ok(())
     }
 
     #[must_use]

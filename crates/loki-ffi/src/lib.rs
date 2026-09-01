@@ -22,6 +22,10 @@ use loki_core::core::ledger::Ledger;
 use loki_core::core::prompt::{Prefix, Standing};
 use loki_core::core::sink::{Broadcast, EventSink};
 use loki_core::core::vocab::Cents;
+use loki_core::core::vocab::Locality;
+use loki_core::memory::gate::TierScope;
+use loki_core::memory::handle::Memory;
+use loki_core::memory::index::Index;
 use loki_core::ports::model::ModelProvider;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -190,6 +194,16 @@ pub unsafe extern "C" fn loki_core_new(
         Prefix::new(SYSTEM),
         Budget::resuming(DEFAULT_CEILING, spent),
     );
+
+    // Opened here rather than lazily, so the working set reaches the frozen prefix before the
+    // first turn. A store that will not open leaves a working assistant with no recall rather
+    // than no assistant: the conversation is the floor, and memory is what it earns on top.
+    let mut core = core;
+    runtime.block_on(async {
+        if let Some(memory) = open_memory().await {
+            let _ = core.attach_memory(memory).await;
+        }
+    });
 
     Box::into_raw(Box::new(LokiCore {
         runtime,
@@ -425,6 +439,31 @@ pub unsafe extern "C" fn loki_string_free(ptr: *mut c_char) {
     }
     // SAFETY: the caller contract above guarantees this came from `CString::into_raw`.
     drop(unsafe { CString::from_raw(ptr) });
+}
+
+/// Opens the memory store for this session.
+///
+/// Returns `None` rather than an error: every failure here has the same remedy, which is to carry
+/// on without recall, and a store that cannot be opened must not stop the app from answering.
+async fn open_memory() -> Option<Arc<Memory>> {
+    let root = loki_core::paths::memory().ok()?;
+    let index = loki_core::paths::index()
+        .ok()
+        .and_then(|path| Index::open(&path).ok())
+        .or_else(|| Index::in_memory().ok())?;
+    let now = jiff::Zoned::now();
+    // The session id is the moment it started, which is unique per launch and sorts.
+    let session = now.strftime("%Y-%m-%dT%H-%M-%S").to_string();
+    Memory::open(
+        &root,
+        index,
+        session,
+        now.date(),
+        TierScope::normal(Locality::Cloud),
+    )
+    .await
+    .ok()
+    .map(Arc::new)
 }
 
 #[cfg(test)]
