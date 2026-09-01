@@ -226,6 +226,7 @@ fn blank_claim(text: &str) -> Claim {
     let epoch = Date::constant(1970, 1, 1);
     Claim {
         text: text.to_owned(),
+        attribute: String::new(),
         validity: Validity::open(epoch, epoch),
         confidence: Confidence::Medium,
         source: Source::Inferred,
@@ -272,6 +273,7 @@ fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), 
                     _ => Confidence::Medium,
                 }
             }
+            "about" => claim.attribute = super::claim::normalize_attribute(value),
             "source" => {
                 claim.source = if value == "stated" {
                     Source::Stated
@@ -369,6 +371,12 @@ pub fn render(concept: &RawConcept) -> String {
             out.push_str("- ");
             out.push_str(&claim.text);
             out.push('\n');
+
+            // Written before the dates because it is what the claim is *about*, and a reader
+            // scanning the file should see that before its validity window.
+            if !claim.attribute.is_empty() {
+                out.push_str(&format!("  about: {}\n", claim.attribute));
+            }
 
             let v = &claim.validity;
             out.push_str(&format!(

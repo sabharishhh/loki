@@ -56,6 +56,11 @@ pub struct Candidate {
     pub surface: String,
     pub kind: Kind,
     pub heading: String,
+    /// What the claim is about: a short predicate such as `name`, `employer`, `city`.
+    ///
+    /// Reconciliation keys on this, so an extractor that leaves it empty produces claims that
+    /// only ever accumulate and never supersede one another.
+    pub attribute: String,
     pub text: String,
     /// Days before the reference, for a relative expression. `None` means it is already absolute.
     pub days_ago: Option<i64>,
@@ -212,7 +217,8 @@ async fn absorb(
     let claim = match candidate.source {
         Source::Stated => Claim::stated(&candidate.text, valid_from),
         Source::Inferred => Claim::inferred(&candidate.text, valid_from, today),
-    };
+    }
+    .about(&candidate.attribute);
 
     match resolution {
         Resolution::Ambiguous { between } => {
@@ -344,12 +350,17 @@ fn merge(
     );
 }
 
-/// Whether two claims are about the same thing, so only one of them can be true.
+/// Whether two claims describe the same thing, so only one of them can be true (§9.7).
 ///
-/// Same heading is not enough and same text is too strict. The signal we have without a model is
-/// the section they sit under, which extraction assigns, plus them not being literally identical.
+/// Keyed on the attribute, never on the text. Comparing text calls every second fact about a
+/// person a contradiction: a name against a degree, which then takes the whole concept out of use
+/// under rule 4. That was B-25, and it made memory unusable the moment an entity had two facts.
+///
+/// Zep decides contradiction the same way, structurally, on source plus relationship plus target.
+/// A claim with no attribute never conflicts: it cannot say what it is about, so it has no
+/// standing to displace one that can.
 fn conflicts(held: &Claim, incoming: &Claim) -> bool {
-    held.validity.is_believed() && held.text != incoming.text
+    held.validity.is_believed() && held.text != incoming.text && held.same_attribute_as(incoming)
 }
 
 /// Archives stable concepts that have aged out without being used (§9.10).
@@ -440,17 +451,29 @@ You read a transcript and list the durable facts it states about people, project
 
 One fact per line, exactly this shape and nothing else:
 
-  <entity> | <person|project|preference> | <section> | <stated|inferred> | <YYYY-MM-DD or -> | <the fact>
+  <entity> | <person|project|preference> | <attribute> | <stated|inferred> | <YYYY-MM-DD or -> | <the fact>
+
+The attribute is the single most important column. It is a short lower-case key naming WHICH
+PROPERTY of the entity the fact sets: name, employer, role, city, education, birthday, pronouns,
+reply_style. Two facts sharing an entity and an attribute are treated as competing, and the newer
+one replaces the older. Two facts with different attributes both stand.
 
 Rules:
 - Only durable facts. A one-off question, a passing joke or a task instruction is not a fact.
+- Give every fact an attribute, and reuse the same key for the same property every time. `employer`
+  today and `works_at` tomorrow means the change of job is never noticed.
+- Never use one attribute for two different properties. A name and a degree are `name` and
+  `education`, never both `identity`, or one will wrongly overwrite the other.
+- One fact per line, each setting exactly one attribute. Split a sentence that states two
+  properties into two lines.
 - The entity is what the fact is ABOUT, not who mentioned it. A preference about how the assistant
   behaves belongs to that preference, never to the person who expressed it.
 - Use the same entity name every time you refer to the same thing, so it resolves to one file.
 - `stated` means the user said it about themselves or their world. `inferred` means you worked it
   out. Prefer `inferred` when unsure, since a stated fact is trusted immediately.
 - The date is when the fact started being true, not today. Use `-` if the transcript does not say.
-- Write the fact as a short statement, not a sentence about the conversation.
+- Write the fact as a short statement, not a sentence about the conversation. Phrase the same
+  property the same way each time.
 - If the transcript states nothing durable, output nothing at all.";
 
 #[async_trait]
@@ -497,7 +520,7 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split('|').map(str::trim).collect();
-            let [surface, kind, heading, source, when, fact] = parts.as_slice() else {
+            let [surface, kind, attribute, source, when, fact] = parts.as_slice() else {
                 return None;
             };
             if surface.is_empty() || fact.is_empty() {
@@ -510,11 +533,14 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
                     "preference" => Kind::Preference,
                     _ => Kind::Person,
                 },
-                heading: if heading.is_empty() {
+                // The section a claim is filed under is its attribute, so a reader opening the
+                // file sees the same grouping reconciliation uses.
+                heading: if attribute.is_empty() {
                     "Notes".to_owned()
                 } else {
-                    (*heading).to_owned()
+                    (*attribute).to_owned()
                 },
+                attribute: super::claim::normalize_attribute(attribute),
                 text: (*fact).to_owned(),
                 days_ago: None,
                 valid_from: when.parse::<Date>().ok(),

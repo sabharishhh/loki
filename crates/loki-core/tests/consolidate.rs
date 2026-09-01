@@ -100,10 +100,22 @@ impl Budget for StopsAfter {
 }
 
 fn candidate(surface: &str, text: &str, valid_from: Date, source: Source) -> Candidate {
+    about("fact", surface, text, valid_from, source)
+}
+
+/// A candidate that says which property of the entity it sets.
+fn about(
+    attribute: &str,
+    surface: &str,
+    text: &str,
+    valid_from: Date,
+    source: Source,
+) -> Candidate {
     Candidate {
         surface: surface.to_string(),
         kind: Kind::Person,
-        heading: "Notes".to_string(),
+        heading: attribute.to_string(),
+        attribute: attribute.to_string(),
         text: text.to_string(),
         days_ago: None,
         valid_from: Some(valid_from),
@@ -549,5 +561,159 @@ async fn re_consolidating_an_episode_does_not_duplicate_its_claims() {
         1,
         "the same fact three times is one claim: {:?}",
         concept.claims().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// B-25, the reported failure: a name and a degree are not a contradiction.
+///
+/// Comparing text called every second fact about a person a conflict, rule 4 then took the whole
+/// concept out of use, and Loki answered "I don't know your name yet" about a name it had stored.
+#[tokio::test]
+async fn two_different_facts_about_one_person_both_stand() {
+    let store = Store::new("coexist", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![
+            about(
+                "name",
+                "Sabharish",
+                "is called Sabharish",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+            about(
+                "education",
+                "Sabharish",
+                "is a computer science graduate",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+            about(
+                "city",
+                "Sabharish",
+                "lives in Chennai",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+        ],
+    )]);
+
+    let report = store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert!(
+        report.surfaced.is_empty(),
+        "unrelated facts were filed as conflicts: {:?}",
+        report.surfaced
+    );
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(concept.claims().count(), 3, "all three facts should stand");
+    assert!(
+        concept.claims().all(|c| c.validity.is_believed()),
+        "no fact should have been invalidated by an unrelated one"
+    );
+    assert_eq!(
+        concept.front.status,
+        Status::Stable,
+        "the concept has to stay usable, or none of it can ever be recalled"
+    );
+}
+
+/// The same attribute stated twice is a correction, and the later one wins.
+#[tokio::test]
+async fn the_same_attribute_stated_again_supersedes() {
+    let store = Store::new("supersede", &["episodes/a.md", "episodes/b.md"]).await;
+    let extractor = Scripted::new(vec![
+        (
+            "episodes/a.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "lives in Chennai",
+                date(2026, 1, 1),
+                Source::Stated,
+            )],
+        ),
+        (
+            "episodes/b.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "lives in Bangalore",
+                date(2026, 7, 1),
+                Source::Stated,
+            )],
+        ),
+    ]);
+
+    store
+        .go(
+            &[
+                episode("episodes/a.md", date(2026, 1, 1)),
+                episode("episodes/b.md", date(2026, 7, 1)),
+            ],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    let old = concept
+        .claims()
+        .find(|c| c.text.contains("Chennai"))
+        .expect("the old claim is kept, not deleted");
+    assert!(
+        !old.validity.is_believed(),
+        "the old city should be retired"
+    );
+    assert_eq!(old.replaced_by.as_deref(), Some("lives in Bangalore"));
+    assert_eq!(concept.front.status, Status::Stable);
+}
+
+/// A claim that cannot say what it is about has no standing to displace one that can.
+#[tokio::test]
+async fn a_claim_with_no_attribute_never_conflicts() {
+    let store = Store::new("no-key", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![
+            about(
+                "",
+                "Sabharish",
+                "something vague",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+            about(
+                "",
+                "Sabharish",
+                "something else vague",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+        ],
+    )]);
+
+    let report = store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert!(report.surfaced.is_empty(), "{:?}", report.surfaced);
+    assert_eq!(
+        store
+            .concept_at("people/sabharish.md")
+            .await
+            .claims()
+            .count(),
+        2
     );
 }

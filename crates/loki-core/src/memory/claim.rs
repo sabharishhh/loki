@@ -97,6 +97,17 @@ impl Validity {
 pub struct Claim {
     /// The statement, as a person would read it.
     pub text: String,
+    /// What this claim is *about*: a short predicate such as `name`, `employer`, `city`.
+    ///
+    /// The key reconciliation turns on. Two claims conflict only when they describe the same
+    /// attribute of the same entity, which is how Zep decides contradiction and what §9.5's
+    /// `## Role` example was reaching for. Without it the only implementable test is comparing
+    /// text, and that calls every second fact about a person a contradiction.
+    ///
+    /// Empty means unknown, which never conflicts with anything: a claim that cannot say what it
+    /// is about has no standing to displace one that can.
+    #[serde(default)]
+    pub attribute: String,
     pub validity: Validity,
     pub confidence: Confidence,
     pub source: Source,
@@ -116,6 +127,7 @@ impl Claim {
     pub fn stated(text: impl Into<String>, today: Date) -> Self {
         Self {
             text: text.into(),
+            attribute: String::new(),
             validity: Validity::open(today, today),
             confidence: Confidence::High,
             source: Source::Stated,
@@ -130,6 +142,7 @@ impl Claim {
     pub fn inferred(text: impl Into<String>, valid_from: Date, learned: Date) -> Self {
         Self {
             text: text.into(),
+            attribute: String::new(),
             validity: Validity::open(valid_from, learned),
             confidence: Confidence::Low,
             source: Source::Inferred,
@@ -137,6 +150,22 @@ impl Claim {
             replaced_by: None,
             usage_count: 0,
         }
+    }
+
+    /// Sets what this claim is about. Normalized, so `Employer` and `employer ` are one key.
+    #[must_use]
+    pub fn about(mut self, attribute: impl AsRef<str>) -> Self {
+        self.attribute = normalize_attribute(attribute.as_ref());
+        self
+    }
+
+    /// Whether two claims describe the same thing, and so cannot both be true (§9.7).
+    ///
+    /// An unknown attribute never collides. Getting this wrong in the permissive direction files
+    /// unrelated facts as contradictions and takes the whole concept out of use.
+    #[must_use]
+    pub fn same_attribute_as(&self, other: &Self) -> bool {
+        !self.attribute.is_empty() && self.attribute == other.attribute
     }
 
     /// Whether this claim may be pre-fetched or put in the working set.
@@ -172,6 +201,12 @@ impl Claim {
     }
 }
 
+/// Lowercases and trims an attribute key, so casing and spacing do not split one attribute in two.
+#[must_use]
+pub fn normalize_attribute(raw: &str) -> String {
+    raw.trim().to_lowercase().replace([' ', '-'], "_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +216,7 @@ mod tests {
     fn job_change() -> (Claim, Claim) {
         let mut old = Claim {
             text: "Works on the platform team".into(),
+            attribute: String::new(),
             validity: Validity::open(date(2026, 3, 12), date(2026, 3, 12)),
             confidence: Confidence::High,
             source: Source::Stated,
@@ -196,6 +232,7 @@ mod tests {
 
         let new = Claim {
             text: "Works on the infra team".into(),
+            attribute: String::new(),
             validity: Validity::open(date(2026, 7, 15), date(2026, 8, 29)),
             confidence: Confidence::High,
             source: Source::Stated,

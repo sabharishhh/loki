@@ -45,14 +45,26 @@ pub fn precedence(held: &Claim, incoming: &Claim, incoming_is_explicit: bool) ->
     match incoming.validity.valid_from.cmp(&held.validity.valid_from) {
         std::cmp::Ordering::Greater => Precedence::Replace,
         std::cmp::Ordering::Less => Precedence::Keep,
-        // 4. Neither is clearly newer. Guessing is how a memory system poisons itself.
         std::cmp::Ordering::Equal => {
-            if held.source == Source::Stated {
-                Precedence::Surface
-            } else {
-                // Two inferred claims of the same vintage. Neither has standing to displace the
-                // other, and surfacing every import collision would bury the user.
-                Precedence::Keep
+            // Equal world time usually means neither statement carried a date, not that the two
+            // facts genuinely began on one day. Falling straight to rule 4 there surfaces almost
+            // every correction, so system time breaks the tie first: being told second is weaker
+            // evidence than a later start date, but it is still evidence, and it is what a person
+            // means by "actually, it is X".
+            match incoming.validity.learned.cmp(&held.validity.learned) {
+                std::cmp::Ordering::Greater => Precedence::Replace,
+                std::cmp::Ordering::Less => Precedence::Keep,
+                // 4. Told in the same breath, about the same thing, and neither is newer.
+                //    Guessing is how a memory system poisons itself.
+                std::cmp::Ordering::Equal => {
+                    if held.source == Source::Stated {
+                        Precedence::Surface
+                    } else {
+                        // Two inferred claims of one vintage. Neither has standing to displace
+                        // the other, and surfacing every import collision would bury the user.
+                        Precedence::Keep
+                    }
+                }
             }
         }
     }

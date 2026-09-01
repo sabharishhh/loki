@@ -105,7 +105,8 @@ impl Extractor for OneFact {
         Ok(vec![Candidate {
             surface: self.surface.clone(),
             kind: Kind::Person,
-            heading: "Notes".to_string(),
+            heading: "role".to_string(),
+            attribute: "role".to_string(),
             text: self.fact.clone(),
             days_ago: None,
             valid_from: Some(date(2026, 1, 1)),
