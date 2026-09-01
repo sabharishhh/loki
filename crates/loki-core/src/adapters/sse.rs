@@ -81,7 +81,8 @@ pub async fn check_status(response: reqwest::Response) -> Result<reqwest::Respon
 
     Err(match status.as_u16() {
         400 => ModelError::BadRequest(body),
-        401 | 403 => ModelError::Unauthorized,
+        // Keep the provider's own words. It knows why it refused and we do not.
+        401 | 403 => ModelError::Unauthorized(body),
         429 => ModelError::RateLimited(retry_after),
         status => ModelError::Upstream { status, body },
     })

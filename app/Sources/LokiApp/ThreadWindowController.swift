@@ -19,13 +19,17 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
     var isOpen: Bool { window?.isVisible ?? false }
 
     /// Shows the window, creating it the first time. Brings it forward either way.
+    ///
+    /// Hops to the next run loop pass before doing anything. The usual caller is a button inside
+    /// the menu bar popover, and that panel is still dismissing when the action fires. Ordering a
+    /// window in underneath a closing panel loses the race.
     func show() {
-        // An accessory app is never the active application on its own, so without this the
-        // window is ordered in behind whatever the user was looking at.
-        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [self] in present() }
+    }
 
+    private func present() {
         if let window {
-            window.makeKeyAndOrderFront(nil)
+            reveal(window)
             return
         }
 
@@ -47,7 +51,18 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
         window.setFrameAutosaveName("dev.sabharish.loki.thread")
 
         self.window = window
+        reveal(window)
+    }
+
+    /// Brings a window forward from an app that is not, and may never become, active.
+    ///
+    /// `orderFrontRegardless` is the part that matters: an accessory app clicked in the menu bar
+    /// is not the active application, and a plain `makeKeyAndOrderFront` from one is allowed to
+    /// do nothing. Activation comes after, because there has to be a window to activate onto.
+    private func reveal(_ window: NSWindow) {
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Closing hides the window. The conversation outlives it, so reopening resumes the thread.

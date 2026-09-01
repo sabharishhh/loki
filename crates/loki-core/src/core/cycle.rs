@@ -299,16 +299,16 @@ fn merge(into: &mut Usage, reported: Usage) {
 /// Turns a provider failure into something a person can act on.
 fn explain(error: &ModelError) -> String {
     match error {
-        ModelError::Unauthorized => {
-            "the API key was rejected. Check the key and the provider match".to_owned()
+        ModelError::Unauthorized(body) => {
+            format!("the key was rejected. {}", detail(body))
         }
         ModelError::RateLimited(Some(after)) => {
             format!("rate limited, try again in {}s", after.as_secs())
         }
         ModelError::RateLimited(None) => "rate limited, try again shortly".to_owned(),
-        ModelError::BadRequest(body) => format!("the request was rejected: {}", first_line(body)),
+        ModelError::BadRequest(body) => format!("the request was rejected. {}", detail(body)),
         ModelError::Upstream { status, body } => {
-            format!("the provider returned {status}: {}", first_line(body))
+            format!("returned {status}. {}", detail(body))
         }
         ModelError::Transport(detail) => format!("could not reach the provider: {detail}"),
         ModelError::Protocol(detail) => format!("could not read the response: {detail}"),
@@ -316,9 +316,30 @@ fn explain(error: &ModelError) -> String {
     }
 }
 
+/// Pulls the human-readable part out of a provider error body.
+///
+/// Both providers wrap the useful sentence in JSON. Showing the raw envelope buries it.
+fn detail(body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.pointer("/message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| first_line(body));
+
+    if message.is_empty() {
+        "No detail given.".to_owned()
+    } else {
+        message
+    }
+}
+
 /// Provider error bodies are often a wall of JSON. One line is enough to act on.
 fn first_line(body: &str) -> String {
-    const LIMIT: usize = 160;
+    const LIMIT: usize = 200;
     let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     match line.char_indices().nth(LIMIT) {
         Some((cut, _)) => format!("{}...", &line[..cut]),
@@ -408,7 +429,7 @@ mod tests {
         ) -> Result<ChunkStream, ModelError> {
             self.seen.lock().unwrap().push(req);
             if self.reject {
-                return Err(ModelError::Unauthorized);
+                return Err(ModelError::Unauthorized("test".into()));
             }
             let script: Vec<_> = self
                 .script
@@ -563,7 +584,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, LoopError::Model(ModelError::Unauthorized)));
+        assert!(matches!(err, LoopError::Model(ModelError::Unauthorized(_))));
         let emitted = events.events();
         assert!(
             emitted

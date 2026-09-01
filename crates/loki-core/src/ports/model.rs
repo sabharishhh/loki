@@ -153,8 +153,8 @@ pub enum StopReason {
 pub enum ModelError {
     #[error("request rejected: {0}")]
     BadRequest(String),
-    #[error("authentication failed")]
-    Unauthorized,
+    #[error("authentication failed: {0}")]
+    Unauthorized(String),
     #[error("rate limited, retry after {0:?}")]
     RateLimited(Option<std::time::Duration>),
     #[error("provider returned {status}: {body}")]
