@@ -5,7 +5,9 @@
 pub mod bundle;
 pub mod claim;
 pub mod concept;
+pub mod consolidate;
 pub mod gate;
 pub mod history;
 pub mod index;
+pub mod reconcile;
 pub mod resolve;

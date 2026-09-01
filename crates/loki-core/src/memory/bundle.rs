@@ -483,6 +483,26 @@ impl Writer<'_> {
         write_file(self.root, path, content)
     }
 
+    /// Deletes a file.
+    ///
+    /// Not one of §10.3's seven primitives and deliberately not exposed to the model: the only
+    /// caller is consolidation clearing the scratch sources it promoted, so the directory listing
+    /// matches what is live (§9.8). Git history keeps the content either way.
+    ///
+    /// # Errors
+    /// Fails if the path escapes the bundle. A file that is already gone is not an error.
+    pub fn remove(&self, path: &str) -> Result<(), BundleError> {
+        let full = resolve(self.root, path)?;
+        match std::fs::remove_file(&full) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(BundleError::Io {
+                path: path.to_owned(),
+                source,
+            }),
+        }
+    }
+
     /// Appends to a file, creating it if absent.
     ///
     /// # Errors
