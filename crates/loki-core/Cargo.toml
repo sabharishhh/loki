@@ -21,6 +21,9 @@ eventsource-stream.workspace = true
 async-stream.workspace = true
 rusqlite.workspace = true
 dirs.workspace = true
+serde_yaml_ng.workspace = true
+jiff.workspace = true
+strsim.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
