@@ -8,3 +8,4 @@ pub mod concept;
 pub mod gate;
 pub mod history;
 pub mod index;
+pub mod resolve;

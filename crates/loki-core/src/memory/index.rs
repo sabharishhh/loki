@@ -22,7 +22,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -47,6 +47,10 @@ const USAGE_SCALE: f32 = 5.0;
 
 /// How far the link walk goes before a concept counts as unrelated.
 const MAX_LINK_HOPS: u32 = 2;
+
+/// Jaro-Winkler above which two surface forms are close enough to be worth a model call.
+/// Deliberately loose: blocking's job is recall, and the match call rejects what does not fit.
+const NEAR_NAME: f64 = 0.88;
 
 const EPOCH: Date = date(1970, 1, 1);
 
@@ -156,6 +160,45 @@ impl Recalled {
 pub struct Use {
     pub path: String,
     pub ordinal: u32,
+}
+
+/// Why a candidate was surfaced by blocking. Ordered strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Blocking {
+    ExactName,
+    Alias,
+    NearName,
+    SharedTags,
+}
+
+impl Blocking {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::ExactName => 0,
+            Self::Alias => 1,
+            Self::NearName => 2,
+            Self::SharedTags => 3,
+        }
+    }
+}
+
+/// An entity a claim might belong to, surfaced without a model call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub path: String,
+    pub name: String,
+    pub why: Blocking,
+}
+
+/// Keeps the strongest reason a candidate was surfaced, since one entity can match several ways.
+fn promote(best: &mut HashMap<String, Candidate>, path: String, name: String, why: Blocking) {
+    best.entry(path.clone())
+        .and_modify(|c| {
+            if why.rank() < c.why.rank() {
+                c.why = why;
+            }
+        })
+        .or_insert(Candidate { path, name, why });
 }
 
 /// Uses recorded since the last flush, for consolidation to fold back into the files.
@@ -275,9 +318,21 @@ CREATE TABLE IF NOT EXISTS link (
     dst TEXT NOT NULL,
     PRIMARY KEY (src, dst)
 );
+CREATE TABLE IF NOT EXISTS alias (
+    concept INTEGER NOT NULL REFERENCES concept(id) ON DELETE CASCADE,
+    text    TEXT    NOT NULL,
+    PRIMARY KEY (concept, text)
+);
+CREATE TABLE IF NOT EXISTS tag (
+    concept INTEGER NOT NULL REFERENCES concept(id) ON DELETE CASCADE,
+    text    TEXT    NOT NULL,
+    PRIMARY KEY (concept, text)
+);
 CREATE INDEX IF NOT EXISTS claim_by_concept ON claim(concept);
 CREATE INDEX IF NOT EXISTS link_by_src ON link(src);
 CREATE INDEX IF NOT EXISTS link_by_dst ON link(dst);
+CREATE INDEX IF NOT EXISTS alias_by_text ON alias(text);
+CREATE INDEX IF NOT EXISTS tag_by_text ON tag(text);
 ";
 
 /// The ranked projection of the bundle.
@@ -330,6 +385,8 @@ impl Index {
                 "DROP TABLE IF EXISTS claim;
                  DROP TABLE IF EXISTS concept;
                  DROP TABLE IF EXISTS link;
+                 DROP TABLE IF EXISTS alias;
+                 DROP TABLE IF EXISTS tag;
                  DROP TABLE IF EXISTS claim_fts;
                  DROP TABLE IF EXISTS meta;",
             )
@@ -429,7 +486,8 @@ impl Index {
         {
             let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
             db.execute_batch(
-                "DELETE FROM claim; DELETE FROM concept; DELETE FROM link; DELETE FROM claim_fts;",
+                "DELETE FROM claim; DELETE FROM alias; DELETE FROM tag;
+                 DELETE FROM link; DELETE FROM concept; DELETE FROM claim_fts;",
             )
             .map_err(IndexError::Write)?;
         }
@@ -599,6 +657,88 @@ impl Index {
 
     /// How many claims are indexed. For tests and the Activity screen.
     ///
+    /// The blocking step of §9.4: cheap filtering to at most `limit` candidates, no model call.
+    ///
+    /// Four signals, strongest first: exact name, alias, near name by normalized distance, and
+    /// shared tags. An empty result means the entity is new, which is the case that costs nothing.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn candidates(
+        &self,
+        surface: &str,
+        tags: &[String],
+        limit: usize,
+    ) -> Result<Vec<Candidate>, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let needle = surface.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+
+        let mut best: HashMap<String, Candidate> = HashMap::new();
+        let mut stmt = db
+            .prepare(
+                "SELECT c.path, c.name, a.text FROM alias a JOIN concept c ON c.id = a.concept",
+            )
+            .map_err(IndexError::Read)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(IndexError::Read)?;
+
+        for row in rows {
+            let (path, name, form) = row.map_err(IndexError::Read)?;
+            let signal = if form == needle {
+                if form == name.to_lowercase() {
+                    Blocking::ExactName
+                } else {
+                    Blocking::Alias
+                }
+            } else if strsim::jaro_winkler(&form, &needle) >= NEAR_NAME {
+                Blocking::NearName
+            } else {
+                continue;
+            };
+            promote(&mut best, path, name, signal);
+        }
+
+        if !wanted.is_empty() {
+            let mut stmt = db
+                .prepare("SELECT c.path, c.name FROM tag t JOIN concept c ON c.id = t.concept WHERE t.text = ?1")
+                .map_err(IndexError::Read)?;
+            for tag in &wanted {
+                let rows = stmt
+                    .query_map(params![tag], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .map_err(IndexError::Read)?;
+                for row in rows {
+                    let (path, name) = row.map_err(IndexError::Read)?;
+                    promote(&mut best, path, name, Blocking::SharedTags);
+                }
+            }
+        }
+
+        let mut out: Vec<Candidate> = best.into_values().collect();
+        out.sort_by(|a, b| {
+            a.why
+                .rank()
+                .cmp(&b.why.rank())
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// How many claims are indexed. For tests and the Activity screen.
+    ///
     /// # Errors
     /// Fails if the index cannot be read.
     pub fn claim_count(&self) -> Result<usize, IndexError> {
@@ -693,6 +833,22 @@ fn put_concept(
         }
     }
 
+    // Both the name and its aliases are surface forms, so blocking looks up one table.
+    for form in std::iter::once(&concept.front.name).chain(concept.front.aliases.iter()) {
+        tx.execute(
+            "INSERT OR IGNORE INTO alias(concept, text) VALUES (?1, ?2)",
+            params![concept_id, form.to_lowercase()],
+        )
+        .map_err(IndexError::Write)?;
+    }
+    for tag in &concept.front.tags {
+        tx.execute(
+            "INSERT OR IGNORE INTO tag(concept, text) VALUES (?1, ?2)",
+            params![concept_id, tag.to_lowercase()],
+        )
+        .map_err(IndexError::Write)?;
+    }
+
     for target in links_in(text, path) {
         tx.execute(
             "INSERT OR IGNORE INTO link(src, dst) VALUES (?1, ?2)",
@@ -728,6 +884,10 @@ fn remove_concept(tx: &rusqlite::Transaction<'_>, path: &str) -> Result<(), Inde
         CLAIMS_FTS.remove(tx, claim_id).map_err(IndexError::Write)?;
     }
     tx.execute("DELETE FROM claim WHERE concept = ?1", params![id])
+        .map_err(IndexError::Write)?;
+    tx.execute("DELETE FROM alias WHERE concept = ?1", params![id])
+        .map_err(IndexError::Write)?;
+    tx.execute("DELETE FROM tag WHERE concept = ?1", params![id])
         .map_err(IndexError::Write)?;
     tx.execute("DELETE FROM link WHERE src = ?1", params![path])
         .map_err(IndexError::Write)?;
