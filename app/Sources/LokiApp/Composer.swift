@@ -13,6 +13,8 @@ struct Composer: View {
     @State private var draft = ""
     @State private var talkMonitor: Any?
     @State private var holdTimer: Task<Void, Never>?
+    /// Whether F has been down for less than the hold threshold, so releasing it is a tap.
+    @State private var pendingTap = false
     /// The in-flight stop. A new utterance waits for it, or it would read a stale draft.
     @State private var landing: Task<Void, Never>?
     @State private var draftBeforeTalk = ""
@@ -172,30 +174,43 @@ extension Composer {
             } else {
                 endHold()
             }
-            return event
+            // F never reaches the field. Letting it through and stripping it afterwards looked
+            // equivalent and was not: re-focusing after an utterance selects the whole draft, so
+            // that one keystroke replaced everything already dictated. A tap types it back.
+            return nil
         }
     }
 
     private func beginHold() {
         holdTimer?.cancel()
+        pendingTap = true
         holdTimer = Task {
             try? await Task.sleep(for: Self.holdThreshold)
+            guard !Task.isCancelled else { return }
+            pendingTap = false
             // The previous utterance may still be landing in the draft. Reading the draft before
             // it does captures a stale prefix, and the last thing dictated is then overwritten
             // instead of appended to.
             await landing?.value
             guard !Task.isCancelled else { return }
-            // Take back the character the tap already typed, and keep the rest as a prefix so
-            // holding F mid-sentence does not discard what is there.
-            startTalking(keeping: draft.hasSuffix("f") ? String(draft.dropLast()) : draft)
+            // Whatever is already in the draft is kept as a prefix, so holding F a second time
+            // continues the sentence rather than starting one.
+            startTalking(keeping: draft)
         }
     }
 
     private func endHold() {
+        let wasTap = pendingTap
+        pendingTap = false
         holdTimer?.cancel()
         holdTimer = nil
-        guard isRecording else { return }
-        stopTalking()
+
+        if isRecording {
+            stopTalking()
+        } else if wasTap {
+            // Released before the threshold, so it was a tap and F is a letter like any other.
+            draft += "f"
+        }
     }
 
     /// The mic control. Click to start, click again to stop.
@@ -224,6 +239,18 @@ extension Composer {
             draft = joined(prefix, text)
             draftBeforeTalk = ""
             focused = true
+            placeCaretAtEnd()
+        }
+    }
+
+    /// Puts the caret after the text rather than leaving the draft selected.
+    ///
+    /// Re-focusing a field on macOS selects its whole contents, which turns the next keystroke
+    /// into a delete. Runs a tick later, because focus has to land before the field editor exists.
+    private func placeCaretAtEnd() {
+        DispatchQueue.main.async {
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
+            editor.setSelectedRange(NSRange(location: editor.string.count, length: 0))
         }
     }
 
