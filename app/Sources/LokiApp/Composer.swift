@@ -13,6 +13,8 @@ struct Composer: View {
     @State private var draft = ""
     @State private var talkMonitor: Any?
     @State private var holdTimer: Task<Void, Never>?
+    /// The in-flight stop. A new utterance waits for it, or it would read a stale draft.
+    @State private var landing: Task<Void, Never>?
     @State private var draftBeforeTalk = ""
     @FocusState private var focused: Bool
 
@@ -178,6 +180,10 @@ extension Composer {
         holdTimer?.cancel()
         holdTimer = Task {
             try? await Task.sleep(for: Self.holdThreshold)
+            // The previous utterance may still be landing in the draft. Reading the draft before
+            // it does captures a stale prefix, and the last thing dictated is then overwritten
+            // instead of appended to.
+            await landing?.value
             guard !Task.isCancelled else { return }
             // Take back the character the tap already typed, and keep the rest as a prefix so
             // holding F mid-sentence does not discard what is there.
@@ -210,12 +216,24 @@ extension Composer {
     }
 
     private func stopTalking() {
-        Task {
+        // Captured now rather than after the await, so a second hold starting in the meantime
+        // cannot change which prefix this utterance appends to.
+        let prefix = draftBeforeTalk
+        landing = Task {
             let text = await conversation.stopDictation()
-            draft = (draftBeforeTalk + " " + text).trimmingCharacters(in: .whitespaces)
+            draft = joined(prefix, text)
             draftBeforeTalk = ""
             focused = true
         }
+    }
+
+    /// Appends an utterance to what was already there, with one space and no stray edges.
+    private func joined(_ prefix: String, _ spoken: String) -> String {
+        let left = prefix.trimmingCharacters(in: .whitespaces)
+        let right = spoken.trimmingCharacters(in: .whitespaces)
+        if left.isEmpty { return right }
+        if right.isEmpty { return left }
+        return left + " " + right
     }
 
     private func stopWatching() {

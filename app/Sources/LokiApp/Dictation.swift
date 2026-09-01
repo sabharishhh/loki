@@ -237,6 +237,7 @@ final class Dictation {
                     for try await result in transcriber.results {
                         continuation.yield(Segment(
                             start: result.range.start.seconds,
+                            end: result.range.end.seconds,
                             text: String(result.text.characters),
                             isFinal: result.isFinal
                         ))
@@ -258,6 +259,7 @@ final class Dictation {
                     for try await result in transcriber.results {
                         continuation.yield(Segment(
                             start: result.range.start.seconds,
+                            end: result.range.end.seconds,
                             text: String(result.text.characters),
                             isFinal: result.resultsFinalizationTime >= result.range.end
                         ))
@@ -470,32 +472,43 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     }
 }
 
-/// One result from a transcriber, tagged with where in the utterance it belongs.
+/// One result from a transcriber, tagged with the span of the utterance it covers.
 struct Segment {
     let start: Double
+    let end: Double
     let text: String
     let isFinal: Bool
 }
 
-/// An utterance assembled from segments that arrive out of order and get revised.
+/// An utterance assembled from the pieces a transcriber returns.
 ///
-/// A transcriber does not hand back one growing string. It finalizes the utterance in pieces and
-/// keeps revising the piece it is still working on, so each result covers only its own time
-/// range. Keying by range start and rebuilding is the only assembly that survives that: taking
-/// the newest result as the whole transcript loses every earlier piece, which is how "Hey Loki,
-/// how are you?" once ended up in the composer as "?".
+/// A transcriber does not hand back one growing string. It finalizes an utterance in pieces and
+/// keeps revising the piece it is still working on, so each result covers only its own span.
+/// Two rules follow, and both were bugs before they were rules.
+///
+/// Taking the newest result as the whole transcript loses every earlier piece, which is how
+/// "Hey Loki, how are you?" once arrived in the composer as "?".
+///
+/// Settled pieces partition the utterance, so a new one evicts any it overlaps. Without that, the
+/// same span re-finalized at a marginally different start is kept twice and the words appear
+/// twice, with no space between them.
 struct Transcript {
-    private var settled: [Double: String] = [:]
-    private var pending: (start: Double, text: String)?
+    private struct Piece {
+        let start: Double
+        let end: Double
+        let text: String
+    }
 
-    /// The utterance so far, settled pieces followed by the piece still being revised.
+    private var settled: [Piece] = []
+    private var pending: Piece?
+
+    /// The utterance so far: settled pieces in order, then the piece still being revised.
     var text: String {
-        var pieces = settled.keys.sorted().map { settled[$0, default: ""] }
-        if let pending, settled[pending.start] == nil {
+        var pieces = settled.map(\.text)
+        if let pending, !overlapsSettled(pending) {
             pieces.append(pending.text)
         }
-        // Segments carry their own leading space, so joining adds none and the result is tidied
-        // once at the end.
+        // Pieces carry their own leading space, so joining adds none and the result is tidied once.
         return pieces
             .joined()
             .split(separator: " ", omittingEmptySubsequences: true)
@@ -503,13 +516,26 @@ struct Transcript {
     }
 
     mutating func absorb(_ segment: Segment) {
-        if segment.isFinal {
-            settled[segment.start] = segment.text
-            if pending?.start == segment.start {
-                pending = nil
-            }
-        } else {
-            pending = (segment.start, segment.text)
+        let piece = Piece(start: segment.start, end: segment.end, text: segment.text)
+        guard segment.isFinal else {
+            pending = piece
+            return
         }
+        var kept = settled.filter { !overlaps($0, piece) }
+        kept.append(piece)
+        kept.sort { $0.start < $1.start }
+        settled = kept
+        if let pending, overlaps(pending, piece) {
+            self.pending = nil
+        }
+    }
+
+    private func overlapsSettled(_ piece: Piece) -> Bool {
+        settled.contains { overlaps($0, piece) }
+    }
+
+    /// Spans touching at an edge are adjacent, not overlapping, so the comparison is strict.
+    private func overlaps(_ a: Piece, _ b: Piece) -> Bool {
+        a.start < b.end && b.start < a.end
     }
 }
