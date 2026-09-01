@@ -382,9 +382,9 @@ async fn relative_time_resolves_against_the_episode_not_today() {
     );
 }
 
-/// A first mention stays draft, so one offhand remark does not become a fact about you.
+/// An inferred first mention stays draft, so a guess does not become a fact about you.
 #[tokio::test]
-async fn a_first_mention_stays_draft_and_a_second_promotes() {
+async fn an_inferred_first_mention_stays_draft_and_a_second_promotes() {
     let store = Store::new("promote", &["episodes/a.md", "episodes/b.md"]).await;
     let extractor = Scripted::new(vec![
         (
@@ -393,7 +393,7 @@ async fn a_first_mention_stays_draft_and_a_second_promotes() {
                 "Dan",
                 "prefers short replies",
                 date(2026, 1, 1),
-                Source::Stated,
+                Source::Inferred,
             )],
         ),
         (
@@ -402,7 +402,7 @@ async fn a_first_mention_stays_draft_and_a_second_promotes() {
                 "Dan",
                 "prefers short replies",
                 date(2026, 1, 1),
-                Source::Stated,
+                Source::Inferred,
             )],
         ),
     ]);
@@ -417,7 +417,7 @@ async fn a_first_mention_stays_draft_and_a_second_promotes() {
     assert_eq!(
         store.concept_at("people/dan.md").await.front.status,
         Status::Draft,
-        "a first mention must not be prompt-eligible"
+        "an inferred first mention must not be prompt-eligible"
     );
 
     store
@@ -492,5 +492,34 @@ async fn a_run_commits_and_the_index_sees_the_result() {
             .expect("candidates")
             .is_empty(),
         "the new entity has to be findable straight away"
+    );
+}
+
+/// What the user says is usable straight away. The whole product promise depends on it.
+#[tokio::test]
+async fn a_stated_first_mention_is_usable_at_once() {
+    let store = Store::new("stated-now", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![candidate(
+            "Sabharish",
+            "is the user's name",
+            date(2026, 1, 1),
+            Source::Stated,
+        )],
+    )]);
+
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert_eq!(
+        store.concept_at("people/sabharish.md").await.front.status,
+        Status::Stable,
+        "a fact the user stated has to be usable without being said twice"
     );
 }

@@ -96,17 +96,19 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
     }
 
     for path in &report.created {
-        let text = concepts
-            .iter()
-            .find(|(p, _)| p == path)
-            .and_then(|(_, c)| c.claims().next().map(|m| m.text.clone()))
+        let concept = concepts.iter().find(|(p, _)| p == path).map(|(_, c)| c);
+        let text = concept
+            .and_then(|c| c.claims().next().map(|m| m.text.clone()))
             .unwrap_or_default();
         if text.is_empty() {
             continue;
         }
+        // A stated fact is live at once and reads as learned. An inferred one is held, and
+        // saying so is more honest than implying it is in use.
+        let held = concept.is_none_or(|c| c.front.status != super::concept::Status::Stable);
         out.push(Entry {
             day,
-            kind: Kind::Noted,
+            kind: if held { Kind::Noted } else { Kind::Learned },
             concept: path.clone(),
             text,
             from: None,

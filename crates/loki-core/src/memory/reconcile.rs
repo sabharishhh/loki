@@ -72,6 +72,14 @@ pub enum Promotion {
 /// Decides whether a claim promotes, waits, or needs the user.
 ///
 /// `occurrences` counts how many times this claim has been seen, including now.
+///
+/// **A `stated` claim promotes on its first mention.** Sabharish's call, and it closes a hole in
+/// §9.8: that table says a first mention "promotes on a second occurrence, or on use without
+/// correction", but a draft is never retrieved, so it can never be used, so the second path was
+/// unreachable by construction. Told once, a fact stayed invisible for ever.
+///
+/// `inferred` still waits, which is what the draft tier is actually for: stopping a guess becoming
+/// a fact about you. Import is unaffected, because §11.4 makes everything it writes inferred.
 #[must_use]
 pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion {
     use super::claim::Privacy;
@@ -79,7 +87,7 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     if conflicted || claim.privacy == Privacy::Private {
         return Promotion::Ask;
     }
-    if occurrences >= 2 || claim.usage_count >= 1 {
+    if claim.source == Source::Stated || occurrences >= 2 || claim.usage_count >= 1 {
         return Promotion::Auto;
     }
     Promotion::Hold
@@ -259,18 +267,32 @@ mod tests {
         assert_eq!(precedence(&held, &other, false), Precedence::Keep);
     }
 
+    /// The hole this closes: a draft is never retrieved, so "promotes on use" could never fire.
     #[test]
-    fn a_first_mention_waits_and_a_second_promotes() {
+    fn what_the_user_says_is_usable_at_once() {
         let claim = stated("prefers short replies", date(2026, 8, 1));
+        assert_eq!(promotion(&claim, 1, false), Promotion::Auto);
+    }
+
+    #[test]
+    fn an_inferred_first_mention_still_waits() {
+        let claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
         assert_eq!(promotion(&claim, 1, false), Promotion::Hold);
         assert_eq!(promotion(&claim, 2, false), Promotion::Auto);
     }
 
     #[test]
-    fn use_without_correction_promotes_a_first_mention() {
-        let mut claim = stated("prefers short replies", date(2026, 8, 1));
+    fn use_without_correction_promotes_an_inferred_first_mention() {
+        let mut claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
         claim.used_without_correction();
         assert_eq!(promotion(&claim, 1, false), Promotion::Auto);
+    }
+
+    /// Saying it does not override the two cases that need a person.
+    #[test]
+    fn a_stated_claim_that_conflicts_still_asks() {
+        let claim = stated("earns x", date(2026, 8, 1));
+        assert_eq!(promotion(&claim, 1, true), Promotion::Ask);
     }
 
     #[test]

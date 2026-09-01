@@ -243,9 +243,14 @@ async fn absorb(
                 let mut front = Frontmatter::new(&candidate.surface, today);
                 front.aliases = aliases;
                 front.tags.clone_from(&candidate.tags);
-                // A first mention stays draft. It promotes on a second occurrence, or on use
-                // without correction, which stops one offhand remark becoming a fact about you.
-                front.status = Status::Draft;
+                // What the user stated is usable at once; what was merely inferred waits for a
+                // second occurrence. See `reconcile::promotion` for why the old rule could never
+                // let a first mention through at all.
+                front.status = if reconcile::promotion(&claim, 1, false) == Promotion::Auto {
+                    Status::Stable
+                } else {
+                    Status::Draft
+                };
                 let mut concept = RawConcept::new(front);
                 concept.add(&candidate.heading, claim);
 
@@ -435,8 +440,11 @@ One fact per line, exactly this shape and nothing else:
 
 Rules:
 - Only durable facts. A one-off question, a passing joke or a task instruction is not a fact.
+- The entity is what the fact is ABOUT, not who mentioned it. A preference about how the assistant
+  behaves belongs to that preference, never to the person who expressed it.
+- Use the same entity name every time you refer to the same thing, so it resolves to one file.
 - `stated` means the user said it about themselves or their world. `inferred` means you worked it
-  out. Prefer `inferred` when unsure.
+  out. Prefer `inferred` when unsure, since a stated fact is trusted immediately.
 - The date is when the fact started being true, not today. Use `-` if the transcript does not say.
 - Write the fact as a short statement, not a sentence about the conversation.
 - If the transcript states nothing durable, output nothing at all.";
