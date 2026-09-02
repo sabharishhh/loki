@@ -143,6 +143,29 @@ final class Conversation {
         core?.timeline() ?? []
     }
 
+    /// What Loki knows, grouped by the thing it is about (§17.3).
+    func knowledge() -> [KnownEntity] {
+        core?.knowledge().entities ?? []
+    }
+
+    /// Settles a conflict the store refused to guess at (§9.7 rule 4).
+    ///
+    /// The only thing in the system that resolves one: rule 4 deliberately does not pick a side,
+    /// so without a person answering, the concept stays out of use forever.
+    func settle(path: String, keep: UInt32) {
+        try? core?.settle(path: path, keep: keep)
+    }
+
+    /// Replaces what a claim says. A supersession, not an overwrite.
+    func amend(path: String, ordinal: UInt32, text: String) {
+        try? core?.amend(path: path, ordinal: ordinal, text: text)
+    }
+
+    /// Retires a claim with nothing in its place. Retired, never removed.
+    func forget(path: String, ordinal: UInt32) {
+        try? core?.forget(path: path, ordinal: ordinal)
+    }
+
     /// Marks a recalled claim wrong, and drops it from the rail so the tap has a visible effect.
     ///
     /// Nothing is deleted. Confidence collapses and the claim is flagged, which is recoverable if

@@ -87,6 +87,26 @@ LokiStatus loki_not_true(LokiCore *core, const char *path, uint32_t ordinal);
 /* The memory timeline, newest first, as a JSON array of sentences. */
 char *loki_timeline(LokiCore *core, uint32_t limit);
 
+/* What Loki knows, grouped by entity, as JSON. The trust surface reads this. */
+char *loki_knowledge(LokiCore *core);
+
+/* Replaces what a claim says, on the user's word. A supersession, not an overwrite. */
+LokiStatus loki_amend_claim(LokiCore *core, const char *concept, uint32_t ordinal,
+                            const char *text);
+
+/* Retires a claim with nothing in its place. Retired, never removed. */
+LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordinal);
+
+/* What Loki knows, grouped by entity, as JSON. The trust surface reads this. */
+char *loki_knowledge(LokiCore *core);
+
+/* Replaces what a claim says, on the user's word. A supersession, not an overwrite. */
+LokiStatus loki_amend_claim(LokiCore *core, const char *concept, uint32_t ordinal,
+                            const char *text);
+
+/* Retires a claim with nothing in its place. Retired, never removed. */
+LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordinal);
+
 /* Past sessions, newest first, as a JSON array of day strings. */
 char *loki_sessions(LokiCore *core, uint32_t limit);
 
@@ -99,7 +119,8 @@ LokiStatus loki_confirm_action(LokiCore *core, uint64_t action, bool approved);
 /* Phase 4. Returns LOKI_UNSUPPORTED until the undo journal exists. */
 LokiStatus loki_undo_action(LokiCore *core, uint64_t action);
 
-/* Phase 2. Returns LOKI_UNSUPPORTED until memory exists. */
+/* Settles a conflict the store refused to guess at. Keeps the claim at `keep`, retires its
+   rivals on the same attribute, and marks the concept confirmed by a person. */
 LokiStatus loki_resolve_conflict(LokiCore *core, const char *concept, uint32_t keep);
 
 /* Phase 4. Returns LOKI_UNSUPPORTED until the tool registry exists. */

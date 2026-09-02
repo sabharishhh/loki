@@ -103,6 +103,8 @@ pub struct LokiCore {
     memory: Option<Arc<Memory>>,
     /// What pre-fetch surfaced on the last turn, for the `In play` rail (§9.2 of the design).
     recalled: std::sync::Mutex<Vec<Recalled>>,
+    /// The same clock the loop reads, so a screen and a turn never disagree about today.
+    clock: Arc<dyn loki_core::ports::clock::Clock>,
 }
 
 const SYSTEM: &str = "You are Loki, a personal assistant that runs on the user's Mac. \
@@ -194,11 +196,12 @@ pub unsafe extern "C" fn loki_core_new(
         events = events.with(Arc::clone(ledger) as Arc<dyn EventSink>);
     }
 
+    let clock: Arc<dyn loki_core::ports::clock::Clock> = Arc::new(SystemClock);
     let core = Loop::new(
         provider,
         Arc::new(events),
         callbacks as Arc<dyn TokenSink>,
-        Arc::new(SystemClock),
+        Arc::clone(&clock),
         Prefix::new(SYSTEM),
         Budget::resuming(DEFAULT_CEILING, spent),
     );
@@ -220,6 +223,7 @@ pub unsafe extern "C" fn loki_core_new(
         ledger,
         memory,
         recalled: std::sync::Mutex::new(Vec::new()),
+        clock,
     }))
 }
 
@@ -379,17 +383,106 @@ pub unsafe extern "C" fn loki_undo_action(_core: *mut LokiCore, _action: u64) ->
     LokiStatus::Unsupported
 }
 
-/// Picks a winner between two conflicting claims. Requires memory, which is Phase 2.
+/// Picks a winner between two conflicting claims (§9.7 rule 4, §9.8's one tap).
+///
+/// The store deliberately refuses to guess when two stated claims collide, so this is the only
+/// thing that resolves one. Without it a surfaced conflict keeps the concept out of use forever.
 ///
 /// # Safety
-/// All pointers must be null or valid.
+/// `core` must be null or a valid pointer from [`loki_core_new`]. `concept` must be a valid C
+/// string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loki_resolve_conflict(
-    _core: *mut LokiCore,
-    _concept: *const c_char,
-    _keep: u32,
+    core: *mut LokiCore,
+    concept: *const c_char,
+    keep: u32,
 ) -> LokiStatus {
-    LokiStatus::Unsupported
+    // SAFETY: contract above.
+    unsafe {
+        edit_claim(core, concept, |memory, path, today| async move {
+            memory.settle(&path, keep, today).await
+        })
+    }
+}
+
+/// Replaces what a claim says, on the user's word (§17.3's edit).
+///
+/// A supersession, not an overwrite: the old wording keeps its window so the timeline can still
+/// show it.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. `concept` and `text` must be
+/// valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_amend_claim(
+    core: *mut LokiCore,
+    concept: *const c_char,
+    ordinal: u32,
+    text: *const c_char,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    let Some(text) = (unsafe { as_str(text) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let text = text.to_owned();
+    // SAFETY: contract above.
+    unsafe {
+        edit_claim(core, concept, |memory, path, today| async move {
+            memory.amend(&path, ordinal, &text, today).await
+        })
+    }
+}
+
+/// Retires a claim on the user's word, with nothing in its place (§17.3's delete).
+///
+/// Retired, never removed. A store that deletes on a tap cannot show what it used to think.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. `concept` must be a valid C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_forget_claim(
+    core: *mut LokiCore,
+    concept: *const c_char,
+    ordinal: u32,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    unsafe {
+        edit_claim(core, concept, |memory, path, today| async move {
+            memory.forget(&path, ordinal, today).await
+        })
+    }
+}
+
+/// The three hand edits share a shape: check the pointers, run on the runtime, map the error.
+///
+/// # Safety
+/// `core` must be null or valid, `concept` must be null or a valid C string.
+unsafe fn edit_claim<F, Fut>(core: *mut LokiCore, concept: *const c_char, run: F) -> LokiStatus
+where
+    F: FnOnce(Arc<loki_core::memory::handle::Memory>, String, jiff::civil::Date) -> Fut,
+    Fut: std::future::Future<Output = Result<(), loki_core::memory::handle::MemoryError>>,
+{
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    // SAFETY: contract above.
+    let Some(path) = (unsafe { as_str(concept) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return LokiStatus::InvalidArgument;
+    };
+    let memory = Arc::clone(memory);
+    let path = path.to_owned();
+    let today = core.clock.today();
+    core.runtime.block_on(async move {
+        match run(memory, path, today).await {
+            Ok(()) => LokiStatus::Ok,
+            Err(_) => LokiStatus::NotReady,
+        }
+    })
 }
 
 /// Grants a tool a set of capabilities. Requires the tool registry, which is Phase 4.
@@ -539,6 +632,33 @@ pub unsafe extern "C" fn loki_timeline(core: *mut LokiCore, limit: u32) -> *mut 
         .runtime
         .block_on(async move { memory.timeline(limit as usize).await.unwrap_or_default() });
     json_string(&serde_json::to_string(&text).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// What Loki knows, grouped by entity, as JSON (§17.3).
+///
+/// The trust surface reads this rather than `log.md`: a log answers what changed, and the screen
+/// has to answer what Loki thinks it knows. Every row still names the file it came from.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_knowledge(core: *mut LokiCore) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("{\"entities\":[]}");
+    };
+    let Some(memory) = core.memory.as_ref() else {
+        return json_string("{\"entities\":[]}");
+    };
+    let memory = Arc::clone(memory);
+    let today = core.clock.today();
+    let knowledge = core
+        .runtime
+        .block_on(async move { memory.knowledge(today).await.unwrap_or_default() });
+    json_string(
+        &serde_json::to_string(&knowledge).unwrap_or_else(|_| "{\"entities\":[]}".to_owned()),
+    )
 }
 
 /// Past sessions, newest first, as JSON, for the sidebar (§9.1 of the design system).

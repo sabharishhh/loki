@@ -165,6 +165,34 @@ public final class Core: Sendable {
         decode(loki_sessions(handle, UInt32(limit))) ?? []
     }
 
+    /// What Loki knows, grouped by the thing it is about.
+    ///
+    /// The trust surface reads this rather than the timeline sentences: a log answers what
+    /// changed, and the screen has to answer what Loki thinks it knows.
+    public func knowledge() -> Knowledge {
+        decode(loki_knowledge(handle)) ?? Knowledge(entities: [])
+    }
+
+    /// Settles a conflict the store refused to guess at, keeping the claim at `ordinal`.
+    public func settle(path: String, keep: UInt32) throws {
+        let status = path.withCString { loki_resolve_conflict(handle, $0, keep) }
+        if let error = CoreError(status) { throw error }
+    }
+
+    /// Replaces what a claim says. A supersession, not an overwrite.
+    public func amend(path: String, ordinal: UInt32, text: String) throws {
+        let status = path.withCString { path in
+            text.withCString { loki_amend_claim(handle, path, ordinal, $0) }
+        }
+        if let error = CoreError(status) { throw error }
+    }
+
+    /// Retires a claim with nothing in its place. Retired, never removed.
+    public func forget(path: String, ordinal: UInt32) throws {
+        let status = path.withCString { loki_forget_claim(handle, $0, ordinal) }
+        if let error = CoreError(status) { throw error }
+    }
+
     /// Marks a recalled claim wrong. Drops its confidence; deletes nothing.
     public func notTrue(path: String, ordinal: UInt32) throws {
         let status = path.withCString { loki_not_true(handle, $0, ordinal) }
@@ -185,6 +213,84 @@ public final class Core: Sendable {
         guard let data = String(cString: pointer).data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
+}
+
+/// Everything Loki knows, grouped by the thing it is about (§17.3).
+public struct Knowledge: Decodable, Sendable, Equatable {
+    public let entities: [KnownEntity]
+}
+
+/// One person, project or preference, and what is known about it.
+public struct KnownEntity: Decodable, Sendable, Equatable, Identifiable {
+    public let path: String
+    public let name: String
+    public let kind: String
+    /// Whether anything here can reach a prompt. The consequence, not the state name.
+    public let inUse: Bool
+    /// Confirmed by a person, so nothing decays it by heuristic.
+    public let confirmed: Bool
+    public let facts: [KnownFact]
+    /// Conflicts waiting on the user. One tap each.
+    public let questions: [OpenQuestion]
+
+    public var id: String { path }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, name, kind, facts, questions
+        case inUse = "in_use"
+        case confirmed
+    }
+}
+
+/// One thing Loki knows, with its own history folded in.
+public struct KnownFact: Decodable, Sendable, Equatable, Identifiable {
+    public let ordinal: UInt32
+    public let attribute: String
+    public let text: String
+    /// `Since 15 July, about seven weeks.` Absent when the source never dated it.
+    public let since: String?
+    /// What this replaced, on the same row.
+    public let was: Superseded?
+    /// True when it came from a page or an account rather than from the user.
+    public let fromElsewhere: Bool
+
+    public var id: UInt32 { ordinal }
+
+    private enum CodingKeys: String, CodingKey {
+        case ordinal, attribute, text, since, was
+        case fromElsewhere = "from_elsewhere"
+    }
+}
+
+/// The half of a correction that is no longer true.
+public struct Superseded: Decodable, Sendable, Equatable {
+    public let text: String
+    /// `from 1 March to 15 July`.
+    public let held: String
+    /// `about six weeks`, when Loki went on believing it after it had stopped being true.
+    public let wrongFor: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case text, held
+        case wrongFor = "wrong_for"
+    }
+}
+
+/// Two claims that cannot both be true, and nothing has picked between them.
+public struct OpenQuestion: Decodable, Sendable, Equatable, Identifiable {
+    public let attribute: String
+    public let options: [QuestionOption]
+
+    public var id: String { attribute }
+}
+
+/// One side of a question.
+public struct QuestionOption: Decodable, Sendable, Equatable, Identifiable {
+    public let ordinal: UInt32
+    public let text: String
+    public let since: String?
+
+    public var id: UInt32 { ordinal }
 }
 
 /// One claim pre-fetch surfaced for a turn.

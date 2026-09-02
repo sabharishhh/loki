@@ -9,9 +9,12 @@ use std::sync::Mutex;
 use jiff::civil::Date;
 
 use super::bundle::{Bundle, BundleError};
+use super::claim::{Claim, Confidence, Origin};
+use super::concept::{Attribution, RawConcept, Status};
 use super::consolidate::{self, Budget, ConsolidateError, Episode, Extractor, Report};
 use super::gate::TierScope;
 use super::index::{Index, IndexError, Layer, Query, Recalled, Session, Use};
+use super::knowledge;
 use super::reconcile::Reference;
 use super::resolve::Matcher;
 use super::timeline;
@@ -33,6 +36,21 @@ pub enum MemoryError {
     WorkingSet(#[from] WorkingSetError),
     #[error("could not consolidate: {0}")]
     Consolidate(#[from] ConsolidateError),
+    #[error("{path} has no claim {ordinal}")]
+    NoSuchClaim { path: String, ordinal: u32 },
+}
+
+/// The heading a claim sits under, so an edit lands in the same section as what it replaced.
+fn section_of(concept: &RawConcept, ordinal: u32) -> Option<String> {
+    let mut seen = 0u32;
+    for section in &concept.sections {
+        let len = u32::try_from(section.claims.len()).unwrap_or(u32::MAX);
+        if ordinal < seen.saturating_add(len) {
+            return Some(section.heading.clone());
+        }
+        seen = seen.saturating_add(len);
+    }
+    None
 }
 
 /// Memory, as the loop sees it.
@@ -181,6 +199,151 @@ impl Memory {
             let writer = self.bundle.writer().await;
             writer.save_concept(path, &concept)?;
             writer.commit(&format!("Marked wrong: {path}"))?;
+        }
+        {
+            let reader = self.bundle.reader().await;
+            self.index.sync(&reader)?;
+        }
+        Ok(())
+    }
+
+    /// What Loki knows, grouped by entity, for §17.3's screen.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read.
+    pub async fn knowledge(&self, today: Date) -> Result<knowledge::Knowledge, MemoryError> {
+        Ok(knowledge::read(&self.bundle, today).await?)
+    }
+
+    /// Settles a conflict the store could not (§9.7 rule 4, §9.8's one tap).
+    ///
+    /// Keeps the claim at `ordinal`, retires every believed rival on the same attribute, and marks
+    /// the concept human-verified, which pins it against §9.9's decay and §9.10's archival. That
+    /// is what a person picking a side actually means, and it is the only thing in the system that
+    /// resolves rule 4: the store deliberately refuses to guess, so without this the concept stays
+    /// out of use forever.
+    ///
+    /// # Errors
+    /// Fails if the concept cannot be read or written, or `ordinal` names no claim.
+    pub async fn settle(&self, path: &str, keep: u32, today: Date) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+
+        let Some(winner) = concept.claims().nth(keep as usize).cloned() else {
+            return Err(MemoryError::NoSuchClaim {
+                path: path.to_owned(),
+                ordinal: keep,
+            });
+        };
+
+        for (at, claim) in concept.claims_mut().enumerate() {
+            let is_winner = u32::try_from(at).is_ok_and(|n| n == keep);
+            if is_winner {
+                claim.confidence = Confidence::High;
+            } else if claim.validity.is_believed() && claim.same_attribute_as(&winner) {
+                // The world time of the losing claim closes today, because a person settling a
+                // conflict is saying which is true now, not when the other stopped being true.
+                claim.invalidate(today, today, &winner.text);
+            }
+        }
+
+        concept.front.verified.push(Attribution {
+            by: "human:user".to_owned(),
+            at: today,
+        });
+        concept.front.status = Status::Stable;
+
+        self.write_back(path, &concept, &format!("Settled by hand: {path}"))
+            .await
+    }
+
+    /// Replaces what a claim says, on the user's word (§17.3's edit).
+    ///
+    /// A supersession rather than an overwrite, so principle 6 holds for a hand edit exactly as it
+    /// does for a model one: the old wording keeps its window and the timeline can still show it.
+    ///
+    /// # Errors
+    /// Fails if the concept cannot be read or written, or `ordinal` names no claim.
+    pub async fn amend(
+        &self,
+        path: &str,
+        ordinal: u32,
+        text: &str,
+        today: Date,
+    ) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+        let Some(old) = concept.claims().nth(ordinal as usize).cloned() else {
+            return Err(MemoryError::NoSuchClaim {
+                path: path.to_owned(),
+                ordinal,
+            });
+        };
+
+        let mut fresh = Claim::new(text, Origin::Stated, today).about(&old.attribute);
+        fresh.validity.valid_from = old.validity.valid_from;
+        fresh.privacy = old.privacy;
+
+        for (at, claim) in concept.claims_mut().enumerate() {
+            if u32::try_from(at).is_ok_and(|n| n == ordinal) {
+                claim.invalidate(today, today, text);
+            }
+        }
+        let heading = section_of(&concept, ordinal).unwrap_or_else(|| old.attribute.clone());
+        concept.add(&heading, fresh);
+
+        concept.front.verified.push(Attribution {
+            by: "human:user".to_owned(),
+            at: today,
+        });
+        self.write_back(path, &concept, &format!("Edited by hand: {path}"))
+            .await
+    }
+
+    /// Retires a claim on the user's word, with nothing put in its place (§17.3's delete).
+    ///
+    /// Retired, not removed. Principle 6 and §9.5 both turn on the superseded claim still being
+    /// there, and a store that deletes on a tap cannot show what it used to think.
+    ///
+    /// # Errors
+    /// Fails if the concept cannot be read or written, or `ordinal` names no claim.
+    pub async fn forget(&self, path: &str, ordinal: u32, today: Date) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+        if concept.claims().nth(ordinal as usize).is_none() {
+            return Err(MemoryError::NoSuchClaim {
+                path: path.to_owned(),
+                ordinal,
+            });
+        }
+        for (at, claim) in concept.claims_mut().enumerate() {
+            if u32::try_from(at).is_ok_and(|n| n == ordinal) {
+                claim.validity.valid_to = Some(today);
+                claim.validity.unlearned = Some(today);
+                claim.replaced_by = None;
+            }
+        }
+        self.write_back(path, &concept, &format!("Forgotten by hand: {path}"))
+            .await
+    }
+
+    /// Saves, commits and re-indexes. The three steps every hand edit needs, in one place.
+    async fn write_back(
+        &self,
+        path: &str,
+        concept: &RawConcept,
+        message: &str,
+    ) -> Result<(), MemoryError> {
+        {
+            let writer = self.bundle.writer().await;
+            writer.save_concept(path, concept)?;
+            writer.commit(message)?;
         }
         {
             let reader = self.bundle.reader().await;
