@@ -479,7 +479,7 @@ pub unsafe extern "C" fn loki_recalled(core: *mut LokiCore) -> *mut c_char {
                 "text": r.text,
                 "ordinal": r.ordinal,
                 "score": r.score.value(),
-                "fromSession": r.origin == loki_core::memory::index::Origin::Session,
+                "fromSession": r.layer == loki_core::memory::index::Layer::Live,
             })
         })
         .collect();

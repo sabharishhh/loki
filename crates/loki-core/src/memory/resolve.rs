@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::index::{Candidate, Index, IndexError};
+use super::index::{Blocking, Candidate, Index, IndexError};
 use crate::core::vocab::ModelRole;
 use crate::ports::model::{Message, ModelError, ModelProvider, Request, SystemBlock};
 
@@ -126,7 +126,10 @@ pub async fn resolve(
                 path: c.path.clone(),
             },
         ),
-        Decision::New => fresh(trimmed, kind),
+        Decision::New => same_entity_elsewhere(trimmed, &candidates).map_or_else(
+            || fresh(trimmed, kind),
+            |path| Resolution::Existing { path },
+        ),
         Decision::Tie(between) => {
             let paths: Vec<String> = between
                 .into_iter()
@@ -141,6 +144,34 @@ pub async fn resolve(
         }
     };
     Ok(resolution)
+}
+
+/// An existing concept for this exact surface form, filed under a different kind (§9.4).
+///
+/// Identity is the entity, not the directory it landed in. A path is `<kind>/<slug>.md`, so the
+/// same surface extracted once as a person and once as a preference would otherwise become two
+/// files, and blocking would then see two candidates for one thing.
+///
+/// Only an exact name match counts, and only when the slug agrees. An alias or a near name is
+/// evidence about a claim, which is the matcher's question; an identical name under two kinds is
+/// evidence about identity, which is not. Deciding it structurally rather than by asking again is
+/// the same reasoning §9.4 uses for blocking and principle 9 uses for time.
+fn same_entity_elsewhere(surface: &str, candidates: &[Candidate]) -> Option<String> {
+    let wanted = slug(surface);
+    let mut exact = candidates
+        .iter()
+        .filter(|c| c.why == Blocking::ExactName && path_slug(&c.path) == wanted);
+    let first = exact.next()?;
+    // Two files already claiming this name is §9.4's known failure, not something to pick between.
+    exact.next().is_none().then(|| first.path.clone())
+}
+
+/// The `<slug>` of a `<kind>/<slug>.md` path.
+fn path_slug(path: &str) -> &str {
+    path.rsplit('/')
+        .next()
+        .and_then(|file| file.strip_suffix(".md"))
+        .unwrap_or(path)
 }
 
 /// A new entity, with its alias list seeded from the form that was used (§9.4 step 3).

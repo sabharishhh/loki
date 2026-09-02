@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use jiff::civil::Date;
 
 use super::bundle::{Bundle, BundleError, SCRATCH};
-use super::claim::{Claim, Source};
+use super::claim::{Claim, Origin};
 use super::concept::{Frontmatter, RawConcept, Status};
 use super::index::{Index, IndexError};
 use super::reconcile::{self, Precedence, Promotion, Reference};
@@ -62,11 +62,14 @@ pub struct Candidate {
     /// only ever accumulate and never supersede one another.
     pub attribute: String,
     pub text: String,
-    /// Days before the reference, for a relative expression. `None` means it is already absolute.
+    /// Days before the reference, for a relative expression. `None` means the text gave none.
     pub days_ago: Option<i64>,
     /// Absolute world time, when the text gave one.
     pub valid_from: Option<Date>,
-    pub source: Source,
+    /// Where the claim came from (§9.12). Extraction over a live session writes `stated` or
+    /// `inferred`; a pass over fetched content writes `web`, and one over an account's data
+    /// writes `connector`.
+    pub origin: Origin,
     pub tags: Vec<String>,
 }
 
@@ -75,10 +78,14 @@ impl Candidate {
     ///
     /// An absolute date in the text wins. Otherwise a relative expression counts back from the
     /// reference, which for an import is the source message's timestamp, not today.
+    ///
+    /// `None` when the source gave neither, which is most of what a person says. §9.5: world time
+    /// is set only when the source dates it, and defaulting it to the write date is what made
+    /// every pair the same vintage and fired rule 4 on almost everything.
     #[must_use]
-    pub fn world_time(&self, reference: Reference) -> Date {
+    pub fn world_time(&self, reference: Reference) -> Option<Date> {
         self.valid_from
-            .unwrap_or_else(|| reference.resolve(self.days_ago.unwrap_or(0)))
+            .or_else(|| self.days_ago.map(|days| reference.resolve(days)))
     }
 }
 
@@ -213,12 +220,11 @@ async fn absorb(
     report: &mut Report,
     today: Date,
 ) -> Result<(), ConsolidateError> {
-    let valid_from = candidate.world_time(episode.reference);
-    let claim = match candidate.source {
-        Source::Stated => Claim::stated(&candidate.text, valid_from),
-        Source::Inferred => Claim::inferred(&candidate.text, valid_from, today),
+    let mut claim =
+        Claim::new(&candidate.text, candidate.origin, today).about(&candidate.attribute);
+    if let Some(valid_from) = candidate.world_time(episode.reference) {
+        claim = claim.dated(valid_from);
     }
-    .about(&candidate.attribute);
 
     match resolution {
         Resolution::Ambiguous { between } => {
@@ -597,11 +603,13 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
                 days_ago: None,
                 valid_from: when.parse::<Date>().ok(),
                 // Anything the extractor will not vouch for is inferred, so §9.7 rule 3 keeps it
-                // below anything the user actually said.
-                source: if source.eq_ignore_ascii_case("stated") {
-                    Source::Stated
+                // below anything the user actually said. This pass reads a conversation, so it
+                // can only ever produce the two user-facing origins: `web` and `connector` are
+                // written by the passes that read those, never claimed by a model.
+                origin: if source.eq_ignore_ascii_case("stated") {
+                    Origin::Stated
                 } else {
-                    Source::Inferred
+                    Origin::Inferred
                 },
                 tags: Vec::new(),
             })
@@ -621,7 +629,7 @@ mod tests {
         );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].surface, "Meera");
-        assert_eq!(out[0].source, Source::Stated);
+        assert_eq!(out[0].origin, Origin::Stated);
         assert_eq!(out[0].valid_from, Some(jiff::civil::date(2026, 7, 15)));
         assert_eq!(out[1].kind, Kind::Project);
         assert_eq!(out[1].valid_from, None);
@@ -650,6 +658,6 @@ mod tests {
     #[test]
     fn unclear_provenance_defaults_to_inferred() {
         let out = parse_candidates("Dan | person | Notes | guessed | - | likes tea");
-        assert_eq!(out[0].source, Source::Inferred);
+        assert_eq!(out[0].origin, Origin::Inferred);
     }
 }

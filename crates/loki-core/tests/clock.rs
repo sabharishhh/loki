@@ -17,10 +17,15 @@ use loki_core::core::sink::EventSink;
 use loki_core::core::vocab::{Cents, CostModel, Locality};
 use loki_core::memory::claim::Claim;
 use loki_core::memory::concept::{Frontmatter, RawConcept, Status};
-use loki_core::memory::gate::{Active, GateError};
+use loki_core::memory::gate::{Active, GateError, TierScope};
 use loki_core::ports::clock::Clock;
 use loki_core::ports::model::{Caps, ChunkStream, ModelError, ModelProvider, Request, ToolSupport};
 use tokio_util::sync::CancellationToken;
+
+/// The default prompt scope: normal claims, nothing foreign.
+fn cloud() -> TierScope {
+    TierScope::normal(Locality::Cloud)
+}
 
 fn at(text: &str) -> jiff::Timestamp {
     text.parse().expect("timestamp")
@@ -45,7 +50,7 @@ fn expiring_concept() -> RawConcept {
 fn six_weeks_of_world_time_changes_what_the_gate_admits() {
     let clock = FakeClock::utc(at("2026-07-15T09:00:00Z"));
 
-    let admitted = Active::try_from(expiring_concept(), clock.today());
+    let admitted = Active::try_from(expiring_concept(), clock.today(), cloud());
     assert!(
         admitted.is_ok(),
         "a live trip note belongs in a prompt: {:?}",
@@ -54,7 +59,7 @@ fn six_weeks_of_world_time_changes_what_the_gate_admits() {
 
     clock.advance(Span::new().weeks(6));
 
-    let refused = Active::try_from(expiring_concept(), clock.today());
+    let refused = Active::try_from(expiring_concept(), clock.today(), cloud());
     assert!(
         matches!(refused, Err(GateError::Stale)),
         "past its own expiry the gate has to refuse it, got {refused:?}"
@@ -68,8 +73,8 @@ fn the_gate_is_told_the_day_rather_than_asking_for_it() {
     let then = FakeClock::utc(at("2026-08-19T23:00:00Z"));
     let after = FakeClock::utc(at("2026-08-21T01:00:00Z"));
 
-    assert!(Active::try_from(expiring_concept(), then.today()).is_ok());
-    assert!(Active::try_from(expiring_concept(), after.today()).is_err());
+    assert!(Active::try_from(expiring_concept(), then.today(), cloud()).is_ok());
+    assert!(Active::try_from(expiring_concept(), after.today(), cloud()).is_err());
 }
 
 /// The zone is not decoration. A claim expiring on the 20th is live at 23:00 on the 19th in
@@ -83,9 +88,9 @@ fn the_zone_decides_which_day_it_is() {
     assert_eq!(utc.today(), date(2026, 8, 19));
     assert_eq!(kolkata.today(), date(2026, 8, 20));
 
-    assert!(Active::try_from(expiring_concept(), utc.today()).is_ok());
+    assert!(Active::try_from(expiring_concept(), utc.today(), cloud()).is_ok());
     assert!(
-        Active::try_from(expiring_concept(), kolkata.today()).is_err(),
+        Active::try_from(expiring_concept(), kolkata.today(), cloud()).is_err(),
         "in Kolkata it is already the 20th, so the note has expired"
     );
 }

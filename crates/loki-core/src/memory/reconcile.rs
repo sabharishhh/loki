@@ -5,7 +5,7 @@
 
 use jiff::civil::Date;
 
-use super::claim::{Claim, Confidence, Source};
+use super::claim::{Claim, Confidence};
 use super::concept::{RawConcept, Status};
 
 /// What to do with a new claim that conflicts with one already held (§9.7).
@@ -31,40 +31,50 @@ pub fn precedence(held: &Claim, incoming: &Claim, incoming_is_explicit: bool) ->
         return Precedence::Replace;
     }
 
-    // 3. A stated claim beats an inferred one regardless of age. Checked before rule 2, because
-    //    rule 2 only governs when both are stated.
-    match (held.source, incoming.source) {
-        (Source::Inferred, Source::Stated) => return Precedence::Replace,
-        (Source::Stated, Source::Inferred) => return Precedence::Keep,
+    // 3. A stated claim beats one that is not, regardless of age. Checked before rule 2, because
+    //    rule 2 only governs when the two are of equal standing.
+    match (held.origin.is_stated(), incoming.origin.is_stated()) {
+        (false, true) => return Precedence::Replace,
+        (true, false) => return Precedence::Keep,
         _ => {}
     }
 
-    // 2. Otherwise a more recent statement beats an older one. World time, not system time: when
-    //    the fact started being true is what orders it, which is the whole point of §9.5. An
-    //    import learned today can describe something true years ago.
-    match incoming.validity.valid_from.cmp(&held.validity.valid_from) {
+    // 3b. §9.12 on the write path: content that did not come from the user never displaces
+    //     content that did. Rule 3 covers stated against inferred; this covers inferred against
+    //     web or connector, which v0.8 had no way to express.
+    if held.origin.durable_eligible() && !incoming.origin.durable_eligible() {
+        return Precedence::Keep;
+    }
+
+    // 2. Otherwise a more recent statement beats an older one. World time first, because when the
+    //    fact started being true is what orders it (§9.5): an import learned today can describe
+    //    something true years ago.
+    //
+    //    Only when both carry one. A claim with no world time is ordered by system time, which is
+    //    §9.5's stated fallback and is why the field is optional: "undated" and "dated today" are
+    //    different, and treating them alike fired rule 4 on almost every pair.
+    if let (Some(mine), Some(theirs)) = (incoming.validity.valid_from, held.validity.valid_from)
+        && mine != theirs
+    {
+        return if mine > theirs {
+            Precedence::Replace
+        } else {
+            Precedence::Keep
+        };
+    }
+
+    match incoming.validity.learned.cmp(&held.validity.learned) {
         std::cmp::Ordering::Greater => Precedence::Replace,
         std::cmp::Ordering::Less => Precedence::Keep,
+        // 4. Told in the same breath, about the same thing, and neither is newer.
+        //    Guessing is how a memory system poisons itself.
         std::cmp::Ordering::Equal => {
-            // Equal world time usually means neither statement carried a date, not that the two
-            // facts genuinely began on one day. Falling straight to rule 4 there surfaces almost
-            // every correction, so system time breaks the tie first: being told second is weaker
-            // evidence than a later start date, but it is still evidence, and it is what a person
-            // means by "actually, it is X".
-            match incoming.validity.learned.cmp(&held.validity.learned) {
-                std::cmp::Ordering::Greater => Precedence::Replace,
-                std::cmp::Ordering::Less => Precedence::Keep,
-                // 4. Told in the same breath, about the same thing, and neither is newer.
-                //    Guessing is how a memory system poisons itself.
-                std::cmp::Ordering::Equal => {
-                    if held.source == Source::Stated {
-                        Precedence::Surface
-                    } else {
-                        // Two inferred claims of one vintage. Neither has standing to displace
-                        // the other, and surfacing every import collision would bury the user.
-                        Precedence::Keep
-                    }
-                }
+            if held.origin.is_stated() {
+                Precedence::Surface
+            } else {
+                // Two guesses of one vintage. Neither has standing to displace the other, and
+                // surfacing every import collision would bury the user.
+                Precedence::Keep
             }
         }
     }
@@ -99,7 +109,14 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     if conflicted || claim.privacy == Privacy::Private {
         return Promotion::Ask;
     }
-    if claim.source == Source::Stated || occurrences >= 2 || claim.usage_count >= 1 {
+    // §9.12: content that did not come from the user never auto-promotes. It stays stored,
+    // indexed and searchable, and reaches a later prompt only through a deliberate search or a
+    // confirmation. Checked before anything else, because recurrence is exactly the signal a
+    // fetched page would otherwise accumulate.
+    if !claim.origin.durable_eligible() {
+        return Promotion::Ask;
+    }
+    if claim.origin.is_stated() || occurrences >= 2 || claim.usage_count >= 1 {
         return Promotion::Auto;
     }
     Promotion::Hold
@@ -204,7 +221,10 @@ pub fn apply(
 ) {
     match outcome {
         Precedence::Replace => {
-            let stopped = incoming.validity.valid_from;
+            // When the new claim carries no world time, the old one stopped being true the day we
+            // found out. That is the system-time fallback again, and it is honest: `wrong_for_days`
+            // then reports no gap, because there is no period we can name having been wrong for.
+            let stopped = incoming.validity.valid_from.unwrap_or(today);
             let replacement = incoming.text.clone();
             for claim in concept.claims_mut() {
                 if claim.text == held_text {
@@ -241,7 +261,7 @@ mod tests {
     }
 
     fn inferred(text: &str, from: Date, learned: Date) -> Claim {
-        Claim::inferred(text, from, learned)
+        Claim::inferred(text, learned).dated(from)
     }
 
     #[test]
@@ -390,7 +410,10 @@ mod tests {
     fn replacing_records_what_superseded_what() {
         let mut concept = RawConcept::new(Frontmatter::new("Sabharish", date(2026, 1, 1)));
         concept.add("Location", stated("in Chennai", date(2026, 1, 1)));
-        let incoming = stated("in Bangalore", date(2026, 7, 15));
+        // Told on 29 August about a move that happened on 15 July, so the incoming claim carries
+        // a world time. Without one the old claim would stop being true the day we found out,
+        // and there would be no gap to report.
+        let incoming = Claim::stated("in Bangalore", date(2026, 8, 29)).dated(date(2026, 7, 15));
 
         apply(
             &mut concept,

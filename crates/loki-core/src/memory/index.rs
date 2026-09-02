@@ -16,13 +16,15 @@ use jiff::civil::{Date, date};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::bundle::{BundleError, Reader};
+pub use super::claim::Origin;
+
 use super::claim::Privacy;
 use super::concept::Status;
 use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -152,22 +154,26 @@ impl Score {
     }
 }
 
-/// Where a recalled line came from.
+/// Which of §9.2's layers a recalled line came from.
 ///
-/// One union, two origins (D-043). The user never sees the difference, but the caller does: only
-/// a claim has a file to record a use against, and only a claim can be corrected.
+/// One union, two layers (D-043). The user never sees the difference, but the caller does: only a
+/// consolidated claim has a file to record a use against, and only one can be corrected.
+///
+/// Named `Layer` rather than `Origin` because §9.12 took that word for where a *claim* came from,
+/// and two different concepts under one name in one module tree is how the wrong one gets
+/// imported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
+pub enum Layer {
     /// A consolidated claim, from any session.
-    Claim,
+    Consolidated,
     /// A raw turn from the session in progress, not yet consolidated.
-    Session,
+    Live,
 }
 
 /// One retrieved claim, with everything a caller needs to cite it or record its use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recalled {
-    pub origin: Origin,
+    pub layer: Layer,
     pub path: String,
     pub name: String,
     pub heading: String,
@@ -176,6 +182,8 @@ pub struct Recalled {
     pub text: String,
     pub status: Status,
     pub privacy: Privacy,
+    /// Where the claim came from (§9.12). A live turn is always `stated`: the user typed it.
+    pub origin: Origin,
     pub score: Score,
 }
 
@@ -271,7 +279,8 @@ fn recall_turns(
         let covered = coverage(query_terms, &text, &speaker);
         let keyword = W_COVERAGE * covered.clamp(0.0, 1.0) + W_BM25 * strength;
         out.push(Recalled {
-            origin: Origin::Session,
+            layer: Layer::Live,
+            origin: Origin::Stated,
             path: format!("{id}#{ordinal}"),
             name: speaker,
             heading: String::new(),
@@ -411,7 +420,8 @@ CREATE TABLE IF NOT EXISTS claim (
     heading     TEXT    NOT NULL,
     text        TEXT    NOT NULL,
     privacy     TEXT    NOT NULL,
-    valid_from  INTEGER NOT NULL,
+    origin      TEXT    NOT NULL DEFAULT 'inferred',
+    valid_from  INTEGER,
     valid_to    INTEGER,
     learned     INTEGER NOT NULL,
     unlearned   INTEGER,
@@ -624,7 +634,7 @@ impl Index {
         let mut stmt = db
             .prepare(
                 "SELECT c.path, c.name, c.status, c.stale_after,
-                        m.heading, m.ordinal, m.text, m.privacy,
+                        m.heading, m.ordinal, m.text, m.privacy, m.origin,
                         m.learned, m.valid_from, m.valid_to, m.unlearned,
                         m.usage_count + m.uses_pending
                  FROM claim m JOIN concept c ON c.id = m.concept
@@ -644,11 +654,12 @@ impl Index {
                         ordinal: r.get(5)?,
                         text: r.get(6)?,
                         privacy: r.get::<_, String>(7)?,
-                        learned: r.get(8)?,
-                        valid_from: r.get(9)?,
-                        valid_to: r.get(10)?,
-                        unlearned: r.get(11)?,
-                        uses: r.get(12)?,
+                        origin: r.get::<_, String>(8)?,
+                        learned: r.get(9)?,
+                        valid_from: r.get(10)?,
+                        valid_to: r.get(11)?,
+                        unlearned: r.get(12)?,
+                        uses: r.get(13)?,
                     })
                 })
                 .optional()
@@ -657,7 +668,8 @@ impl Index {
 
             let status = parse_status(&row.status);
             let privacy = parse_privacy(&row.privacy);
-            if !query.scope.admits(privacy) {
+            let origin = parse_origin(&row.origin);
+            if !query.scope.admits(privacy) || !query.scope.admits_origin(origin) {
                 continue;
             }
             if query.visibility == Visibility::PromptEligible && !row.is_eligible(status, today) {
@@ -668,7 +680,7 @@ impl Index {
             let covered = coverage(&query_terms, &row.text, &row.name);
             let score = combine(bm25, covered, today - row.learned, row.uses, hops);
             out.push(Recalled {
-                origin: Origin::Claim,
+                layer: Layer::Consolidated,
                 path: row.path,
                 name: row.name,
                 heading: row.heading,
@@ -676,6 +688,7 @@ impl Index {
                 text: row.text,
                 status,
                 privacy,
+                origin,
                 score,
             });
             if out.len() == query.limit {
@@ -967,8 +980,9 @@ struct Row {
     ordinal: u32,
     text: String,
     privacy: String,
+    origin: String,
     learned: i64,
-    valid_from: i64,
+    valid_from: Option<i64>,
     valid_to: Option<i64>,
     unlearned: Option<i64>,
     uses: i64,
@@ -981,7 +995,7 @@ impl Row {
         status == Status::Stable
             && self.stale_after.is_none_or(|end| today < end)
             && self.unlearned.is_none()
-            && today >= self.valid_from
+            && self.valid_from.is_none_or(|from| today >= from)
             && self.valid_to.is_none_or(|to| today < to)
     }
 }
@@ -1017,16 +1031,17 @@ fn put_concept(
     for section in &concept.sections {
         for claim in &section.claims {
             tx.execute(
-                "INSERT INTO claim(concept, ordinal, heading, text, privacy,
+                "INSERT INTO claim(concept, ordinal, heading, text, privacy, origin,
                                    valid_from, valid_to, learned, unlearned, usage_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     concept_id,
                     ordinal,
                     section.heading,
                     claim.text,
                     privacy_str(claim.privacy),
-                    to_days(claim.validity.valid_from),
+                    origin_str(claim.origin),
+                    claim.validity.valid_from.map(to_days),
                     claim.validity.valid_to.map(to_days),
                     to_days(claim.validity.learned),
                     claim.validity.unlearned.map(to_days),
@@ -1329,6 +1344,25 @@ fn parse_privacy(text: &str) -> Privacy {
         Privacy::Private
     } else {
         Privacy::Normal
+    }
+}
+
+const fn origin_str(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Inferred => "inferred",
+        Origin::Stated => "stated",
+        Origin::Web => "web",
+        Origin::Connector => "connector",
+    }
+}
+
+/// Anything unrecognised reads as inferred, matching the file parser and §9.12's safe direction.
+fn parse_origin(text: &str) -> Origin {
+    match text {
+        "stated" => Origin::Stated,
+        "web" => Origin::Web,
+        "connector" => Origin::Connector,
+        _ => Origin::Inferred,
     }
 }
 

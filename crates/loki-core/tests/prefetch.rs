@@ -7,7 +7,7 @@ use jiff::civil::{Date, date};
 use loki_core::core::vocab::Locality;
 use loki_core::memory::bundle::{Bundle, WORKING_SET};
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::index::{Index, Origin, Query, Session};
+use loki_core::memory::index::{Index, Layer, Query, Session};
 use loki_core::memory::working_set;
 
 fn concept(name: &str, status: &str, claims: &[&str]) -> String {
@@ -102,8 +102,8 @@ async fn recall_spans_past_claims_and_the_live_session_in_one_call() {
         )
         .expect("recall");
     assert_eq!(
-        infra.first().map(|r| r.origin),
-        Some(Origin::Claim),
+        infra.first().map(|r| r.layer),
+        Some(Layer::Consolidated),
         "{infra:?}"
     );
 
@@ -115,8 +115,8 @@ async fn recall_spans_past_claims_and_the_live_session_in_one_call() {
         )
         .expect("recall");
     assert_eq!(
-        deploy.first().map(|r| r.origin),
-        Some(Origin::Session),
+        deploy.first().map(|r| r.layer),
+        Some(Layer::Live),
         "the session's own turn has to come back: {deploy:?}"
     );
 }

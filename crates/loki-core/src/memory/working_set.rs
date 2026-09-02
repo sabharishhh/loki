@@ -69,7 +69,7 @@ pub async fn generate(
             }
         };
         // The gate, not a status check. A draft cannot reach a prompt by any path.
-        let Ok(active) = Active::try_from(concept, today) else {
+        let Ok(active) = Active::try_from(concept, today, scope) else {
             continue;
         };
         let claims: Vec<&str> = active

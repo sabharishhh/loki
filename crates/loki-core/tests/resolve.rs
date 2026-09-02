@@ -377,3 +377,71 @@ async fn a_removed_entity_stops_being_a_candidate() {
         "a deleted entity is still blocking"
     );
 }
+
+/// B-29, and §9.4's "identity is the entity, not the directory". The same surface extracted once
+/// as a project and once as a person must not become two files, because blocking would then see
+/// two candidates for one thing and the store would look like it writes a file per fact.
+#[tokio::test]
+async fn one_surface_under_two_kinds_resolves_to_one_file() {
+    let store = Store::new("cross-kind").await;
+    // The matcher declines: `Loki` already exists as a project, and the incoming claim reads like
+    // a person fact, so the question it was asked has a defensible "no".
+    let matcher = Scripted::new(Decision::New);
+
+    let resolved = resolve(
+        "Loki",
+        &[],
+        "Loki prefers short replies",
+        Kind::Person,
+        &store.index,
+        &matcher,
+    )
+    .await
+    .expect("resolve");
+
+    assert_eq!(
+        resolved,
+        Resolution::Existing {
+            path: "projects/loki.md".to_string()
+        },
+        "an exact name already on disk is the same entity, whatever directory it landed in"
+    );
+}
+
+/// The override is about identity, not about the claim. A name nothing matches still creates.
+#[tokio::test]
+async fn a_name_nothing_matches_still_creates_its_own_file() {
+    let store = Store::new("cross-kind-distinct").await;
+    let matcher = Scripted::new(Decision::New);
+
+    let resolved = resolve(
+        "Meera",
+        &[],
+        "Meera works on infra",
+        Kind::Preference,
+        &store.index,
+        &matcher,
+    )
+    .await
+    .expect("resolve");
+
+    // `Meera` is an exact name under `people/`, so identity wins there too.
+    assert_eq!(
+        resolved,
+        Resolution::Existing {
+            path: "people/meera.md".to_string()
+        }
+    );
+
+    let novel = resolve(
+        "Quarterly review",
+        &[],
+        "Sabharish runs it on Fridays",
+        Kind::Project,
+        &store.index,
+        &matcher,
+    )
+    .await
+    .expect("resolve");
+    assert!(matches!(novel, Resolution::New { .. }), "{novel:?}");
+}

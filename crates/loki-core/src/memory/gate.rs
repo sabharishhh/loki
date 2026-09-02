@@ -8,7 +8,7 @@
 
 use jiff::civil::Date;
 
-use super::claim::{Claim, Privacy};
+use super::claim::{Claim, Origin, Privacy};
 use super::concept::{RawConcept, Status};
 use crate::core::vocab::Locality;
 
@@ -18,6 +18,8 @@ pub enum GateError {
     NotStable,
     #[error("past its stale_after")]
     Stale,
+    #[error("nothing in it may reach this scope")]
+    Origin,
 }
 
 /// Which claims a request may carry, decided by where the model runs.
@@ -29,6 +31,13 @@ pub struct TierScope {
     locality: Locality,
     /// Whether this particular task asked for private claims.
     private_allowed: bool,
+    /// Whether this particular task may see claims that did not come from the user (§9.12).
+    ///
+    /// The same shape as `private_allowed`, deliberately. §9.12 says a `web` or `connector` claim
+    /// reaches a prompt only through a deliberate search or a confirmation, which is the rule
+    /// §9.11 already applies to private claims, so it adds a value to an existing rule rather
+    /// than a second rule.
+    foreign_allowed: bool,
 }
 
 impl TierScope {
@@ -38,6 +47,7 @@ impl TierScope {
         Self {
             locality,
             private_allowed: false,
+            foreign_allowed: false,
         }
     }
 
@@ -50,7 +60,18 @@ impl TierScope {
         Self {
             locality,
             private_allowed: true,
+            foreign_allowed: false,
         }
+    }
+
+    /// A task that fetched something and is using it in the same turn (§9.12).
+    ///
+    /// Deliberate, per task, and never the default. Pre-fetch and the working set never set it,
+    /// which is what stops a page's claim about you becoming a fact about you.
+    #[must_use]
+    pub const fn including_foreign(mut self) -> Self {
+        self.foreign_allowed = true;
+        self
     }
 
     #[must_use]
@@ -65,6 +86,12 @@ impl TierScope {
             Privacy::Private => self.private_allowed,
         }
     }
+
+    /// Whether this scope may see a claim from `origin` (§9.12).
+    #[must_use]
+    pub const fn admits_origin(self, origin: Origin) -> bool {
+        origin.durable_eligible() || self.foreign_allowed
+    }
 }
 
 /// A concept that has passed the gate.
@@ -77,14 +104,30 @@ pub struct Active(RawConcept);
 impl Active {
     /// Checks a concept read off disk.
     ///
+    /// `today` is a parameter rather than a clock read inside the constructor. Principle 9, and it
+    /// is what lets §21.2 test the gate at any point on a timeline.
+    ///
     /// # Errors
-    /// Rejects anything not `stable`, and anything past its `stale_after`.
-    pub fn try_from(raw: RawConcept, today: Date) -> Result<Self, GateError> {
+    /// Rejects anything not `stable`, anything past its `stale_after`, and anything with nothing
+    /// this scope may see.
+    pub fn try_from(raw: RawConcept, today: Date, scope: TierScope) -> Result<Self, GateError> {
         if raw.front.status != Status::Stable {
             return Err(GateError::NotStable);
         }
         if raw.is_stale_on(today) {
             return Err(GateError::Stale);
+        }
+        // §10.4's origin check. Origin is per claim (§9.13), so the concept-level question is
+        // whether anything in it is admissible at all. A concept made entirely of fetched content
+        // has nothing to contribute and should not reach the prompt as an empty heading.
+        let mut admissible = 0usize;
+        let mut total = 0usize;
+        for claim in raw.claims() {
+            total += 1;
+            admissible += usize::from(scope.admits_origin(claim.origin));
+        }
+        if total > 0 && admissible == 0 {
+            return Err(GateError::Origin);
         }
         Ok(Self(raw))
     }
@@ -107,6 +150,7 @@ impl Active {
         self.0
             .claims()
             .filter(move |c| scope.admits(c.privacy))
+            .filter(move |c| scope.admits_origin(c.origin))
             .filter(move |c| c.validity.is_believed())
             .filter(move |c| c.validity.holds_on(today))
     }
@@ -144,6 +188,11 @@ mod tests {
     use crate::memory::concept::Frontmatter;
     use jiff::civil::date;
 
+    /// The default prompt scope: normal claims, nothing foreign.
+    fn cloud() -> TierScope {
+        TierScope::normal(Locality::Cloud)
+    }
+
     fn today() -> Date {
         date(2026, 8, 1)
     }
@@ -158,7 +207,10 @@ mod tests {
     fn a_draft_concept_cannot_reach_a_prompt() {
         let draft = RawConcept::new(Frontmatter::new("Meera", date(2026, 1, 1)));
         assert_eq!(draft.front.status, Status::Draft);
-        assert_eq!(Active::try_from(draft, today()), Err(GateError::NotStable));
+        assert_eq!(
+            Active::try_from(draft, today(), cloud()),
+            Err(GateError::NotStable)
+        );
     }
 
     #[test]
@@ -166,7 +218,7 @@ mod tests {
         let mut concept = stable("Old project");
         concept.front.status = Status::Deprecated;
         assert_eq!(
-            Active::try_from(concept, today()),
+            Active::try_from(concept, today(), cloud()),
             Err(GateError::NotStable)
         );
     }
@@ -175,12 +227,15 @@ mod tests {
     fn a_stale_concept_cannot_reach_a_prompt() {
         let mut concept = stable("Trip to Tokyo");
         concept.front.stale_after = Some(date(2026, 7, 1));
-        assert_eq!(Active::try_from(concept, today()), Err(GateError::Stale));
+        assert_eq!(
+            Active::try_from(concept, today(), cloud()),
+            Err(GateError::Stale)
+        );
     }
 
     #[test]
     fn a_stable_unexpired_concept_passes() {
-        assert!(Active::try_from(stable("Meera"), today()).is_ok());
+        assert!(Active::try_from(stable("Meera"), today(), cloud()).is_ok());
     }
 
     #[test]
@@ -191,7 +246,7 @@ mod tests {
         secret.privacy = Privacy::Private;
         concept.add("Health", secret);
 
-        let active = Active::try_from(concept, today()).expect("gate");
+        let active = Active::try_from(concept, today(), cloud()).expect("gate");
         let normal: Vec<_> = active
             .visible_claims(TierScope::normal(Locality::Cloud), today())
             .collect();
@@ -206,7 +261,7 @@ mod tests {
         secret.privacy = Privacy::Private;
         concept.add("Health", secret);
 
-        let active = Active::try_from(concept, today()).expect("gate");
+        let active = Active::try_from(concept, today(), cloud()).expect("gate");
         let seen: Vec<_> = active
             .visible_claims(TierScope::including_private(Locality::Cloud), today())
             .collect();
@@ -228,7 +283,7 @@ mod tests {
             Claim::stated("Works on the infra team", date(2026, 7, 15)),
         );
 
-        let active = Active::try_from(concept, today()).expect("gate");
+        let active = Active::try_from(concept, today(), cloud()).expect("gate");
         let seen: Vec<_> = active
             .visible_claims(TierScope::normal(Locality::Cloud), today())
             .collect();
@@ -239,12 +294,14 @@ mod tests {
     #[test]
     fn a_claim_not_yet_true_does_not_surface() {
         let mut concept = stable("Sabharish");
+        // Dated, because a future world time is the whole point. An undated claim holds on any
+        // day, which is what "the source never said when" has to mean.
         concept.add(
             "Plans",
-            Claim::stated("Moves to Chennai", date(2026, 12, 1)),
+            Claim::stated("Moves to Chennai", today()).dated(date(2026, 12, 1)),
         );
 
-        let active = Active::try_from(concept, today()).expect("gate");
+        let active = Active::try_from(concept, today(), cloud()).expect("gate");
         assert_eq!(
             active
                 .visible_claims(TierScope::normal(Locality::Cloud), today())
@@ -261,7 +318,7 @@ mod tests {
         secret.privacy = Privacy::Private;
         concept.add("Health", secret);
 
-        let active = vec![Active::try_from(concept, today()).expect("gate")];
+        let active = vec![Active::try_from(concept, today(), cloud()).expect("gate")];
         let text = build_prompt_text(&active, TierScope::normal(Locality::Cloud), today());
 
         assert!(text.contains("Builds Loki"));
@@ -271,7 +328,7 @@ mod tests {
     #[test]
     fn a_concept_with_nothing_visible_contributes_nothing() {
         let concept = stable("Empty");
-        let active = vec![Active::try_from(concept, today()).expect("gate")];
+        let active = vec![Active::try_from(concept, today(), cloud()).expect("gate")];
         let text = build_prompt_text(&active, TierScope::normal(Locality::Cloud), today());
         assert!(text.is_empty());
     }

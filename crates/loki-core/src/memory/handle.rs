@@ -11,7 +11,7 @@ use jiff::civil::Date;
 use super::bundle::{Bundle, BundleError};
 use super::consolidate::{self, Budget, ConsolidateError, Episode, Extractor, Report};
 use super::gate::TierScope;
-use super::index::{Index, IndexError, Origin, Query, Recalled, Session, Use};
+use super::index::{Index, IndexError, Layer, Query, Recalled, Session, Use};
 use super::reconcile::Reference;
 use super::resolve::Matcher;
 use super::timeline;
@@ -150,7 +150,7 @@ impl Memory {
     pub fn mark_used(&self, recalled: &[Recalled]) -> Result<(), MemoryError> {
         let uses: Vec<Use> = recalled
             .iter()
-            .filter(|r| r.origin == Origin::Claim)
+            .filter(|r| r.layer == Layer::Consolidated)
             .map(Recalled::reference)
             .collect();
         if uses.is_empty() {

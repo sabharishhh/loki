@@ -111,7 +111,7 @@ impl Extractor for OneFact {
             text: self.fact.clone(),
             days_ago: None,
             valid_from: Some(date(2026, 1, 1)),
-            source: loki_core::memory::claim::Source::Stated,
+            origin: loki_core::memory::claim::Origin::Stated,
             tags: vec![],
         }])
     }

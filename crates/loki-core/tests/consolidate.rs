@@ -8,13 +8,15 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use jiff::civil::{Date, date};
+use loki_core::core::vocab::Locality;
 use loki_core::memory::bundle::Bundle;
-use loki_core::memory::claim::Source;
+use loki_core::memory::claim::Origin;
 use loki_core::memory::concept::Status;
 use loki_core::memory::consolidate::{
     Budget, Candidate, ConsolidateError, Episode, Extractor, Report, Unbounded, run,
 };
-use loki_core::memory::index::{Candidate as EntityCandidate, Index};
+use loki_core::memory::gate::TierScope;
+use loki_core::memory::index::{Candidate as EntityCandidate, Index, Query, Visibility};
 use loki_core::memory::reconcile::{Precedence, Reference};
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 
@@ -99,8 +101,8 @@ impl Budget for StopsAfter {
     }
 }
 
-fn candidate(surface: &str, text: &str, valid_from: Date, source: Source) -> Candidate {
-    about("fact", surface, text, valid_from, source)
+fn candidate(surface: &str, text: &str, valid_from: Date, origin: Origin) -> Candidate {
+    about("fact", surface, text, valid_from, origin)
 }
 
 /// A candidate that says which property of the entity it sets.
@@ -109,7 +111,7 @@ fn about(
     surface: &str,
     text: &str,
     valid_from: Date,
-    source: Source,
+    origin: Origin,
 ) -> Candidate {
     Candidate {
         surface: surface.to_string(),
@@ -119,7 +121,7 @@ fn about(
         text: text.to_string(),
         days_ago: None,
         valid_from: Some(valid_from),
-        source,
+        origin,
         tags: vec![],
     }
 }
@@ -198,7 +200,7 @@ async fn a_correction_supersedes_and_records_how_long_it_was_wrong() {
                 "Sabharish",
                 "on the design team",
                 date(2026, 3, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
         (
@@ -207,7 +209,7 @@ async fn a_correction_supersedes_and_records_how_long_it_was_wrong() {
                 "Sabharish",
                 "on the infra team",
                 date(2026, 7, 15),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -252,7 +254,7 @@ async fn a_conflict_with_no_clear_winner_is_surfaced_not_guessed() {
                 "Meera",
                 "at Acme",
                 date(2026, 3, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
         (
@@ -261,7 +263,7 @@ async fn a_conflict_with_no_clear_winner_is_surfaced_not_guessed() {
                 "Meera",
                 "at Globex",
                 date(2026, 3, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -301,7 +303,7 @@ async fn a_run_that_hits_its_ceiling_reports_what_is_left() {
             "Dan",
             "likes tea",
             date(2026, 1, 1),
-            Source::Stated,
+            Origin::Stated,
         )],
     )]);
     let episodes = [
@@ -328,7 +330,7 @@ async fn a_paused_run_resumes_where_it_stopped() {
                 "Dan",
                 "likes tea",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
         (
@@ -337,7 +339,7 @@ async fn a_paused_run_resumes_where_it_stopped() {
                 "Priya",
                 "likes coffee",
                 date(2026, 2, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -371,7 +373,7 @@ async fn relative_time_resolves_against_the_episode_not_today() {
         "Dan",
         "started a new job",
         date(2026, 1, 1),
-        Source::Inferred,
+        Origin::Inferred,
     );
     relative.valid_from = None;
     relative.days_ago = Some(14);
@@ -389,7 +391,7 @@ async fn relative_time_resolves_against_the_episode_not_today() {
     let claim = concept.claims().next().expect("claim");
     assert_eq!(
         claim.validity.valid_from,
-        date(2025, 6, 6),
+        Some(date(2025, 6, 6)),
         "two weeks before the message, not before today"
     );
 }
@@ -405,7 +407,7 @@ async fn an_inferred_first_mention_stays_draft_and_a_second_promotes() {
                 "Dan",
                 "prefers short replies",
                 date(2026, 1, 1),
-                Source::Inferred,
+                Origin::Inferred,
             )],
         ),
         (
@@ -414,7 +416,7 @@ async fn an_inferred_first_mention_stays_draft_and_a_second_promotes() {
                 "Dan",
                 "prefers short replies",
                 date(2026, 1, 1),
-                Source::Inferred,
+                Origin::Inferred,
             )],
         ),
     ]);
@@ -476,7 +478,7 @@ async fn a_run_commits_and_the_index_sees_the_result() {
             "Priya",
             "runs the platform team",
             date(2026, 1, 1),
-            Source::Stated,
+            Origin::Stated,
         )],
     )]);
 
@@ -517,7 +519,7 @@ async fn a_stated_first_mention_is_usable_at_once() {
             "Sabharish",
             "is the user's name",
             date(2026, 1, 1),
-            Source::Stated,
+            Origin::Stated,
         )],
     )]);
 
@@ -546,7 +548,7 @@ async fn re_consolidating_an_episode_does_not_duplicate_its_claims() {
             "Sabharish",
             "is a computer science graduate",
             date(2026, 1, 1),
-            Source::Stated,
+            Origin::Stated,
         )],
     )]);
     let episodes = [episode("episodes/a.md", date(2026, 1, 1))];
@@ -592,7 +594,7 @@ async fn one_fact_worded_differently_each_run_stays_one_claim() {
                         "Sabharish",
                         text,
                         date(2026, 1, 1),
-                        Source::Stated,
+                        Origin::Stated,
                     )],
                 )
             })
@@ -642,7 +644,7 @@ async fn a_reworded_claim_with_a_new_value_still_supersedes() {
                 "Sabharish",
                 "Sabharish lives in Chennai",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
         (
@@ -652,7 +654,7 @@ async fn a_reworded_claim_with_a_new_value_still_supersedes() {
                 "Sabharish",
                 "Sabharish has moved to Bangalore",
                 date(2026, 7, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -688,7 +690,7 @@ async fn a_restatement_upgrades_a_guess_rather_than_adding_to_it() {
                 "Sabharish",
                 "Sabharish's city is Chennai",
                 date(2026, 1, 1),
-                Source::Inferred,
+                Origin::Inferred,
             )],
         ),
         (
@@ -698,7 +700,7 @@ async fn a_restatement_upgrades_a_guess_rather_than_adding_to_it() {
                 "Sabharish",
                 "Sabharish is in Chennai",
                 date(2026, 2, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -717,7 +719,7 @@ async fn a_restatement_upgrades_a_guess_rather_than_adding_to_it() {
     let concept = store.concept_at("people/sabharish.md").await;
     assert_eq!(concept.claims().count(), 1);
     let claim = concept.claims().next().expect("a claim");
-    assert_eq!(claim.source, Source::Stated);
+    assert_eq!(claim.origin, Origin::Stated);
     assert_eq!(
         concept.front.status,
         Status::Stable,
@@ -740,21 +742,21 @@ async fn two_different_facts_about_one_person_both_stand() {
                 "Sabharish",
                 "is called Sabharish",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
             about(
                 "education",
                 "Sabharish",
                 "is a computer science graduate",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
             about(
                 "city",
                 "Sabharish",
                 "lives in Chennai",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
         ],
     )]);
@@ -797,7 +799,7 @@ async fn the_same_attribute_stated_again_supersedes() {
                 "Sabharish",
                 "lives in Chennai",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
         (
@@ -807,7 +809,7 @@ async fn the_same_attribute_stated_again_supersedes() {
                 "Sabharish",
                 "lives in Bangalore",
                 date(2026, 7, 1),
-                Source::Stated,
+                Origin::Stated,
             )],
         ),
     ]);
@@ -848,14 +850,14 @@ async fn a_claim_with_no_attribute_never_conflicts() {
                 "Sabharish",
                 "something vague",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
             about(
                 "",
                 "Sabharish",
                 "something else vague",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
         ],
     )]);
@@ -892,21 +894,21 @@ async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
                 "Sabharish",
                 "Sabharish lives in Chennai",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
             about(
                 "city",
                 "Sabharish",
                 "Sabharish lives in Bangalore",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
             about(
                 "education",
                 "Sabharish",
                 "Sabharish is a computer science graduate",
                 date(2026, 1, 1),
-                Source::Stated,
+                Origin::Stated,
             ),
         ],
     )]);
@@ -925,5 +927,131 @@ async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
         concept.front.status,
         Status::Draft,
         "a surfaced conflict must keep the concept out of use until a person resolves it"
+    );
+}
+
+/// §9.12, the exposure that arrives with §12's web search. A page's claim about the user can
+/// accumulate recurrence and promote into a durable fact with no user statement in its lineage,
+/// and nothing else in the design stops it: conflict rules only engage once something contradicts,
+/// and an uncontested false claim is never contradicted.
+#[tokio::test]
+async fn a_claim_from_a_page_is_stored_and_never_promotes() {
+    let store = Store::new("web-origin", &["episodes/a.md", "episodes/b.md"]).await;
+    let from_page = |path: &str| {
+        (
+            path.to_string(),
+            vec![about(
+                "employer",
+                "Sabharish",
+                "Sabharish works at Acme",
+                date(2026, 1, 1),
+                Origin::Web,
+            )],
+        )
+    };
+    let extractor = Scripted::new(vec![from_page("episodes/a.md"), from_page("episodes/b.md")]);
+
+    // Twice, because recurrence is exactly the signal that would otherwise promote it.
+    store
+        .go(
+            &[
+                episode("episodes/a.md", date(2026, 1, 1)),
+                episode("episodes/b.md", date(2026, 2, 1)),
+            ],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(concept.claims().count(), 1, "stored, and stored once");
+    assert_eq!(concept.claims().next().expect("claim").origin, Origin::Web);
+    assert_eq!(
+        concept.front.status,
+        Status::Draft,
+        "a page's claim never earns its way into a prompt by repetition"
+    );
+
+    // Searchable, which is the half §9.12 keeps: usable in the turn that fetched it.
+    let hits = store
+        .index
+        .recall(&Query {
+            visibility: Visibility::Everything,
+            ..Query::prefetch(
+                "Acme",
+                TierScope::normal(Locality::Cloud).including_foreign(),
+                date(2026, 3, 1),
+                5,
+            )
+        })
+        .expect("recall");
+    assert!(
+        hits.iter().any(|h| h.text.contains("Acme")),
+        "a web claim stays searchable: {hits:?}"
+    );
+
+    // And invisible to the automatic path, which is the half it takes away.
+    let prefetched = store
+        .index
+        .recall(&Query::prefetch(
+            "Acme",
+            TierScope::normal(Locality::Cloud),
+            date(2026, 3, 1),
+            5,
+        ))
+        .expect("recall");
+    assert!(
+        prefetched.is_empty(),
+        "pre-fetch must not carry content the user never gave: {prefetched:?}"
+    );
+}
+
+/// §9.7 rule 3, widened by §9.12: content that did not come from the user never displaces
+/// content that did.
+#[tokio::test]
+async fn a_page_never_overwrites_what_the_user_said() {
+    let store = Store::new("web-vs-stated", &["episodes/a.md", "episodes/b.md"]).await;
+    let extractor = Scripted::new(vec![
+        (
+            "episodes/a.md".to_string(),
+            vec![about(
+                "employer",
+                "Sabharish",
+                "Sabharish works at Loki",
+                date(2026, 1, 1),
+                Origin::Stated,
+            )],
+        ),
+        (
+            "episodes/b.md".to_string(),
+            vec![about(
+                "employer",
+                "Sabharish",
+                "Sabharish works at Acme",
+                date(2026, 7, 1),
+                Origin::Web,
+            )],
+        ),
+    ]);
+
+    store
+        .go(
+            &[
+                episode("episodes/a.md", date(2026, 1, 1)),
+                episode("episodes/b.md", date(2026, 7, 1)),
+            ],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    let stated = concept
+        .claims()
+        .find(|c| c.text.contains("Loki"))
+        .expect("what the user said is still there");
+    assert!(
+        stated.validity.is_believed(),
+        "a page is newer in world time and still loses"
     );
 }

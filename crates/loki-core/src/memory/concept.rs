@@ -220,19 +220,25 @@ fn strip_frontmatter(text: &str) -> Result<Split<'_>, ParseError> {
     })
 }
 
-/// A claim with placeholder dates, filled in by the attribute lines that follow it.
+/// A claim with a placeholder `learned`, filled in by the attribute lines that follow it.
+///
+/// `origin` starts inferred and `valid_from` starts absent, so a v0.8 file that names neither
+/// reads as a guess with no world time, which is the conservative direction on both.
 fn blank_claim(text: &str) -> Claim {
-    use super::claim::{Confidence, Privacy, Source, Validity};
-    let epoch = Date::constant(1970, 1, 1);
+    use super::claim::{Confidence, Origin, Privacy, Validity};
     Claim {
         text: text.to_owned(),
         attribute: String::new(),
-        validity: Validity::open(epoch, epoch),
+        validity: Validity::undated(Date::constant(1970, 1, 1)),
         confidence: Confidence::Medium,
-        source: Source::Inferred,
+        origin: Origin::Inferred,
         privacy: Privacy::Normal,
         replaced_by: None,
         usage_count: 0,
+        evidence: Vec::new(),
+        recalls: 0,
+        recall_days: 0,
+        recall_queries: 0,
     }
 }
 
@@ -249,9 +255,19 @@ fn flush(pending: &mut Option<Claim>, sections: &mut Vec<Section>) {
 }
 
 fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), ParseError> {
-    use super::claim::{Confidence, Privacy, Source};
+    use super::claim::{Confidence, Origin, Privacy};
 
-    // Attributes may share a line: `confidence: high   source: stated`.
+    // `evidence` is the one key whose value is free text, and a URL contains a colon, so
+    // `split_pairs` would read `https:` as the start of a second pair. Taken whole, before the
+    // split, rather than teaching the splitter about schemes.
+    if let Some(value) = line.strip_prefix("evidence:") {
+        if let Some(anchor) = evidence(value.trim()) {
+            claim.evidence.push(anchor);
+        }
+        return Ok(());
+    }
+
+    // Attributes may share a line: `confidence: high   origin: stated`.
     for pair in split_pairs(line) {
         let (key, value) = pair
             .split_once(':')
@@ -262,7 +278,7 @@ fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), 
         let value = value.trim();
 
         match key.trim() {
-            "valid_from" => claim.validity.valid_from = date(value, line_no, "valid_from")?,
+            "valid_from" => claim.validity.valid_from = maybe_date(value, line_no, "valid_from")?,
             "valid_to" => claim.validity.valid_to = maybe_date(value, line_no, "valid_to")?,
             "learned" => claim.validity.learned = date(value, line_no, "learned")?,
             "unlearned" => claim.validity.unlearned = maybe_date(value, line_no, "unlearned")?,
@@ -273,12 +289,17 @@ fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), 
                     _ => Confidence::Medium,
                 }
             }
-            "about" => claim.attribute = super::claim::normalize_attribute(value),
-            "source" => {
-                claim.source = if value == "stated" {
-                    Source::Stated
-                } else {
-                    Source::Inferred
+            // `about` is what v0.8-era files were written with, before §9.13 named the field.
+            "attribute" | "about" => claim.attribute = super::claim::normalize_attribute(value),
+            // Likewise `source`, which §9.12 renamed and widened.
+            "origin" | "source" => {
+                claim.origin = match value {
+                    "stated" => Origin::Stated,
+                    "web" => Origin::Web,
+                    "connector" => Origin::Connector,
+                    // Anything unrecognised reads as a guess. OKF says tolerate an unknown value,
+                    // and §9.12 says the safe reading of unknown provenance is not-from-the-user.
+                    _ => Origin::Inferred,
                 }
             }
             "privacy" => {
@@ -290,6 +311,9 @@ fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), 
             }
             "replaced_by" => claim.replaced_by = (value != "null").then(|| value.to_owned()),
             "usage_count" => claim.usage_count = value.parse().unwrap_or(0),
+            "recalls" => claim.recalls = value.parse().unwrap_or(0),
+            "recall_days" => claim.recall_days = value.parse().unwrap_or(0),
+            "recall_queries" => claim.recall_queries = value.parse().unwrap_or(0),
             // Unknown keys are ignored, not rejected. OKF requires that of consumers.
             _ => {}
         }
@@ -336,6 +360,23 @@ fn date(value: &str, line: usize, what: &'static str) -> Result<Date, ParseError
     })
 }
 
+/// Reads one `evidence:` line, `<hash> <source>` with an optional ` #<span>`.
+///
+/// One line per anchor rather than a nested list, because a claim block is flat `key: value` and a
+/// repeated key diffs one anchor at a time.
+fn evidence(value: &str) -> Option<super::claim::EvidenceRef> {
+    let (hash, rest) = value.split_once(char::is_whitespace)?;
+    let (source, span) = rest.trim().split_once(" #").map_or_else(
+        || (rest.trim(), None),
+        |(s, span)| (s.trim(), Some(span.trim().to_owned())),
+    );
+    (!hash.is_empty() && !source.is_empty()).then(|| super::claim::EvidenceRef {
+        source: source.to_owned(),
+        hash: hash.to_owned(),
+        span,
+    })
+}
+
 fn maybe_date(value: &str, line: usize, what: &'static str) -> Result<Option<Date>, ParseError> {
     if value == "null" || value.is_empty() {
         return Ok(None);
@@ -352,7 +393,7 @@ fn maybe_date(value: &str, line: usize, what: &'static str) -> Result<Option<Dat
 /// If the frontmatter cannot be serialized, which needs a non-string map key it cannot have.
 #[must_use]
 pub fn render(concept: &RawConcept) -> String {
-    use super::claim::{Confidence, Privacy, Source};
+    use super::claim::{Confidence, Origin, Privacy};
 
     let mut out = String::from(FENCE);
     out.push('\n');
@@ -375,13 +416,14 @@ pub fn render(concept: &RawConcept) -> String {
             // Written before the dates because it is what the claim is *about*, and a reader
             // scanning the file should see that before its validity window.
             if !claim.attribute.is_empty() {
-                out.push_str(&format!("  about: {}\n", claim.attribute));
+                out.push_str(&format!("  attribute: {}\n", claim.attribute));
             }
 
             let v = &claim.validity;
             out.push_str(&format!(
                 "  valid_from: {}   valid_to: {}\n",
-                v.valid_from,
+                v.valid_from
+                    .map_or_else(|| "null".to_owned(), |d| d.to_string()),
                 v.valid_to
                     .map_or_else(|| "null".to_owned(), |d| d.to_string())
             ));
@@ -397,11 +439,13 @@ pub fn render(concept: &RawConcept) -> String {
                 Confidence::Medium => "medium",
                 Confidence::High => "high",
             };
-            let source = match claim.source {
-                Source::Inferred => "inferred",
-                Source::Stated => "stated",
+            let origin = match claim.origin {
+                Origin::Inferred => "inferred",
+                Origin::Stated => "stated",
+                Origin::Web => "web",
+                Origin::Connector => "connector",
             };
-            out.push_str(&format!("  confidence: {confidence}   source: {source}\n"));
+            out.push_str(&format!("  confidence: {confidence}   origin: {origin}\n"));
 
             if claim.privacy == Privacy::Private {
                 out.push_str("  privacy: private\n");
@@ -412,6 +456,21 @@ pub fn render(concept: &RawConcept) -> String {
             if claim.usage_count > 0 {
                 out.push_str(&format!("  usage_count: {}\n", claim.usage_count));
             }
+            // Counted signals, written only once there is something to count, so a fresh file
+            // stays quiet and a diff shows movement rather than a row of zeroes.
+            if claim.recalls > 0 || claim.recall_days > 0 || claim.recall_queries > 0 {
+                out.push_str(&format!(
+                    "  recalls: {}   recall_days: {}   recall_queries: {}\n",
+                    claim.recalls, claim.recall_days, claim.recall_queries
+                ));
+            }
+            for anchor in &claim.evidence {
+                out.push_str(&format!("  evidence: {} {}", anchor.hash, anchor.source));
+                if let Some(span) = &anchor.span {
+                    out.push_str(&format!(" #{span}"));
+                }
+                out.push('\n');
+            }
         }
     }
     out
@@ -420,8 +479,105 @@ pub fn render(concept: &RawConcept) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::claim::{Confidence, Privacy, Source};
+    use crate::memory::claim::{Confidence, Origin, Privacy};
     use jiff::civil::date;
+
+    /// A file written by v0.8 has to keep reading. OKF requires consumers to tolerate what they
+    /// do not recognise, and §9.12 depends on that rule specifically: a bundle carrying an origin
+    /// this version does not know must degrade rather than break.
+    #[test]
+    fn a_v0_8_shaped_file_still_reads() {
+        const OLD: &str = r"---
+name: Sabharish
+status: stable
+generated:
+  by: loki/0.1
+  at: 2026-09-02
+okf_version: '0.2'
+---
+
+## name
+- The user's name is Sabharish
+  about: name
+  valid_from: 2026-09-02   valid_to: null
+  learned: 2026-09-02   unlearned: null
+  confidence: high   source: stated
+";
+        let concept = parse(OLD).expect("a v0.8 file parses");
+        let claim = concept.claims().next().expect("claim");
+        assert_eq!(claim.attribute, "name", "`about` is the old spelling");
+        assert_eq!(claim.origin, Origin::Stated, "`source` is the old spelling");
+        assert_eq!(
+            claim.validity.valid_from,
+            Some(date(2026, 9, 2)),
+            "a date the old file gave is a date, not a guess at one"
+        );
+        assert!(claim.evidence.is_empty());
+        assert_eq!(claim.recalls, 0);
+    }
+
+    /// An origin nobody has heard of reads as a guess, never as something the user said.
+    #[test]
+    fn an_unknown_origin_degrades_to_inferred() {
+        const FUTURE: &str = r"---
+name: Sabharish
+status: stable
+generated:
+  by: loki/0.9
+  at: 2026-09-02
+okf_version: '0.2'
+---
+
+## name
+- Told to us by another agent
+  attribute: name
+  learned: 2026-09-02   unlearned: null
+  confidence: high   origin: peer
+";
+        let concept = parse(FUTURE).expect("an unknown origin does not break the parse");
+        assert_eq!(
+            concept.claims().next().expect("claim").origin,
+            Origin::Inferred
+        );
+    }
+
+    #[test]
+    fn evidence_and_recall_counts_round_trip() {
+        use crate::memory::claim::EvidenceRef;
+
+        let mut concept = RawConcept::new(Frontmatter::new("Acme", date(2026, 9, 2)));
+        let mut claim = Claim::stated("Acme raised a Series B", date(2026, 9, 2))
+            .about("funding")
+            .citing(EvidenceRef {
+                source: "https://example.com/acme".to_owned(),
+                hash: "b4c9a2".to_owned(),
+                span: Some("L20-L24".to_owned()),
+            })
+            .citing(EvidenceRef {
+                source: "https://example.com/press".to_owned(),
+                hash: "77de10".to_owned(),
+                span: None,
+            });
+        claim.recalls = 7;
+        claim.recall_days = 3;
+        claim.recall_queries = 4;
+        concept.add("funding", claim);
+
+        let reparsed = parse(&render(&concept)).expect("round trip");
+        let back = reparsed.claims().next().expect("claim");
+        assert_eq!(
+            back.evidence.len(),
+            2,
+            "a claim can rest on several mentions"
+        );
+        assert_eq!(back.evidence[0].hash, "b4c9a2");
+        assert_eq!(back.evidence[0].span.as_deref(), Some("L20-L24"));
+        assert_eq!(back.evidence[1].span, None);
+        assert_eq!(
+            (back.recalls, back.recall_days, back.recall_queries),
+            (7, 3, 4)
+        );
+    }
 
     /// The worked example from section 9.5, as it would sit on disk.
     const MEERA: &str = r"---
@@ -470,7 +626,7 @@ okf_version: '0.2'
         let concept = parse(MEERA).expect("parse");
         let old = &concept.sections[0].claims[1];
 
-        assert_eq!(old.validity.valid_from, date(2026, 3, 12));
+        assert_eq!(old.validity.valid_from, Some(date(2026, 3, 12)));
         assert_eq!(old.validity.valid_to, Some(date(2026, 7, 15)));
         assert_eq!(old.validity.learned, date(2026, 3, 12));
         assert_eq!(old.validity.unlearned, Some(date(2026, 8, 29)));
@@ -484,7 +640,7 @@ okf_version: '0.2'
         let concept = parse(MEERA).expect("parse");
         let claim = &concept.sections[0].claims[0];
         assert_eq!(claim.confidence, Confidence::High);
-        assert_eq!(claim.source, Source::Stated);
+        assert_eq!(claim.origin, Origin::Stated);
     }
 
     #[test]
@@ -520,7 +676,7 @@ okf_version: '0.2'
         concept.add("Health", claim);
         concept.add(
             "Work",
-            Claim::inferred("Builds Loki", date(2026, 1, 1), date(2026, 1, 5)),
+            Claim::inferred("Builds Loki", date(2026, 1, 5)).dated(date(2026, 1, 1)),
         );
 
         let reparsed = parse(&render(&concept)).expect("reparse");
