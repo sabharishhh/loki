@@ -30,8 +30,8 @@ pub enum Kind {
     /// something, and a timeline that stays empty while files are being written is not a trust
     /// surface, it is a lie about the store it claims to reflect.
     Noted,
-    /// Two claims conflicted and neither was used. One tap.
-    NeedsYou,
+    /// Two claims conflicted. The later one is in use and the earlier is kept to be checked.
+    WorthChecking,
 }
 
 /// One row of the timeline.
@@ -108,7 +108,7 @@ pub fn rows(report: &Report, concepts: &[(String, RawConcept)], day: Date) -> Ve
             }),
             Precedence::Surface => out.push(Entry {
                 day,
-                kind: Kind::NeedsYou,
+                kind: Kind::WorthChecking,
                 concept: decided.concept.clone(),
                 name: concept.map(|c| c.front.name.clone()).unwrap_or_default(),
                 attribute: live.map(|c| c.attribute.clone()).unwrap_or_default(),
@@ -203,11 +203,11 @@ pub fn render(entry: &Entry) -> String {
     match entry.kind {
         Kind::Learned => format!("learned, {}: {}", entry.subject(), entry.text),
         Kind::Noted => format!("noted, {}: {}", entry.subject(), entry.text),
-        Kind::NeedsYou => format!(
-            "needs you, {}: \"{}\" against \"{}\", and neither is being used",
+        Kind::WorthChecking => format!(
+            "worth checking, {}: using \"{}\", and you also said \"{}\"",
             entry.concept,
-            entry.replaced.as_deref().unwrap_or(""),
-            entry.text
+            entry.text,
+            entry.replaced.as_deref().unwrap_or("")
         ),
         Kind::Corrected => {
             let mut line = format!("corrected, {}: \"{}\"", entry.concept, entry.text);

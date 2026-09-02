@@ -24,7 +24,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS claim (
     text        TEXT    NOT NULL,
     privacy     TEXT    NOT NULL,
     origin      TEXT    NOT NULL DEFAULT 'inferred',
-    contested   INTEGER NOT NULL DEFAULT 0,
+    shadowed    INTEGER NOT NULL DEFAULT 0,
     valid_from  INTEGER,
     valid_to    INTEGER,
     learned     INTEGER NOT NULL,
@@ -511,12 +511,17 @@ impl Index {
             .and_then(|v| v.parse().ok());
         if found.is_some_and(|v| v != SCHEMA_VERSION) {
             db.execute_batch(
+                // Every table, including the live-session ones. A bump that leaves a table
+                // behind silently keeps its old shape, which is the failure a version exists to
+                // prevent, arriving through the fix for it.
                 "DROP TABLE IF EXISTS claim;
                  DROP TABLE IF EXISTS concept;
                  DROP TABLE IF EXISTS link;
                  DROP TABLE IF EXISTS alias;
                  DROP TABLE IF EXISTS tag;
+                 DROP TABLE IF EXISTS turn;
                  DROP TABLE IF EXISTS claim_fts;
+                 DROP TABLE IF EXISTS turn_fts;
                  DROP TABLE IF EXISTS meta;",
             )
             .map_err(IndexError::Write)?;
@@ -647,7 +652,7 @@ impl Index {
         let mut stmt = db
             .prepare(
                 "SELECT c.path, c.name, c.status, c.stale_after,
-                        m.heading, m.ordinal, m.text, m.privacy, m.origin, m.contested,
+                        m.heading, m.ordinal, m.text, m.privacy, m.origin, m.shadowed,
                         m.learned, m.valid_from, m.valid_to, m.unlearned,
                         m.usage_count + m.uses_pending
                  FROM claim m JOIN concept c ON c.id = m.concept
@@ -668,7 +673,7 @@ impl Index {
                         text: r.get(6)?,
                         privacy: r.get::<_, String>(7)?,
                         origin: r.get::<_, String>(8)?,
-                        contested: r.get::<_, i64>(9)? != 0,
+                        shadowed: r.get::<_, i64>(9)? != 0,
                         learned: r.get(10)?,
                         valid_from: r.get(11)?,
                         valid_to: r.get(12)?,
@@ -996,7 +1001,7 @@ struct Row {
     text: String,
     privacy: String,
     origin: String,
-    contested: bool,
+    shadowed: bool,
     learned: i64,
     valid_from: Option<i64>,
     valid_to: Option<i64>,
@@ -1009,7 +1014,7 @@ impl Row {
     /// [`super::gate::Active`] and [`super::claim::Validity`].
     fn is_eligible(&self, status: Status, today: i64) -> bool {
         status == Status::Stable
-            && !self.contested
+            && !self.shadowed
             && self.stale_after.is_none_or(|end| today < end)
             && self.unlearned.is_none()
             && self.valid_from.is_none_or(|from| today >= from)
@@ -1048,7 +1053,7 @@ fn put_concept(
     for section in &concept.sections {
         for claim in &section.claims {
             tx.execute(
-                "INSERT INTO claim(concept, ordinal, heading, text, privacy, origin, contested,
+                "INSERT INTO claim(concept, ordinal, heading, text, privacy, origin, shadowed,
                                    valid_from, valid_to, learned, unlearned, usage_count)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
@@ -1061,7 +1066,7 @@ fn put_concept(
                     // Computed here because this is where the whole concept is in hand. §9.7's
                     // rule 4 is a property of a claim relative to its siblings, and recall sees
                     // one row at a time.
-                    i64::from(super::reconcile::is_contested(concept, claim)),
+                    i64::from(super::reconcile::is_shadowed(concept, ordinal)),
                     claim.validity.valid_from.map(to_days),
                     claim.validity.valid_to.map(to_days),
                     to_days(claim.validity.learned),

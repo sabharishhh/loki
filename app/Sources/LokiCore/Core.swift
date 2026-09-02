@@ -173,7 +173,7 @@ public final class Core: Sendable {
         decode(loki_knowledge(handle)) ?? Knowledge(entities: [])
     }
 
-    /// Settles a conflict the store refused to guess at, keeping the claim at `ordinal`.
+    /// Confirms which side of a conflict is right, keeping the claim at `ordinal`.
     public func settle(path: String, keep: UInt32) throws {
         let status = path.withCString { loki_resolve_conflict(handle, $0, keep) }
         if let error = CoreError(status) { throw error }
@@ -230,13 +230,11 @@ public struct KnownEntity: Decodable, Sendable, Equatable, Identifiable {
     /// Confirmed by a person, so nothing decays it by heuristic.
     public let confirmed: Bool
     public let facts: [KnownFact]
-    /// Conflicts waiting on the user. One tap each.
-    public let questions: [OpenQuestion]
 
     public var id: String { path }
 
     private enum CodingKeys: String, CodingKey {
-        case path, name, kind, facts, questions
+        case path, name, kind, facts
         case inUse = "in_use"
         case confirmed
     }
@@ -253,12 +251,18 @@ public struct KnownFact: Decodable, Sendable, Equatable, Identifiable {
     public let was: Superseded?
     /// True when it came from a page or an account rather than from the user.
     public let fromElsewhere: Bool
+    /// Other things said about this property that Loki is not using.
+    ///
+    /// Kept, never sent to the model, and offered back. Nothing blocks on them: an approval queue
+    /// nobody works through is worse than a decision the user can see and flip.
+    public let alsoSaid: [Alternative]
 
     public var id: UInt32 { ordinal }
 
     private enum CodingKeys: String, CodingKey {
         case ordinal, attribute, text, since, was
         case fromElsewhere = "from_elsewhere"
+        case alsoSaid = "also_said"
     }
 }
 
@@ -276,16 +280,8 @@ public struct Superseded: Decodable, Sendable, Equatable {
     }
 }
 
-/// Two claims that cannot both be true, and nothing has picked between them.
-public struct OpenQuestion: Decodable, Sendable, Equatable, Identifiable {
-    public let attribute: String
-    public let options: [QuestionOption]
-
-    public var id: String { attribute }
-}
-
-/// One side of a question.
-public struct QuestionOption: Decodable, Sendable, Equatable, Identifiable {
+/// Something said about a property that a later statement overrode.
+public struct Alternative: Decodable, Sendable, Equatable, Identifiable {
     public let ordinal: UInt32
     public let text: String
     public let since: String?

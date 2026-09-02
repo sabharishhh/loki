@@ -119,8 +119,8 @@ LokiStatus loki_confirm_action(LokiCore *core, uint64_t action, bool approved);
 /* Phase 4. Returns LOKI_UNSUPPORTED until the undo journal exists. */
 LokiStatus loki_undo_action(LokiCore *core, uint64_t action);
 
-/* Settles a conflict the store refused to guess at. Keeps the claim at `keep`, retires its
-   rivals on the same attribute, and marks the concept confirmed by a person. */
+/* Confirms which side of a conflict is right. Keeps the claim at `keep`, retires its rivals
+   on the same attribute, and marks the concept confirmed by a person. */
 LokiStatus loki_resolve_conflict(LokiCore *core, const char *concept, uint32_t keep);
 
 /* Phase 4. Returns LOKI_UNSUPPORTED until the tool registry exists. */

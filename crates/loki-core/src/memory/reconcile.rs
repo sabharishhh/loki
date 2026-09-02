@@ -122,28 +122,35 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     Promotion::Hold
 }
 
-/// Whether a claim has a believed rival on its own attribute, so rule 4 is unsettled.
+/// Whether a later claim about the same attribute overrides this one (§9.7 rule 4).
 ///
-/// The one predicate deciding whether a claim may reach a prompt while a conflict is open. **Per
-/// claim, not per concept.** Two claims that cannot both be true take each other out of use and
-/// nothing else with them, which is what rule 4's "use neither" actually says.
+/// The one predicate deciding what a conflict costs. Rule 4 is the only path that leaves two
+/// believed claims on one attribute, and this says the newer of them is the one Loki uses.
 ///
-/// Taking the whole concept out instead is how a disagreement about a degree hid a person's name:
-/// the store held a correct, stated, high-confidence name and answered that it did not know it.
+/// **Per claim, not per concept.** Two claims that cannot both be true settle between themselves
+/// and take nothing else with them. Scoping this to the concept is how a disagreement about a
+/// degree hid a person's name: the store held a correct, stated, high-confidence name and answered
+/// that it did not know it.
 ///
-/// Derived from the file rather than from the run that surfaced it, because the conflict outlives
-/// that run and the run that settles it is a different one.
+/// **Shadowed, not retired.** The older claim keeps its window and stays in the file, so §21.2's
+/// "true claims wrongly invalidated" stays at zero and the interface can offer it back. It simply
+/// never reaches a prompt, which is all PrefEval's finding actually requires.
+///
+/// Later means later in the file. Claims are appended, so file order is the order they arrived,
+/// and rule 4 fires precisely when no date can separate them.
 #[must_use]
-pub fn is_contested(concept: &RawConcept, claim: &Claim) -> bool {
+pub fn is_shadowed(concept: &RawConcept, ordinal: u32) -> bool {
+    let Some(claim) = concept.claims().nth(ordinal as usize) else {
+        return false;
+    };
     if !claim.validity.is_believed() || claim.attribute.is_empty() {
         return false;
     }
     concept
         .claims()
-        .filter(|other| other.validity.is_believed())
-        .filter(|other| other.same_attribute_as(claim))
-        .nth(1)
-        .is_some()
+        .skip(ordinal as usize + 1)
+        .filter(|later| later.validity.is_believed())
+        .any(|later| later.same_attribute_as(claim))
 }
 
 /// Whether a concept has stopped mattering and should be archived (§9.10).

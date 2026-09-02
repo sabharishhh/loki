@@ -280,12 +280,23 @@ async fn a_conflict_with_no_clear_winner_is_surfaced_not_guessed() {
         .await;
 
     assert_eq!(report.decisions[0].outcome, Precedence::Surface);
-    assert!(!report.surfaced.is_empty(), "the tie has to reach the user");
+    assert!(
+        !report.surfaced.is_empty(),
+        "the tie is still recorded, because §21.2 scores it"
+    );
+
+    // Under option A the store decides and stays working. Both claims are kept, the later one is
+    // used, and the earlier is shadowed rather than retired.
     let concept = store.concept_at("people/meera.md").await;
     assert_eq!(
         concept.front.status,
-        Status::Draft,
-        "an unresolved conflict must not stay prompt-eligible"
+        Status::Stable,
+        "a disagreement no longer takes the whole entity out of use"
+    );
+    assert_eq!(concept.claims().count(), 2, "nothing is retired on a tie");
+    assert!(
+        concept.claims().all(|c| c.validity.is_believed()),
+        "the older claim keeps its window, so §21.2's wrongly-invalidated count stays at zero"
     );
 }
 
@@ -881,10 +892,10 @@ async fn a_claim_with_no_attribute_never_conflicts() {
     );
 }
 
-/// B-34: rule 4 marks a concept `draft` so neither claim is used. An unrelated stated claim must
-/// not promote it back, or both conflicting claims reach a prompt with nobody having resolved them.
+/// Rule 4 costs exactly the older of the two claims. Not the newer, and not anything else about
+/// the entity, which is what B-34's first fix and B-36 both got wrong in turn.
 #[tokio::test]
-async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
+async fn a_conflict_costs_only_the_claim_it_overrode() {
     let store = Store::new("surface-then-promote", &["episodes/a.md"]).await;
     let extractor = Scripted::new(vec![(
         "episodes/a.md".to_string(),
@@ -942,10 +953,12 @@ async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
         "the unrelated fact stays usable: {texts:?}"
     );
     assert!(
-        !texts
-            .iter()
-            .any(|t| t.contains("Chennai") || t.contains("Bangalore")),
-        "neither side of an open conflict may reach a prompt: {texts:?}"
+        texts.iter().any(|t| t.contains("Bangalore")),
+        "the later statement is used rather than nothing being used: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("Chennai")),
+        "the shadowed claim never reaches a prompt: {texts:?}"
     );
 }
 

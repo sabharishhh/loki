@@ -516,3 +516,46 @@ async fn a_full_store_rebuilds_and_recalls_quickly() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A schema bump has to rebuild, or a store written by the previous version keeps a shape the
+/// current queries do not match. Found while renaming a column inside one version: the index
+/// still claimed to be current and every recall failed on the missing column.
+#[test]
+fn an_index_from_an_older_schema_is_rebuilt_rather_than_queried() {
+    let dir = std::env::temp_dir().join(format!(
+        "loki-index-upgrade-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("index.sqlite");
+
+    // A store as an older version left it: a plausible table, and a stale version number.
+    {
+        let db = rusqlite::Connection::open(&path).expect("open");
+        db.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta(key, value) VALUES ('schema', '1');
+             CREATE TABLE claim (id INTEGER PRIMARY KEY, gone TEXT);
+             CREATE TABLE turn (id INTEGER PRIMARY KEY, gone TEXT);",
+        )
+        .expect("old schema");
+    }
+
+    let index = Index::open(&path).expect("an older index has to open, not fail");
+    assert_eq!(index.claim_count().expect("count"), 0);
+
+    // The current shape is in place, so a real query runs rather than failing on a missing column.
+    let hits = index
+        .recall(&Query::prefetch(
+            "anything",
+            TierScope::normal(Locality::Cloud),
+            jiff::civil::date(2026, 1, 1),
+            5,
+        ))
+        .expect("recall against a rebuilt index");
+    assert!(hits.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -94,11 +94,10 @@ fn contested() -> RawConcept {
     concept
 }
 
-/// B-35, the one §9.8 has promised since v0.8 and nothing implemented. Rule 4 refuses to guess, so
-/// without this the concept stays out of use forever and the user is told about a problem they
-/// have no way to fix.
+/// Rule 4 under option A: the newer statement is used at once, the older hangs off it, and one tap
+/// makes the choice permanent. Nothing blocks while the user has not looked.
 #[tokio::test]
-async fn one_tap_settles_a_conflict_and_puts_the_concept_back_to_work() {
+async fn one_tap_settles_a_conflict_the_store_had_already_decided() {
     let store = Store::new("settle", &[("people/sabharish.md", contested())]).await;
 
     let before = store
@@ -108,14 +107,24 @@ async fn one_tap_settles_a_conflict_and_puts_the_concept_back_to_work() {
         .expect("knowledge")
         .entities
         .remove(0);
-    assert_eq!(before.questions.len(), 1, "{before:?}");
     assert_eq!(
         before.facts.len(),
-        1,
-        "the unrelated fact is still a fact, even while a question is open"
+        2,
+        "one row per property, and a disagreement is not a row of its own: {:?}",
+        before.facts
     );
+    let city = before
+        .facts
+        .iter()
+        .find(|f| f.attribute == "city")
+        .expect("city is decided, not deferred");
+    assert_eq!(
+        city.text, "Sabharish lives in Bangalore",
+        "the later statement is the one in use"
+    );
+    assert_eq!(city.also_said.len(), 1, "the earlier one is offered back");
 
-    let keep = before.questions[0].options[1].ordinal;
+    let keep = city.ordinal;
     store
         .memory
         .settle("people/sabharish.md", keep, today())
@@ -129,8 +138,12 @@ async fn one_tap_settles_a_conflict_and_puts_the_concept_back_to_work() {
         .expect("knowledge")
         .entities
         .remove(0);
-    assert!(after.questions.is_empty(), "{after:?}");
-    assert_eq!(after.facts.len(), 2, "the settled claim joins the facts");
+    assert_eq!(after.facts.len(), 2, "{after:?}");
+    assert!(
+        after.facts.iter().all(|f| f.also_said.is_empty()),
+        "settling closes the loose end: {:?}",
+        after.facts
+    );
     assert!(after.confirmed, "a person picked, so nothing may decay it");
 
     let bangalore = after
@@ -303,14 +316,13 @@ async fn the_wire_shape_the_app_decodes_is_fixed() {
         "\"in_use\"",
         "\"confirmed\"",
         "\"facts\"",
-        "\"questions\"",
         "\"ordinal\"",
         "\"attribute\"",
         "\"text\"",
         "\"since\"",
         "\"was\"",
         "\"from_elsewhere\"",
-        "\"options\"",
+        "\"also_said\"",
     ] {
         assert!(json.contains(field), "{field} missing from {json}");
     }
@@ -355,8 +367,8 @@ async fn a_conflict_about_one_thing_does_not_hide_everything_else() {
     let usable: Vec<&str> = entity.facts.iter().map(|f| f.attribute.as_str()).collect();
     assert_eq!(
         usable,
-        ["education"],
-        "the unrelated fact has to stay usable while the question is open"
+        ["city", "education"],
+        "a disagreement about one property costs nothing anywhere else"
     );
 
     let recalled = store
@@ -368,9 +380,7 @@ async fn a_conflict_about_one_thing_does_not_hide_everything_else() {
         "an open question about the city must not make the degree unreachable: {recalled:?}"
     );
     assert!(
-        !recalled
-            .iter()
-            .any(|r| r.text.contains("Chennai") || r.text.contains("Bangalore")),
-        "neither side of the question may reach a prompt: {recalled:?}"
+        !recalled.iter().any(|r| r.text.contains("Chennai")),
+        "the shadowed claim never reaches a prompt: {recalled:?}"
     );
 }

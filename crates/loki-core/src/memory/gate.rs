@@ -149,13 +149,17 @@ impl Active {
     pub fn visible_claims(&self, scope: TierScope, today: Date) -> impl Iterator<Item = &Claim> {
         self.0
             .claims()
+            .enumerate()
+            // Rule 4, scoped to the two claims it is about: the newer one is used and the older
+            // is shadowed rather than retired. It keeps its window and never reaches a prompt.
+            .filter(|(at, _)| {
+                !super::reconcile::is_shadowed(&self.0, u32::try_from(*at).unwrap_or(u32::MAX))
+            })
+            .map(|(_, claim)| claim)
             .filter(move |c| scope.admits(c.privacy))
             .filter(move |c| scope.admits_origin(c.origin))
             .filter(move |c| c.validity.is_believed())
             .filter(move |c| c.validity.holds_on(today))
-            // Rule 4's "use neither", scoped to the two claims it is about. A conflict over one
-            // attribute must not hide everything else known about the entity.
-            .filter(|c| !super::reconcile::is_contested(&self.0, c))
     }
 }
 

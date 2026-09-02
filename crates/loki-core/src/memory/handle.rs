@@ -215,7 +215,7 @@ impl Memory {
         Ok(knowledge::read(&self.bundle, today).await?)
     }
 
-    /// Settles a conflict the store could not (§9.7 rule 4, §9.8's one tap).
+    /// Confirms which side of a conflict is right (§9.7 rule 4).
     ///
     /// Keeps the claim at `ordinal`, retires every believed rival on the same attribute, and marks
     /// the concept human-verified, which pins it against §9.9's decay and §9.10's archival. That

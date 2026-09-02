@@ -28,8 +28,9 @@ struct TimelineScreen: View {
         return entities.filter { $0.mentions(needle) }
     }
 
-    private var openQuestions: Int {
-        entities.reduce(0) { $0 + $1.questions.count }
+    /// Facts with something else said about them. Worth a look, never a blocker.
+    private var worthChecking: Int {
+        entities.reduce(0) { $0 + $1.facts.filter { !$0.alsoSaid.isEmpty }.count }
     }
 
     var body: some View {
@@ -94,11 +95,12 @@ struct TimelineScreen: View {
     }
 
     private var subtitle: String {
-        if openQuestions == 1 {
-            return "One thing needs you. Every row is a line in a file you can open."
+        if worthChecking == 1 {
+            return "One thing is worth checking. Every row is a line in a file you can open."
         }
-        if openQuestions > 1 {
-            return "\(openQuestions) things need you. Every row is a line in a file you can open."
+        if worthChecking > 1 {
+            return "\(worthChecking) things are worth checking. "
+                + "Every row is a line in a file you can open."
         }
         return "Grouped by what it is about. Every row is a line in a file you can open."
     }
@@ -115,15 +117,6 @@ private struct EntityCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
             heading
-
-            ForEach(entity.questions) { question in
-                QuestionRow(
-                    entity: entity,
-                    question: question,
-                    conversation: conversation,
-                    reload: reload
-                )
-            }
 
             ForEach(entity.facts) { fact in
                 FactRow(entity: entity, fact: fact, conversation: conversation, reload: reload)
@@ -157,7 +150,7 @@ private struct EntityCard: View {
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
                     .foregroundStyle(Theme.State.released.color)
-            } else if !entity.inUse && entity.questions.isEmpty {
+            } else if !entity.inUse {
                 // The consequence, not the state name: what matters is that Loki is holding this
                 // back, not that a field somewhere says `draft`.
                 Text("not in use yet")
@@ -223,6 +216,10 @@ private struct FactRow: View {
 
                 if let was = fact.was {
                     correction(was)
+                }
+
+                if !fact.alsoSaid.isEmpty {
+                    alternatives
                 }
 
                 if hovering && !editing {
@@ -295,6 +292,36 @@ private struct FactRow: View {
         }
     }
 
+    /// What else was said about this property, and the one tap that settles it.
+    ///
+    /// Rule 4 no longer blocks: Loki uses the later statement and keeps this here to be checked.
+    /// An approval queue nobody works through is worse than a decision the user can see and flip.
+    private var alternatives: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text("You also said")
+                .font(Theme.Text.micro)
+                .kerning(Theme.Text.microTracking)
+                .foregroundStyle(Theme.State.holding.color)
+
+            ForEach(fact.alsoSaid) { other in
+                HStack(alignment: .top, spacing: Theme.Space.s) {
+                    Text(other.text)
+                        .font(Theme.Text.body)
+                        .foregroundStyle(Theme.Colors.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: Theme.Space.m)
+                    Quiet("use this instead") {
+                        conversation.settle(path: entity.path, keep: other.ordinal)
+                        reload()
+                    }
+                }
+            }
+        }
+        .padding(Theme.Space.s)
+        .background(Theme.State.holding.tint, in: .rect(cornerRadius: Theme.Radius.control))
+        .padding(.top, Theme.Space.xs)
+    }
+
     private var actions: some View {
         HStack(spacing: Theme.Space.m) {
             Quiet("edit") {
@@ -305,67 +332,14 @@ private struct FactRow: View {
                 conversation.forget(path: entity.path, ordinal: fact.ordinal)
                 reload()
             }
-        }
-        .padding(.top, Theme.Space.xs)
-    }
-}
-
-/// A conflict, rendered as the question it is (§9.7 rule 4, §9.8's one tap).
-///
-/// The store deliberately refuses to guess when two things you said cannot both be true, so it
-/// holds both and asks. Until someone answers, the whole entity stays out of use, which makes this
-/// the one row that has to be actionable rather than informative.
-private struct QuestionRow: View {
-    let entity: KnownEntity
-    let question: OpenQuestion
-    let conversation: Conversation
-    let reload: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            Text("Which is right?")
-                .font(Theme.Text.bodyStrong)
-                .foregroundStyle(Theme.Colors.ink)
-
-            Text("You told me both, and they cannot both be true. I am not using either until you say.")
-                .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.muted)
-                .fixedSize(horizontal: false, vertical: true)
-
-            ForEach(question.options) { option in
-                Button {
-                    conversation.settle(path: entity.path, keep: option.ordinal)
+            if !fact.alsoSaid.isEmpty {
+                Quiet("this one is right") {
+                    conversation.settle(path: entity.path, keep: fact.ordinal)
                     reload()
-                } label: {
-                    HStack(alignment: .top, spacing: Theme.Space.s) {
-                        Text(option.text)
-                            .font(Theme.Text.record)
-                            .foregroundStyle(Theme.Colors.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: Theme.Space.m)
-                        if let since = option.since {
-                            Text(since)
-                                .font(Theme.Text.meta)
-                                .foregroundStyle(Theme.Colors.faint)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(Theme.Space.s)
-                    .background(
-                        Theme.State.needsYou.tint,
-                        in: .rect(cornerRadius: Theme.Radius.control)
-                    )
                 }
-                .buttonStyle(.plain)
-                .help("Keep this one and retire the other")
             }
         }
-        .padding(Theme.Space.m)
-        .background(Theme.Colors.raised, in: .rect(cornerRadius: Theme.Radius.control))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
-                .stroke(Theme.State.needsYou.color.opacity(0.4), lineWidth: 1)
-        )
+        .padding(.top, Theme.Space.xs)
     }
 }
 
@@ -432,14 +406,10 @@ extension KnownEntity {
     /// and a round trip per keystroke would buy nothing at that size.
     func mentions(_ needle: String) -> Bool {
         if name.lowercased().contains(needle) { return true }
-        if facts.contains(where: {
-            $0.text.lowercased().contains(needle) || $0.attribute.contains(needle)
-        }) {
-            return true
-        }
-        return questions.contains { question in
-            question.attribute.contains(needle)
-                || question.options.contains { $0.text.lowercased().contains(needle) }
+        return facts.contains { fact in
+            fact.text.lowercased().contains(needle)
+                || fact.attribute.contains(needle)
+                || fact.alsoSaid.contains { $0.text.lowercased().contains(needle) }
         }
     }
 }

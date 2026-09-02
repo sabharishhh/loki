@@ -47,8 +47,6 @@ pub struct Entity {
     /// Confirmed by a person, so nothing decays it by heuristic (§9.9).
     pub confirmed: bool,
     pub facts: Vec<Fact>,
-    /// Conflicts waiting on the user (§9.7 rule 4). One tap each.
-    pub questions: Vec<Question>,
 }
 
 /// One thing Loki knows, with its own history folded in.
@@ -68,6 +66,20 @@ pub struct Fact {
     /// Surfaced because §17.6 needs connector-written memory listable and removable, and because
     /// a fact Loki read somewhere is a different kind of thing from one you told it.
     pub from_elsewhere: bool,
+    /// Other things said about this property that Loki is not using (§9.7 rule 4).
+    ///
+    /// Shadowed, not retired: kept in the file, never in a prompt, and offered back here. Nothing
+    /// blocks on them, because an approval queue nobody works through is worse than a wrong guess
+    /// the user can see and flip.
+    pub also_said: Vec<Alternative>,
+}
+
+/// Something said about a property that a later statement overrode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Alternative {
+    pub ordinal: u32,
+    pub text: String,
+    pub since: Option<String>,
 }
 
 /// The half of a correction that is no longer true.
@@ -78,24 +90,6 @@ pub struct Correction {
     pub held: String,
     /// `about six weeks`, when Loki went on believing it after it had stopped being true.
     pub wrong_for: Option<String>,
-}
-
-/// Two claims that cannot both be true, and nothing has picked between them (§9.7 rule 4).
-///
-/// Rendered as the question it is rather than as a state. Guessing is how a memory system poisons
-/// itself, so the store holds both and asks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Question {
-    pub attribute: String,
-    pub options: Vec<Answer>,
-}
-
-/// One side of a question, addressed the way [`Fact`] is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Answer {
-    pub ordinal: u32,
-    pub text: String,
-    pub since: Option<String>,
 }
 
 /// Reads the whole store into the shape §17.3 renders.
@@ -152,22 +146,31 @@ fn entity(path: &str, concept: &RawConcept, today: Date) -> Entity {
         .collect();
 
     let mut facts = Vec::new();
-    let mut questions = Vec::new();
 
     for (at, claim) in &believed {
-        // Two believed claims about one attribute is rule 4's surface, and the only path that
-        // leaves both standing. Everything else resolves at write time.
-        let rivals: Vec<&(u32, &Claim)> = believed
-            .iter()
-            .filter(|(_, other)| claim.same_attribute_as(other))
-            .collect();
-        if rivals.len() > 1 {
-            if rivals[0].0 == *at {
-                questions.push(question(&rivals, today));
-            }
+        // A shadowed claim is not a row of its own. It hangs off the one that overrode it, which
+        // is what turns rule 4 from a question into something worth checking.
+        if super::reconcile::is_shadowed(concept, *at) {
             continue;
         }
-        facts.push(fact(*at, claim, &numbered, today));
+        let mut row = fact(*at, claim, &numbered, today);
+        row.also_said = believed
+            .iter()
+            .filter(|(other_at, other)| {
+                *other_at != *at
+                    && other.same_attribute_as(claim)
+                    && super::reconcile::is_shadowed(concept, *other_at)
+            })
+            .map(|(other_at, other)| Alternative {
+                ordinal: *other_at,
+                text: other.text.clone(),
+                since: other
+                    .validity
+                    .valid_from
+                    .map(|from| temporal::since(from, today)),
+            })
+            .collect();
+        facts.push(row);
     }
 
     facts.sort_by(|a, b| a.attribute.cmp(&b.attribute));
@@ -179,7 +182,6 @@ fn entity(path: &str, concept: &RawConcept, today: Date) -> Entity {
         in_use: concept.front.status == Status::Stable && !concept.is_stale_on(today),
         confirmed: concept.front.is_human_verified(),
         facts,
-        questions,
     }
 }
 
@@ -194,6 +196,7 @@ fn fact(ordinal: u32, claim: &Claim, all: &[(u32, &Claim)], today: Date) -> Fact
             .map(|from| temporal::since(from, today)),
         was: superseded_by(claim, all, today),
         from_elsewhere: !claim.origin.durable_eligible(),
+        also_said: Vec::new(),
     }
 }
 
@@ -230,23 +233,6 @@ fn held(claim: &Claim, today: Date) -> String {
         (Some(from), None) => format!("from {}", temporal::day_month(from, today)),
         (None, Some(to)) => format!("until {to}"),
         (None, None) => "before that".to_owned(),
-    }
-}
-
-fn question(rivals: &[&(u32, &Claim)], today: Date) -> Question {
-    Question {
-        attribute: rivals[0].1.attribute.clone(),
-        options: rivals
-            .iter()
-            .map(|(at, claim)| Answer {
-                ordinal: *at,
-                text: claim.text.clone(),
-                since: claim
-                    .validity
-                    .valid_from
-                    .map(|from| temporal::since(from, today)),
-            })
-            .collect(),
     }
 }
 
@@ -310,7 +296,7 @@ mod tests {
             out.facts[0].since, None,
             "the source never dated it, so there is no distance to state"
         );
-        assert!(out.questions.is_empty());
+        assert!(out.facts[0].also_said.is_empty());
     }
 
     /// §17.3: a correction is one row carrying both ranges, never two struck through.
@@ -353,11 +339,11 @@ mod tests {
         );
     }
 
-    /// Rule 4's surface, rendered as the question it is rather than as a state name.
+    /// Rule 4 under option A: the later statement is used, and the earlier hangs off it as
+    /// something worth checking. Nothing blocks, and nothing is retired.
     #[test]
-    fn a_conflict_becomes_a_question_with_two_answers() {
+    fn a_conflict_leaves_one_fact_and_an_alternative() {
         let mut concept = stable("Sabharish");
-        concept.front.status = Status::Draft;
         concept.add(
             "city",
             Claim::stated("Sabharish lives in Chennai", date(2026, 1, 1)).about("city"),
@@ -368,13 +354,12 @@ mod tests {
         );
 
         let out = entity("people/sabharish.md", &concept, today());
-        assert!(out.facts.is_empty(), "neither is in use: {:?}", out.facts);
-        assert_eq!(out.questions.len(), 1);
-        assert_eq!(out.questions[0].attribute, "city");
-        assert_eq!(out.questions[0].options.len(), 2);
-        assert_eq!(out.questions[0].options[0].ordinal, 0);
-        assert_eq!(out.questions[0].options[1].ordinal, 1);
-        assert!(!out.in_use, "a concept with an open question is not in use");
+        assert_eq!(out.facts.len(), 1, "{:?}", out.facts);
+        assert_eq!(out.facts[0].text, "Sabharish lives in Bangalore");
+        assert_eq!(out.facts[0].also_said.len(), 1);
+        assert_eq!(out.facts[0].also_said[0].text, "Sabharish lives in Chennai");
+        assert_eq!(out.facts[0].also_said[0].ordinal, 0);
+        assert!(out.in_use, "a disagreement no longer stops Loki working");
     }
 
     /// Unrelated facts are not rivals, however many there are.
@@ -392,7 +377,7 @@ mod tests {
 
         let out = entity("people/sabharish.md", &concept, today());
         assert_eq!(out.facts.len(), 2);
-        assert!(out.questions.is_empty());
+        assert!(out.facts.iter().all(|f| f.also_said.is_empty()));
     }
 
     #[test]
@@ -417,6 +402,6 @@ mod tests {
 
         let out = entity("people/sabharish.md", &concept, today());
         assert_eq!(out.facts.len(), 2);
-        assert!(out.questions.is_empty());
+        assert!(out.facts.iter().all(|f| f.also_said.is_empty()));
     }
 }

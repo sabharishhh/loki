@@ -379,8 +379,8 @@ fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
 /// No conflict check here, on purpose. B-34 was fixed at this seam first, by refusing to promote
 /// while a conflict stood, and that was the wrong place: status is per concept, so it took the
 /// whole entity out of use over one argument. The rule belongs at the gate, per claim, where
-/// `reconcile::is_contested` keeps both sides of a conflict out of a prompt whatever the concept's
-/// status is.
+/// `reconcile::is_shadowed` keeps the older side of a conflict out of a prompt whatever the
+/// concept's status is.
 fn promote(
     concept: &mut RawConcept,
     path: &str,
@@ -507,13 +507,13 @@ fn fold_restatements(concept: &mut RawConcept) -> usize {
 
 /// Whether anything in a concept has already earned `stable` under §9.8's rules.
 ///
-/// The promotion rule applied to what is on disk rather than to an arriving claim. A contested
-/// claim does not count: it is out of use until a person settles it, and it cannot be the reason
-/// the concept is in use.
+/// The promotion rule applied to what is on disk rather than to an arriving claim. A shadowed
+/// claim does not count: it never reaches a prompt, so it cannot be the reason the concept is in
+/// use.
 fn earned_stable(concept: &RawConcept) -> bool {
-    concept.claims().any(|claim| {
+    concept.claims().enumerate().any(|(at, claim)| {
         claim.validity.is_believed()
-            && !reconcile::is_contested(concept, claim)
+            && !reconcile::is_shadowed(concept, u32::try_from(at).unwrap_or(u32::MAX))
             && reconcile::promotion(claim, 1, false) == Promotion::Auto
     })
 }

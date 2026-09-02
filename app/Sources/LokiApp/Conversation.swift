@@ -148,10 +148,10 @@ final class Conversation {
         core?.knowledge().entities ?? []
     }
 
-    /// Settles a conflict the store refused to guess at (§9.7 rule 4).
+    /// Confirms which side of a conflict is right (§9.7 rule 4).
     ///
-    /// The only thing in the system that resolves one: rule 4 deliberately does not pick a side,
-    /// so without a person answering, the concept stays out of use forever.
+    /// The store already decided, using the later statement, and kept the other to be checked.
+    /// This makes the choice permanent and pins the concept against decay.
     func settle(path: String, keep: UInt32) {
         try? core?.settle(path: path, keep: keep)
     }
