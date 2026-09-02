@@ -783,6 +783,7 @@ dependencies = [
 name = "loki-ffi"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "loki-core",
  "serde_json",
  "tokio",

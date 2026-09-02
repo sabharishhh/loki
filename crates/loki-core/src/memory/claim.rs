@@ -168,6 +168,33 @@ impl Claim {
         !self.attribute.is_empty() && self.attribute == other.attribute
     }
 
+    /// Whether two claims assert the same thing in different words.
+    ///
+    /// Same property, same value, different phrasing. The extractor is a model and does not word a
+    /// fact identically twice, so comparing text exactly made every re-run a fresh claim that then
+    /// read as a correction of the last one. Nothing had changed, so nothing should be recorded.
+    ///
+    /// Conservative on purpose. Two wordings that do not reduce to the same words stay separate
+    /// claims, because merging a real change into an old one loses it silently.
+    #[must_use]
+    pub fn restates(&self, other: &Self) -> bool {
+        self.attribute == other.attribute
+            && asserted_words(&self.text, &self.attribute)
+                == asserted_words(&other.text, &other.attribute)
+    }
+
+    /// Folds in a restatement of this claim: the same fact, said again.
+    ///
+    /// The stored wording is kept, so a re-run does not churn the file or the git history. What
+    /// can change is standing: a guess the user has since stated outright is no longer a guess
+    /// (§9.7 rule 3). Not a use, so `usage_count` is untouched; that meter counts recall.
+    pub fn reinforced_by(&mut self, other: &Self) {
+        if self.source == Source::Inferred && other.source == Source::Stated {
+            self.source = Source::Stated;
+            self.confidence = Confidence::High;
+        }
+    }
+
     /// Whether this claim may be pre-fetched or put in the working set.
     #[must_use]
     pub fn is_eligible_for_prefetch(&self) -> bool {
@@ -199,6 +226,38 @@ impl Claim {
         self.usage_count = 0;
         self.confidence = Confidence::Low;
     }
+}
+
+/// Words that assert nothing on their own, so swapping them does not change what a claim says.
+///
+/// `user` is in here because in a personal store the user is the one subject everything orbits:
+/// "the user's name" and "Sabharish's name" are the same phrase with the same referent.
+const FILLER: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "for", "from", "had", "has",
+    "have", "he", "her", "hers", "him", "his", "i", "in", "into", "is", "it", "its", "me", "mine",
+    "my", "of", "on", "or", "our", "ours", "s", "she", "that", "the", "their", "theirs", "them",
+    "they", "this", "to", "us", "user", "users", "was", "were", "we", "with", "you", "your",
+    "yours",
+];
+
+/// The words a claim actually asserts: lower-cased, sorted, deduplicated, with filler and the
+/// attribute's own words removed.
+///
+/// Two claims about the same property of the same entity can only differ in the value they set,
+/// so once the connective words are gone what is left is that value. Sorted and deduplicated
+/// because "Sabharish's name is Sabharish" and "Name is Sabharish" carry the same word twice in
+/// one and once in the other.
+fn asserted_words(text: &str, attribute: &str) -> Vec<String> {
+    let mut words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .filter(|word| !FILLER.contains(&word.as_str()))
+        .filter(|word| !attribute.split('_').any(|part| part == word))
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    words
 }
 
 /// Lowercases and trims an attribute key, so casing and spacing do not split one attribute in two.
@@ -315,6 +374,69 @@ mod tests {
         claim.contradicted();
         assert_eq!(claim.confidence, Confidence::Low);
         assert_eq!(claim.usage_count, 0);
+    }
+
+    /// B-27: the extractor worded one fact three ways across three runs.
+    #[test]
+    fn one_fact_worded_three_ways_is_one_fact() {
+        let phrasings = [
+            "Name is Sabharish",
+            "Sabharish's name is Sabharish",
+            "The user's name is Sabharish",
+        ];
+        let claims: Vec<Claim> = phrasings
+            .iter()
+            .map(|text| Claim::stated(*text, date(2026, 1, 1)).about("name"))
+            .collect();
+        for other in &claims[1..] {
+            assert!(
+                claims[0].restates(other),
+                "{} vs {}",
+                claims[0].text,
+                other.text
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_value_is_not_a_restatement() {
+        let chennai = Claim::stated("Sabharish lives in Chennai", date(2026, 1, 1)).about("city");
+        let bangalore =
+            Claim::stated("Sabharish lives in Bangalore", date(2026, 1, 1)).about("city");
+        assert!(!chennai.restates(&bangalore));
+    }
+
+    /// Two properties can be worded alike without being the same fact.
+    #[test]
+    fn a_different_attribute_is_never_a_restatement() {
+        let name = Claim::stated("Sabharish", date(2026, 1, 1)).about("name");
+        let nickname = Claim::stated("Sabharish", date(2026, 1, 1)).about("nickname");
+        assert!(!name.restates(&nickname));
+    }
+
+    /// Merging two wordings that share no vocabulary would lose a real change, so it is refused.
+    #[test]
+    fn unrelated_wordings_of_one_property_stay_separate() {
+        let graduate = Claim::stated("Sabharish is a computer science graduate", date(2026, 1, 1))
+            .about("education");
+        let school = Claim::stated("Sabharish went to Chennai Public School", date(2026, 1, 1))
+            .about("education");
+        assert!(!graduate.restates(&school));
+    }
+
+    #[test]
+    fn a_guess_the_user_states_outright_stops_being_a_guess() {
+        let mut held = Claim::inferred(
+            "Sabharish lives in Chennai",
+            date(2026, 1, 1),
+            date(2026, 1, 1),
+        )
+        .about("city");
+        let said = Claim::stated("Sabharish lives in Chennai", date(2026, 6, 1)).about("city");
+        held.reinforced_by(&said);
+        assert_eq!(held.source, Source::Stated);
+        assert_eq!(held.confidence, Confidence::High);
+        assert_eq!(held.usage_count, 0, "a restatement is not a use");
     }
 
     #[test]

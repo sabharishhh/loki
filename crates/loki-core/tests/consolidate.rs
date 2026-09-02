@@ -564,6 +564,167 @@ async fn re_consolidating_an_episode_does_not_duplicate_its_claims() {
     );
 }
 
+/// B-27, seen in the live store: `log.md` held "Name is Sabharish" and "Sabharish's name is
+/// Sabharish" as two claims, and each run retired the last wording as if the name had changed.
+///
+/// The extractor is a model, so it never words a fact the same way twice. Three sessions, three
+/// wordings, one fact, and nothing to correct.
+#[tokio::test]
+async fn one_fact_worded_differently_each_run_stays_one_claim() {
+    let store = Store::new(
+        "rephrased",
+        &["episodes/a.md", "episodes/b.md", "episodes/c.md"],
+    )
+    .await;
+    let wordings = [
+        ("episodes/a.md", "Name is Sabharish"),
+        ("episodes/b.md", "Sabharish's name is Sabharish"),
+        ("episodes/c.md", "The user's name is Sabharish"),
+    ];
+    let extractor = Scripted::new(
+        wordings
+            .iter()
+            .map(|(path, text)| {
+                (
+                    (*path).to_string(),
+                    vec![about(
+                        "name",
+                        "Sabharish",
+                        text,
+                        date(2026, 1, 1),
+                        Source::Stated,
+                    )],
+                )
+            })
+            .collect(),
+    );
+
+    let mut reports = Vec::new();
+    for (path, _) in wordings {
+        reports.push(
+            store
+                .go(&[episode(path, date(2026, 1, 1))], &extractor, &Unbounded)
+                .await,
+        );
+    }
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        concept.claims().count(),
+        1,
+        "one fact, three wordings: {:?}",
+        concept.claims().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        concept.claims().next().expect("a claim").text,
+        "Name is Sabharish",
+        "the stored wording is kept, so re-running does not churn the file"
+    );
+    assert!(
+        reports.iter().all(|r| r.decisions.is_empty()),
+        "nothing changed, so nothing was superseded: {:?}",
+        reports
+            .iter()
+            .flat_map(|r| &r.decisions)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A rewording must not swallow a real change: the value differs, so this is a correction.
+#[tokio::test]
+async fn a_reworded_claim_with_a_new_value_still_supersedes() {
+    let store = Store::new("reworded-change", &["episodes/a.md", "episodes/b.md"]).await;
+    let extractor = Scripted::new(vec![
+        (
+            "episodes/a.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "Sabharish lives in Chennai",
+                date(2026, 1, 1),
+                Source::Stated,
+            )],
+        ),
+        (
+            "episodes/b.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "Sabharish has moved to Bangalore",
+                date(2026, 7, 1),
+                Source::Stated,
+            )],
+        ),
+    ]);
+
+    store
+        .go(
+            &[
+                episode("episodes/a.md", date(2026, 1, 1)),
+                episode("episodes/b.md", date(2026, 7, 1)),
+            ],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    let old = concept
+        .claims()
+        .find(|c| c.text.contains("Chennai"))
+        .expect("the old claim is kept");
+    assert!(!old.validity.is_believed(), "the move should be recorded");
+}
+
+/// An inferred claim the user later states outright gains standing without gaining a second claim.
+#[tokio::test]
+async fn a_restatement_upgrades_a_guess_rather_than_adding_to_it() {
+    let store = Store::new("upgrade", &["episodes/a.md", "episodes/b.md"]).await;
+    let extractor = Scripted::new(vec![
+        (
+            "episodes/a.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "Sabharish's city is Chennai",
+                date(2026, 1, 1),
+                Source::Inferred,
+            )],
+        ),
+        (
+            "episodes/b.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "Sabharish is in Chennai",
+                date(2026, 2, 1),
+                Source::Stated,
+            )],
+        ),
+    ]);
+
+    store
+        .go(
+            &[
+                episode("episodes/a.md", date(2026, 1, 1)),
+                episode("episodes/b.md", date(2026, 2, 1)),
+            ],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(concept.claims().count(), 1);
+    let claim = concept.claims().next().expect("a claim");
+    assert_eq!(claim.source, Source::Stated);
+    assert_eq!(
+        concept.front.status,
+        Status::Stable,
+        "a guess said out loud is usable"
+    );
+}
+
 /// B-25, the reported failure: a name and a degree are not a contradiction.
 ///
 /// Comparing text called every second fact about a person a conflict, rule 4 then took the whole

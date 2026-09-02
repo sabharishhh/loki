@@ -306,25 +306,31 @@ fn merge(
     report: &mut Report,
     today: Date,
 ) {
+    // Saying the same thing again is a second occurrence, not a second claim and not a correction.
+    // Exact repeats come from a session closing twice or §11.5 resuming a paused import; reworded
+    // repeats come from the extractor being a model, which never phrases a fact the same way
+    // twice. Both used to land as new claims, and the reworded ones then read as corrections to
+    // something that had not changed.
+    let repeats = held_restatements(concept, &claim);
+    if repeats > 0 {
+        if let Some(held) = concept
+            .claims_mut()
+            .find(|held| held.validity.is_believed() && held.restates(&claim))
+        {
+            held.reinforced_by(&claim);
+        }
+        promote(concept, path, &claim, repeats.saturating_add(1), report);
+        return;
+    }
+
     let conflict = concept
         .claims()
         .find(|held| conflicts(held, &claim))
         .map(|held| (held.text.clone(), held.clone()));
 
     let Some((held_text, held)) = conflict else {
-        let seen = u32::try_from(concept.claims().filter(|c| c.text == claim.text).count())
-            .unwrap_or(u32::MAX);
-        let decision = reconcile::promotion(&claim, seen.saturating_add(1), false);
-        // Saying the same thing twice is a second occurrence, not a second claim. Without this a
-        // re-consolidated episode duplicates every fact in it, which happens whenever a session
-        // closes twice or §11.5 resumes a paused import.
-        if seen == 0 {
-            concept.add(&candidate.heading, claim);
-        }
-        if decision == Promotion::Auto && concept.front.status == Status::Draft {
-            concept.front.status = Status::Stable;
-            report.promoted.push(path.to_owned());
-        }
+        promote(concept, path, &claim, 1, report);
+        concept.add(&candidate.heading, claim);
         return;
     };
 
@@ -350,6 +356,34 @@ fn merge(
     );
 }
 
+/// How many believed claims already say what this one says.
+///
+/// Only believed ones count: a claim that was retired and is now stated again is a reversion, and
+/// has to come back rather than be swallowed as a repeat of itself.
+fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
+    let count = concept
+        .claims()
+        .filter(|held| held.validity.is_believed() && held.restates(claim))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Lifts a draft concept to stable once a claim has earned it (§9.8).
+fn promote(
+    concept: &mut RawConcept,
+    path: &str,
+    claim: &Claim,
+    occurrences: u32,
+    report: &mut Report,
+) {
+    if reconcile::promotion(claim, occurrences, false) == Promotion::Auto
+        && concept.front.status == Status::Draft
+    {
+        concept.front.status = Status::Stable;
+        report.promoted.push(path.to_owned());
+    }
+}
+
 /// Whether two claims describe the same thing, so only one of them can be true (§9.7).
 ///
 /// Keyed on the attribute, never on the text. Comparing text calls every second fact about a
@@ -360,7 +394,7 @@ fn merge(
 /// A claim with no attribute never conflicts: it cannot say what it is about, so it has no
 /// standing to displace one that can.
 fn conflicts(held: &Claim, incoming: &Claim) -> bool {
-    held.validity.is_believed() && held.text != incoming.text && held.same_attribute_as(incoming)
+    held.validity.is_believed() && !held.restates(incoming) && held.same_attribute_as(incoming)
 }
 
 /// Archives stable concepts that have aged out without being used (§9.10).
