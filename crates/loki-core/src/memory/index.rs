@@ -144,10 +144,17 @@ impl<'a> Query<'a> {
 ///
 /// Absolute rather than normalised across the result set, so a caller can ask whether the best
 /// hit is good enough at all. Phase 5 turns on that distinction.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
 pub struct Score(f32);
 
 impl Score {
+    /// Clamped to 0 to 1, because the whole point is that a caller can read it against a
+    /// threshold. A score outside the range would make every threshold meaningless.
+    #[must_use]
+    pub fn new(raw: f32) -> Self {
+        Self(raw.clamp(0.0, 1.0))
+    }
+
     #[must_use]
     pub const fn value(self) -> f32 {
         self.0
@@ -184,6 +191,8 @@ pub struct Recalled {
     pub privacy: Privacy,
     /// Where the claim came from (§9.12). A live turn is always `stated`: the user typed it.
     pub origin: Origin,
+    /// World time, when the source gave one. What §10.9's rendered distance is measured from.
+    pub valid_from: Option<Date>,
     pub score: Score,
 }
 
@@ -281,6 +290,9 @@ fn recall_turns(
         out.push(Recalled {
             layer: Layer::Live,
             origin: Origin::Stated,
+            // A turn from this session is something said just now. A distance on it would read as
+            // noise against a frame that already says what "now" is.
+            valid_from: None,
             path: format!("{id}#{ordinal}"),
             name: speaker,
             heading: String::new(),
@@ -689,6 +701,7 @@ impl Index {
                 status,
                 privacy,
                 origin,
+                valid_from: row.valid_from.map(from_days),
                 score,
             });
             if out.len() == query.limit {
@@ -1314,6 +1327,14 @@ fn file_stamp(root: &Path, path: &str) -> i64 {
 
 fn to_days(day: Date) -> i64 {
     day.duration_since(EPOCH).as_secs() / 86_400
+}
+
+/// The inverse of [`to_days`]. Out-of-range days fall back to the epoch rather than failing a
+/// recall: a wrong distance on one line costs less than losing the line.
+fn from_days(days: i64) -> Date {
+    EPOCH
+        .checked_add(jiff::Span::new().days(days))
+        .unwrap_or(EPOCH)
 }
 
 const fn status_str(status: Status) -> &'static str {

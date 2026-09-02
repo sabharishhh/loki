@@ -33,4 +33,5 @@ pub mod payload;
 pub mod prompt;
 pub mod render;
 pub mod sink;
+pub mod temporal;
 pub mod vocab;

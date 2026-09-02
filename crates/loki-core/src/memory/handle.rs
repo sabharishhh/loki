@@ -16,6 +16,7 @@ use super::reconcile::Reference;
 use super::resolve::Matcher;
 use super::timeline;
 use super::working_set::{self, WorkingSetError};
+use crate::core::temporal;
 
 /// Claims a single turn may carry. Precision over recall (§10.1): a wrong memory costs more than
 /// a missing one, because a missing memory reads as forgetfulness and a wrong one as not knowing
@@ -208,6 +209,24 @@ impl Memory {
         Ok(rows)
     }
 
+    /// The last local day the user said anything, or `None` on a first run.
+    ///
+    /// Read at session start, before this session records anything, or today's own episode would
+    /// answer the question. Episodes are dated files, so the newest one is where the user last
+    /// spoke and no second record has to be kept in step.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read.
+    pub async fn last_spoke_on(&self) -> Result<Option<Date>, MemoryError> {
+        let reader = self.bundle.reader().await;
+        Ok(reader
+            .ls("episodes")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| name.strip_suffix(".md")?.parse::<Date>().ok())
+            .max())
+    }
+
     /// Past sessions, newest first, for the sidebar.
     ///
     /// Read off `episodes/`, because that is where a session actually is. A separate list would be
@@ -329,15 +348,23 @@ impl Memory {
 
 /// Renders recalled lines for the turn zone.
 ///
-/// Plain text rather than a structure, because it is going into a prompt. The origin is not shown:
+/// Plain text rather than a structure, because it is going into a prompt. The layer is not shown:
 /// the model has no use for whether a fact came from a claim or from earlier in this conversation,
 /// and neither does the user.
+///
+/// A claim with a world time carries both the instant and the distance (§10.9). The instant is
+/// what makes it checkable against the file; the distance is what the model would otherwise
+/// compute, and §9.14 is the evidence that it computes it wrong.
 #[must_use]
-pub fn render(recalled: &[Recalled]) -> String {
+pub fn render(recalled: &[Recalled], today: Date) -> String {
     let mut out = String::new();
     for line in recalled {
         out.push_str("- ");
         out.push_str(&line.text);
+        if let Some(from) = line.valid_from {
+            out.push_str("  ");
+            out.push_str(&temporal::since(from, today));
+        }
         out.push('\n');
     }
     out

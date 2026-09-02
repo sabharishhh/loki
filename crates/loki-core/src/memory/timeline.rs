@@ -14,6 +14,7 @@ use super::bundle::{Bundle, BundleError, LOG};
 use super::concept::RawConcept;
 use super::consolidate::Report;
 use super::reconcile::Precedence;
+use crate::core::temporal;
 
 /// What happened to a claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -210,17 +211,24 @@ pub fn render(entry: &Entry) -> String {
         ),
         Kind::Corrected => {
             let mut line = format!("corrected, {}: \"{}\"", entry.concept, entry.text);
+            // Dates and distances both go through `temporal`, so §17.3's sentence and the
+            // distances the model reads cannot disagree about how long ago something was. The
+            // reference is the entry's own day: `log.md` is append-only, so the line is a record
+            // of what was true when it was written.
             if let Some(from) = entry.from {
-                line.push_str(&format!(" from {from}"));
+                line.push_str(&format!(" from {}", temporal::day_month(from, entry.day)));
             }
             if let Some(replaced) = &entry.replaced {
                 line.push_str(&format!(", replacing \"{replaced}\""));
                 if let Some(since) = entry.replaced_from {
-                    line.push_str(&format!(" held since {since}"));
+                    line.push_str(&format!(
+                        " held since {}",
+                        temporal::day_month(since, entry.day)
+                    ));
                 }
             }
             if let Some(days) = entry.wrong_for_days.filter(|d| *d > 0) {
-                line.push_str(&format!(", wrong for {days} days"));
+                line.push_str(&format!(", wrong for {}", temporal::span(days)));
             }
             line
         }
@@ -268,10 +276,16 @@ mod tests {
     fn a_correction_says_what_it_replaced_and_for_how_long_it_was_wrong() {
         let line = render(&corrected());
         assert!(line.contains("on the infra team"), "{line}");
-        assert!(line.contains("from 2026-07-15"), "{line}");
         assert!(line.contains("replacing \"on the design team\""), "{line}");
-        assert!(line.contains("held since 2026-03-01"), "{line}");
-        assert!(line.contains("wrong for 45 days"), "{line}");
+        // Dates and distances as a person says them, from the one renderer the prompt also uses.
+        // "45 days" is what a database means; "about six weeks" is what §17.3's sentence reads as.
+        assert!(line.contains("from 15 July"), "{line}");
+        assert!(line.contains("held since 1 March"), "{line}");
+        assert!(line.contains("wrong for about six weeks"), "{line}");
+        assert!(
+            !line.contains("2026-07-15"),
+            "a raw instant reached the timeline: {line}"
+        );
     }
 
     #[test]

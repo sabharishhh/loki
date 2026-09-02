@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+use jiff::Timestamp;
+use jiff::civil::Date;
+
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +18,7 @@ use super::event::Event;
 use super::ids::{IdGen, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
+use super::temporal;
 use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory};
 use crate::ports::clock::Clock;
@@ -75,6 +79,10 @@ pub struct Loop {
     /// Read once per turn, never per use (§8.3). Two reads inside one turn is how the three lines
     /// of the temporal frame end up disagreeing with each other.
     clock: Arc<dyn Clock>,
+    /// When this session began. One of §8.3's three lines is measured from it.
+    session_started: Timestamp,
+    /// The last day the user said anything before this session, for the third line.
+    last_spoke: Option<Date>,
 }
 
 impl Loop {
@@ -84,9 +92,13 @@ impl Loop {
         events: Arc<dyn EventSink>,
         tokens: Arc<dyn TokenSink>,
         clock: Arc<dyn Clock>,
-        prefix: Prefix,
+        mut prefix: Prefix,
         budget: Budget,
     ) -> Self {
+        // The session anchor belongs to the session, not to memory, so it is set here rather than
+        // in `attach_memory`: a loop with no store still knows when it started.
+        let session_started = clock.now();
+        prefix.set_session_start(&session_started.to_zoned(clock.zone()));
         Self {
             provider,
             events,
@@ -99,7 +111,9 @@ impl Loop {
             max_tokens: 64_000,
             memory: None,
             window_keeps: DEFAULT_WINDOW_KEEPS,
+            session_started,
             clock,
+            last_spoke: None,
         }
     }
 
@@ -122,6 +136,8 @@ impl Loop {
         if !working_set.is_empty() {
             self.prefix.set_working_set(working_set);
         }
+        // Read before this session records anything, or today's own episode answers the question.
+        self.last_spoke = memory.last_spoke_on().await.unwrap_or(None);
         self.memory = Some(memory);
         Ok(())
     }
@@ -227,14 +243,21 @@ impl Loop {
         // Pre-fetch runs on the user's message, before the model call, not as a tool call after
         // it (§10.1). A round trip on every turn where memory matters is most of where the sense
         // of already knowing you goes.
+        // One clock read for the whole turn (§8.3). Two would let the frame and the distances on
+        // the recalled claims disagree about what "now" is.
+        let now = self.clock.zoned();
+        let today = now.date();
+        self.turn
+            .set_frame(temporal::Frame::new(now, self.session_started, self.last_spoke).render());
+
         if let Some(memory) = self.memory.clone() {
             memory.record("user", &message).await?;
-            let recalled = memory.recall(&message, self.window_keeps, self.clock.today())?;
+            let recalled = memory.recall(&message, self.window_keeps, today)?;
             if recalled.is_empty() {
                 self.turn.set_recall("");
             } else {
                 memory.mark_used(&recalled)?;
-                self.turn.set_recall(handle::render(&recalled));
+                self.turn.set_recall(handle::render(&recalled, today));
             }
         }
 
@@ -624,10 +647,52 @@ mod tests {
             .unwrap();
 
         let messages = provider.last_request().messages;
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].content, "first");
-        assert_eq!(messages[1].content, "ok");
-        assert_eq!(messages[2].content, "second");
+        // The frame leads every request (§8.3) and is not history, so the conversation starts
+        // after it. Asserting on the content rather than the count keeps this test about the
+        // history and not about how many things precede it.
+        let history: Vec<&str> = messages
+            .iter()
+            .skip_while(|m| m.content.starts_with("Now: "))
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(history, ["first", "ok", "second"]);
+    }
+
+    /// The frame is rebuilt each turn and never accumulates. One per request, always.
+    #[tokio::test]
+    async fn the_frame_leads_the_request_and_appears_once() {
+        let provider = Arc::new(Fake::replying("ok"));
+        let (mut core, _, _) = harness(Arc::clone(&provider) as Arc<dyn ModelProvider>);
+
+        for message in ["first", "second", "third"] {
+            core.turn_with(message, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+
+        let messages = provider.last_request().messages;
+        let frames = messages
+            .iter()
+            .filter(|m| m.content.starts_with("Now: "))
+            .count();
+        assert_eq!(frames, 1, "{messages:?}");
+        assert!(messages[0].content.starts_with("Now: "));
+        assert_eq!(
+            messages[0].content.trim().lines().count(),
+            3,
+            "capped and stable in shape"
+        );
+
+        let prefix: String = provider
+            .last_request()
+            .system
+            .iter()
+            .map(|b| b.text.clone())
+            .collect();
+        assert!(
+            !prefix.contains("Now: "),
+            "the frame is turn content: in the prefix it would break the cache every turn"
+        );
     }
 
     #[tokio::test]
@@ -653,7 +718,8 @@ mod tests {
         let request = provider.last_request();
         let prefix: String = request.system.iter().map(|b| b.text.clone()).collect();
         assert!(prefix.contains("Do nothing until told."));
-        assert!(request.messages.len() <= 6);
+        // Four kept turns plus the leading frame.
+        assert!(request.messages.len() <= 7, "{}", request.messages.len());
     }
 
     #[tokio::test]

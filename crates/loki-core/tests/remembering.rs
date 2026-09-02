@@ -277,9 +277,10 @@ async fn recall_lands_in_the_turn_and_never_in_the_prefix() {
         "recall reached the frozen prefix, which misses the cache every turn: {prefix}"
     );
 
+    // The frame leads, recall follows it, and the conversation follows that (§8.3, §10.9).
     let recalled = request
         .messages
-        .first()
+        .get(1)
         .map(|m| m.content.clone())
         .unwrap_or_default();
     assert!(
@@ -301,10 +302,15 @@ async fn a_loop_without_memory_still_runs() {
         .expect("turn");
 
     assert_eq!(out.text, "Hello.");
-    assert_eq!(
-        provider.last().messages.len(),
-        1,
-        "no recall block belongs here"
+    // The frame and the message. No recall block, because there is no memory to recall from.
+    let messages = provider.last().messages;
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].content.starts_with("Now: "));
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.starts_with("What you already know")),
+        "no recall block belongs here: {messages:?}"
     );
     assert!(
         session
@@ -337,7 +343,16 @@ async fn nothing_recalled_means_no_recall_block() {
         .expect("turn");
 
     let request = provider.last();
-    assert_eq!(request.messages.len(), 1, "{:?}", request.messages);
+    // The frame and the message, and nothing between them.
+    assert_eq!(request.messages.len(), 2, "{:?}", request.messages);
+    assert!(
+        !request
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("What you already know")),
+        "an empty recall must send no block at all: {:?}",
+        request.messages
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

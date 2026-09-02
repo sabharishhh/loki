@@ -3,6 +3,8 @@
 //! Provider caches key on an exact prefix, so anything that changes per turn must sit after
 //! everything that does not. Retrieval lands in turn content, never in the prefix.
 
+use jiff::Zoned;
+
 use super::ids::ConceptId;
 use crate::core::vocab::ModelRole;
 use crate::ports::model::{Message, Request, SystemBlock};
@@ -49,6 +51,12 @@ pub struct Prefix {
     system: String,
     standing: Vec<Standing>,
     working_set: Option<String>,
+    /// When this session began, stated once (§8.3).
+    ///
+    /// The only temporal value the prefix may carry, because it is the only one that does not
+    /// change during a session. Everything that moves is in the frame, in turn content, since a
+    /// value that changes per turn misses the provider cache on every turn.
+    session_start: Option<String>,
 }
 
 impl Prefix {
@@ -58,7 +66,17 @@ impl Prefix {
             system: system.into(),
             standing: Vec::new(),
             working_set: None,
+            session_start: None,
         }
+    }
+
+    /// Anchors the session in the prefix. Once per session, so it costs no cache hit.
+    pub fn set_session_start(&mut self, when: &Zoned) {
+        self.session_start = Some(format!(
+            "This session began {} ({}).",
+            when.strftime("%A %-d %B %Y, %H:%M"),
+            when.time_zone().iana_name().unwrap_or("local")
+        ));
     }
 
     /// Adds a standing instruction. Costs one cache miss and buys permanence.
@@ -78,12 +96,17 @@ impl Prefix {
     /// Drops session-scoped instructions. Called when a session ends, never by compaction.
     pub fn end_session(&mut self) {
         self.standing.retain(|s| s.scope == Scope::Persistent);
+        self.session_start = None;
     }
 
     /// The prefix as provider blocks, with the cache breakpoint on the last one.
     #[must_use]
     pub fn blocks(&self) -> Vec<SystemBlock> {
         let mut blocks = vec![SystemBlock::new(&self.system)];
+
+        if let Some(start) = &self.session_start {
+            blocks.push(SystemBlock::new(start));
+        }
 
         if !self.standing.is_empty() {
             let joined = self
@@ -111,6 +134,9 @@ impl Prefix {
 pub struct Turn {
     recalled: Vec<ConceptId>,
     recall: String,
+    /// §8.3's three lines, host-computed. Turn content, never the prefix: putting the current time
+    /// in the system prompt is the obvious placement and it breaks the cache on every single turn.
+    frame: String,
     history: Vec<Message>,
 }
 
@@ -120,6 +146,7 @@ impl Turn {
         Self {
             recalled: Vec::new(),
             recall: String::new(),
+            frame: String::new(),
             history: Vec::new(),
         }
     }
@@ -142,6 +169,16 @@ impl Turn {
     ///
     /// Replaced every turn and never appended to history, because it is derived: letting it
     /// accumulate would grow the turn zone without bound and re-send stale recall for ever.
+    /// Sets the temporal frame for this turn. Rendered once per turn from one clock read.
+    pub fn set_frame(&mut self, text: impl Into<String>) {
+        self.frame = text.into();
+    }
+
+    #[must_use]
+    pub fn frame(&self) -> &str {
+        &self.frame
+    }
+
     pub fn set_recall(&mut self, text: impl Into<String>) {
         self.recall = text.into();
     }
@@ -184,7 +221,11 @@ impl Turn {
 /// Assembles a request from the two zones.
 #[must_use]
 pub fn build(prefix: &Prefix, turn: &Turn, role: ModelRole, max_tokens: u32) -> Request {
-    let mut messages = Vec::with_capacity(turn.history().len() + 1);
+    let mut messages = Vec::with_capacity(turn.history().len() + 2);
+    // The frame first, so every distance in the recall below is read against a stated now.
+    if !turn.frame().is_empty() {
+        messages.push(Message::user(turn.frame().to_owned()));
+    }
     // Retrieval lands in the turn, never in the prefix. §8.1: the two are compatible only because
     // of that, and putting it in the prefix would miss the provider cache on every single turn.
     if !turn.recall().is_empty() {
