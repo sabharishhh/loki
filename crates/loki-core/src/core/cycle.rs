@@ -17,6 +17,7 @@ use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory};
+use crate::ports::clock::Clock;
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
 
 /// Receives response text as it arrives.
@@ -71,6 +72,9 @@ pub struct Loop {
     /// Turns kept verbatim in the prompt. Recall never returns anything inside this, because it
     /// is already there.
     window_keeps: u32,
+    /// Read once per turn, never per use (§8.3). Two reads inside one turn is how the three lines
+    /// of the temporal frame end up disagreeing with each other.
+    clock: Arc<dyn Clock>,
 }
 
 impl Loop {
@@ -79,6 +83,7 @@ impl Loop {
         provider: Arc<dyn ModelProvider>,
         events: Arc<dyn EventSink>,
         tokens: Arc<dyn TokenSink>,
+        clock: Arc<dyn Clock>,
         prefix: Prefix,
         budget: Budget,
     ) -> Self {
@@ -94,7 +99,14 @@ impl Loop {
             max_tokens: 64_000,
             memory: None,
             window_keeps: DEFAULT_WINDOW_KEEPS,
+            clock,
         }
+    }
+
+    /// The clock this loop reads. Principle 9: callers resolve time, the model never does.
+    #[must_use]
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
 
     /// Gives the loop memory. The working set goes into the frozen prefix once, here, because it
@@ -186,8 +198,9 @@ impl Loop {
         let Some(memory) = self.memory.clone() else {
             return Ok(None);
         };
-        let today = jiff::Zoned::now().date();
-        let report = memory.close(extractor, matcher, budget, today).await?;
+        let report = memory
+            .close(extractor, matcher, budget, self.clock.today())
+            .await?;
         self.prefix.end_session();
         Ok(Some(report))
     }
@@ -216,8 +229,7 @@ impl Loop {
         // of already knowing you goes.
         if let Some(memory) = self.memory.clone() {
             memory.record("user", &message).await?;
-            let today = jiff::Zoned::now().date();
-            let recalled = memory.recall(&message, self.window_keeps, today)?;
+            let recalled = memory.recall(&message, self.window_keeps, self.clock.today())?;
             if recalled.is_empty() {
                 self.turn.set_recall("");
             } else {
@@ -464,6 +476,22 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
 
+    /// A clock stopped at one instant.
+    ///
+    /// Local rather than the `FakeClock` adapter, because Ring 0 may not import Ring 2 and a
+    /// `#[cfg(test)]` block is still Ring 0. Nothing here depends on time moving.
+    struct Stopped;
+
+    impl Clock for Stopped {
+        fn now(&self) -> jiff::Timestamp {
+            "2026-09-02T14:20:00Z".parse().expect("timestamp")
+        }
+
+        fn zone(&self) -> jiff::tz::TimeZone {
+            jiff::tz::TimeZone::UTC
+        }
+    }
+
     /// A provider that replays a fixed script. Lets the loop be tested without a network or a key.
     struct Fake {
         script: Vec<Result<Chunk, ModelError>>,
@@ -556,6 +584,7 @@ mod tests {
             provider,
             Arc::clone(&events) as Arc<dyn EventSink>,
             Arc::clone(&tokens) as Arc<dyn TokenSink>,
+            Arc::new(Stopped),
             Prefix::new("You are Loki."),
             Budget::new(Cents::new(10_000)),
         );
@@ -608,6 +637,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn ModelProvider>,
             Arc::new(Collector::new()),
             Arc::new(NullTokens),
+            Arc::new(Stopped),
             Prefix::new("You are Loki."),
             Budget::new(Cents::new(1_000_000)),
         );
@@ -642,6 +672,7 @@ mod tests {
             Arc::new(Fake::replying("ok")),
             Arc::clone(&events) as Arc<dyn EventSink>,
             Arc::new(NullTokens),
+            Arc::new(Stopped),
             Prefix::new("You are Loki."),
             Budget::new(Cents::ZERO),
         );

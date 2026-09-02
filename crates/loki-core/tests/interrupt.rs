@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use loki_core::adapters::clock::SystemClock;
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, NullTokens, TokenSink};
 use loki_core::core::event::Event;
@@ -67,6 +68,7 @@ async fn measure() -> Duration {
         Arc::new(Endless),
         Arc::clone(&events) as Arc<dyn EventSink>,
         Arc::new(NullTokens) as Arc<dyn TokenSink>,
+        Arc::new(SystemClock),
         Prefix::new("system"),
         budget(),
     );
@@ -130,6 +132,7 @@ async fn an_interrupt_before_the_turn_starts_is_still_honoured() {
         Arc::new(Endless),
         Arc::clone(&events) as Arc<dyn EventSink>,
         Arc::new(NullTokens) as Arc<dyn TokenSink>,
+        Arc::new(SystemClock),
         Prefix::new("system"),
         budget(),
     );
@@ -160,6 +163,7 @@ async fn partial_output_survives_the_interrupt() {
         Arc::new(Endless),
         Arc::clone(&events) as Arc<dyn EventSink>,
         Arc::new(NullTokens) as Arc<dyn TokenSink>,
+        Arc::new(SystemClock),
         Prefix::new("system"),
         budget(),
     );

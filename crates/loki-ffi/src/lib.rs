@@ -14,6 +14,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
 
 use loki_core::adapters::anthropic::Anthropic;
+use loki_core::adapters::clock::SystemClock;
 use loki_core::adapters::openai::Openai;
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, TokenSink};
@@ -197,6 +198,7 @@ pub unsafe extern "C" fn loki_core_new(
         provider,
         Arc::new(events),
         callbacks as Arc<dyn TokenSink>,
+        Arc::new(SystemClock),
         Prefix::new(SYSTEM),
         Budget::resuming(DEFAULT_CEILING, spent),
     );

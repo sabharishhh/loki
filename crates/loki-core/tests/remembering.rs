@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::stream;
 use jiff::civil::date;
+use loki_core::adapters::clock::SystemClock;
 use loki_core::core::budget::Budget as Spend;
 use loki_core::core::cycle::{Loop, NullTokens};
 use loki_core::core::prompt::Prefix;
@@ -163,6 +164,7 @@ fn a_loop(provider: Arc<Recorder>) -> Loop {
         provider,
         Arc::new(Silent),
         Arc::new(NullTokens),
+        Arc::new(SystemClock),
         Prefix::new("You are Loki."),
         Spend::new(Cents::new(10_000)),
     )

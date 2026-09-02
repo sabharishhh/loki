@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use loki_core::adapters::clock::SystemClock;
 use loki_core::adapters::{anthropic::Anthropic, openai::Openai};
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, TokenSink};
@@ -139,6 +140,7 @@ async fn main() {
         Arc::clone(&provider),
         Arc::new(events),
         Arc::new(Stdout),
+        Arc::new(SystemClock),
         Prefix::new(SYSTEM),
         Budget::resuming(CEILING, spent),
     );
