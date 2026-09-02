@@ -122,25 +122,28 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     Promotion::Hold
 }
 
-/// Whether a concept holds a conflict nobody has resolved (§9.7 rule 4).
+/// Whether a claim has a believed rival on its own attribute, so rule 4 is unsettled.
 ///
-/// Two believed claims about the same attribute of the same entity is the definition of a
-/// conflict, and rule 4 is the only path that leaves both standing: it marks them uncertain and
-/// asks a person. Everything else resolves at write time.
+/// The one predicate deciding whether a claim may reach a prompt while a conflict is open. **Per
+/// claim, not per concept.** Two claims that cannot both be true take each other out of use and
+/// nothing else with them, which is what rule 4's "use neither" actually says.
 ///
-/// Derived from the file rather than from the run that surfaced it, because the concept is left
-/// unusable across sessions and the run that resolves it is not the run that found it.
+/// Taking the whole concept out instead is how a disagreement about a degree hid a person's name:
+/// the store held a correct, stated, high-confidence name and answered that it did not know it.
+///
+/// Derived from the file rather than from the run that surfaced it, because the conflict outlives
+/// that run and the run that settles it is a different one.
 #[must_use]
-pub fn has_unresolved_conflict(concept: &RawConcept) -> bool {
-    let believed: Vec<&Claim> = concept
+pub fn is_contested(concept: &RawConcept, claim: &Claim) -> bool {
+    if !claim.validity.is_believed() || claim.attribute.is_empty() {
+        return false;
+    }
+    concept
         .claims()
-        .filter(|c| c.validity.is_believed() && !c.attribute.is_empty())
-        .collect();
-    believed.iter().enumerate().any(|(at, one)| {
-        believed[at + 1..]
-            .iter()
-            .any(|two| one.same_attribute_as(two))
-    })
+        .filter(|other| other.validity.is_believed())
+        .filter(|other| other.same_attribute_as(claim))
+        .nth(1)
+        .is_some()
 }
 
 /// Whether a concept has stopped mattering and should be archived (§9.10).

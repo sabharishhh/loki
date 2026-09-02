@@ -922,11 +922,30 @@ async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
         .await;
 
     assert_eq!(report.surfaced.len(), 1, "the two cities should conflict");
-    let concept = store.concept_at("people/sabharish.md").await;
-    assert_eq!(
-        concept.front.status,
-        Status::Draft,
-        "a surfaced conflict must keep the concept out of use until a person resolves it"
+
+    // The rule is about the two claims, not about the concept. Both cities stay out of a prompt
+    // until a person picks; the unrelated degree is unaffected. Asserting the concept's status
+    // instead was the first fix, and it was what made one argument hide everything else.
+    let visible = store
+        .index
+        .recall(&Query::prefetch(
+            "Sabharish Chennai Bangalore graduate",
+            TierScope::normal(Locality::Cloud),
+            date(2026, 1, 1),
+            10,
+        ))
+        .expect("recall");
+    let texts: Vec<&str> = visible.iter().map(|r| r.text.as_str()).collect();
+
+    assert!(
+        texts.iter().any(|t| t.contains("graduate")),
+        "the unrelated fact stays usable: {texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t.contains("Chennai") || t.contains("Bangalore")),
+        "neither side of an open conflict may reach a prompt: {texts:?}"
     );
 }
 
@@ -1053,5 +1072,146 @@ async fn a_page_never_overwrites_what_the_user_said() {
     assert!(
         stated.validity.is_believed(),
         "a page is newer in world time and still loses"
+    );
+}
+
+/// Found in Sabharish's store: a concept left `draft` by the rule-4 behaviour that no longer
+/// exists, holding a stated, unconflicted name that nothing would ever promote, because promotion
+/// only runs when a new claim arrives for that entity.
+///
+/// The status is derivable from the claims, so a run repairs it rather than needing a wipe.
+#[tokio::test]
+async fn a_run_repairs_a_draft_that_has_already_earned_stable() {
+    let store = Store::new("repair", &["episodes/a.md"]).await;
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "people/sabharish.md",
+                "---\nname: Sabharish\nstatus: draft\ngenerated:\n  by: loki/0.1\n  \
+                 at: 2026-01-01\nokf_version: '0.2'\n---\n\n## name\n\
+                 - The user's name is Sabharish\n  attribute: name\n  \
+                 learned: 2026-01-01   unlearned: null\n  confidence: high   origin: stated\n",
+            )
+            .expect("write");
+        writer
+            .commit("a store left draft by an older rule")
+            .expect("commit");
+    }
+
+    let extractor = Scripted::new(vec![]);
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        concept.front.status,
+        Status::Stable,
+        "a stated, unconflicted claim has earned its way into use"
+    );
+
+    let hits = store
+        .index
+        .recall(&Query::prefetch(
+            "what is my name",
+            TierScope::normal(Locality::Cloud),
+            date(2026, 1, 1),
+            5,
+        ))
+        .expect("recall");
+    assert!(
+        hits.iter().any(|h| h.text.contains("Sabharish")),
+        "the repaired concept is reachable: {hits:?}"
+    );
+}
+
+/// From Sabharish's store: `interest` and `interests` kept two spellings of one property from ever
+/// being compared, so the identical sentence sat in the file twice and surfaced as two sides of a
+/// question the user could not meaningfully answer.
+#[tokio::test]
+async fn a_run_folds_duplicates_that_two_attribute_spellings_hid() {
+    let store = Store::new("fold", &["episodes/a.md"]).await;
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "people/sabharish.md",
+                "---\nname: Sabharish\nstatus: stable\ngenerated:\n  by: loki/0.1\n  \
+                 at: 2026-01-01\nokf_version: '0.2'\n---\n\n## interest\n\
+                 - Sabharish is interested in AI\n  attribute: interest\n  \
+                 learned: 2026-01-01   unlearned: null\n  confidence: high   origin: stated\n\
+                 \n## interests\n\
+                 - Sabharish is interested in AI\n  attribute: interests\n  \
+                 learned: 2026-01-01   unlearned: null\n  confidence: high   origin: stated\n",
+            )
+            .expect("write");
+        writer.commit("two spellings of one key").expect("commit");
+    }
+
+    let before = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        before.claims().count(),
+        2,
+        "the fixture really does hold two"
+    );
+
+    let extractor = Scripted::new(vec![]);
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let after = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        after.claims().count(),
+        1,
+        "one fact written twice is one fact: {:?}",
+        after.claims().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(after.front.status, Status::Stable);
+}
+
+/// The fold is only for restatements. Two things that genuinely differ both stay.
+#[tokio::test]
+async fn folding_leaves_claims_that_actually_differ_alone() {
+    let store = Store::new("fold-keeps", &["episodes/a.md"]).await;
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "people/sabharish.md",
+                "---\nname: Sabharish\nstatus: stable\ngenerated:\n  by: loki/0.1\n  \
+                 at: 2026-01-01\nokf_version: '0.2'\n---\n\n## education\n\
+                 - Sabharish is a computer science student\n  attribute: education\n  \
+                 learned: 2026-01-01   unlearned: null\n  confidence: high   origin: stated\n\
+                 - Sabharish completed a B.Tech in May 2026\n  attribute: education\n  \
+                 learned: 2026-01-01   unlearned: null\n  confidence: high   origin: stated\n",
+            )
+            .expect("write");
+        writer.commit("two real claims").expect("commit");
+    }
+
+    let extractor = Scripted::new(vec![]);
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let after = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        after.claims().count(),
+        2,
+        "these are a real question, not a duplicate"
     );
 }

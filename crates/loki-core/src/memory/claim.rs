@@ -383,10 +383,32 @@ fn asserted_words(text: &str, attribute: &str) -> Vec<String> {
     words
 }
 
-/// Lowercases and trims an attribute key, so casing and spacing do not split one attribute in two.
+/// Folds an attribute key to one canonical spelling, so casing, spacing and number do not split
+/// one property into two.
+///
+/// Found in Sabharish's store: `interest` and `interests` sat as separate sections about the same
+/// thing, so a later statement never superseded an earlier one and both stood as duplicates. The
+/// extraction prompt asks for consistency and the model does not always give it, which is open
+/// question 18's drift arriving in practice.
+///
+/// **This only has to be consistent, not linguistically correct.** `status` folds to `statu`,
+/// which is not a word and does not matter: both sides of every comparison go through here, so a
+/// wrong-looking stem still groups the same property together. That is why a crude rule is the
+/// right one, and why it needs no dictionary.
 #[must_use]
 pub fn normalize_attribute(raw: &str) -> String {
-    raw.trim().to_lowercase().replace([' ', '-'], "_")
+    let key = raw.trim().to_lowercase().replace([' ', '-'], "_");
+    let Some(stem) = key.strip_suffix('s') else {
+        return key;
+    };
+    // `address` and `analysis` are not plurals. Their endings are, so the ending is what to check.
+    if stem.len() < 3 || stem.ends_with('s') || stem.ends_with('u') || stem.ends_with('i') {
+        return key;
+    }
+    if let Some(root) = stem.strip_suffix("ie") {
+        return format!("{root}y");
+    }
+    stem.to_owned()
 }
 
 #[cfg(test)]
@@ -563,6 +585,32 @@ mod tests {
         assert_eq!(held.origin, Origin::Stated);
         assert_eq!(held.confidence, Confidence::High);
         assert_eq!(held.usage_count, 0, "a restatement is not a use");
+    }
+
+    /// The drift that produced duplicates in the live store: one property, two spellings.
+    #[test]
+    fn a_plural_and_a_singular_attribute_are_one_key() {
+        assert_eq!(normalize_attribute("interests"), "interest");
+        assert_eq!(normalize_attribute("Interest"), "interest");
+        assert_eq!(normalize_attribute("hobbies"), "hobby");
+        assert_eq!(normalize_attribute("reply style"), "reply_style");
+
+        let one =
+            Claim::stated("Sabharish is interested in AI", date(2026, 1, 1)).about("interest");
+        let two =
+            Claim::stated("Sabharish is interested in ML", date(2026, 1, 1)).about("interests");
+        assert!(
+            one.same_attribute_as(&two),
+            "two spellings of one property have to compete, or neither ever supersedes the other"
+        );
+    }
+
+    /// Endings that look plural and are not. The stem only has to be consistent, not a word.
+    #[test]
+    fn words_that_merely_end_in_s_are_left_alone() {
+        assert_eq!(normalize_attribute("address"), "address");
+        assert_eq!(normalize_attribute("status"), "status");
+        assert_eq!(normalize_attribute("analysis"), "analysis");
     }
 
     #[test]

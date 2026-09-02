@@ -376,10 +376,11 @@ fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
 
 /// Lifts a draft concept to stable once a claim has earned it (§9.8).
 ///
-/// Refuses while the concept holds a conflict nobody has resolved. Rule 4 takes a whole concept
-/// out of use, and status is per concept, so without this check the next unrelated stated fact
-/// about the same entity promotes it straight back and both conflicting claims reach a prompt.
-/// That is the failure §9.5 says the gate prevents, arriving through the promotion path instead.
+/// No conflict check here, on purpose. B-34 was fixed at this seam first, by refusing to promote
+/// while a conflict stood, and that was the wrong place: status is per concept, so it took the
+/// whole entity out of use over one argument. The rule belongs at the gate, per claim, where
+/// `reconcile::is_contested` keeps both sides of a conflict out of a prompt whatever the concept's
+/// status is.
 fn promote(
     concept: &mut RawConcept,
     path: &str,
@@ -389,7 +390,6 @@ fn promote(
 ) {
     if reconcile::promotion(claim, occurrences, false) == Promotion::Auto
         && concept.front.status == Status::Draft
-        && !reconcile::has_unresolved_conflict(concept)
     {
         concept.front.status = Status::Stable;
         report.promoted.push(path.to_owned());
@@ -428,6 +428,33 @@ async fn archive_stale(
                 Err(_) => continue,
             }
         };
+        // Restatements already on disk, written before the rule that folds them existed or under
+        // two spellings of one attribute key. Two claims that say the same thing are one fact and
+        // a write that happened twice, so collapsing them loses no record.
+        let folded = fold_restatements(&mut concept);
+        if folded > 0 {
+            let writer = bundle.writer().await;
+            writer.save_concept(&path, &concept)?;
+        }
+
+        // A draft holding a claim that has already earned promotion is stale status, not a
+        // candidate. This is how a store repairs itself after the rule that wrote the status
+        // changed: rule 4 used to drop a whole concept to draft, and a concept could be left
+        // holding a stated, unconflicted name that nothing would ever promote, because promotion
+        // only runs when a new claim arrives for that entity.
+        if concept.front.status == Status::Draft && earned_stable(&concept) {
+            concept.front.status = Status::Stable;
+            {
+                let writer = bundle.writer().await;
+                writer.save_concept(&path, &concept)?;
+            }
+            report.promoted.push(path);
+            continue;
+        }
+        if folded > 0 {
+            continue;
+        }
+
         if !reconcile::should_archive(&concept, today, ARCHIVE_AFTER_DAYS) {
             continue;
         }
@@ -440,6 +467,55 @@ async fn archive_stale(
         report.archived.push(path);
     }
     Ok(())
+}
+
+/// Collapses believed claims that restate a believed sibling. Returns how many went.
+///
+/// The one place anything is removed rather than retired, and the reason it is allowed: a claim
+/// that restates another is not a second fact, it is the same fact written twice. The surviving
+/// claim says exactly what the removed one said, so principle 6's "nothing silently overwrites"
+/// is not in play, and git holds the prior state either way.
+///
+/// Needed because the store predates the rules that would have prevented it. `restates` arrived
+/// after some claims were written, and `interest` against `interests` kept two spellings of one
+/// property from ever being compared.
+fn fold_restatements(concept: &mut RawConcept) -> usize {
+    let mut kept: Vec<Claim> = Vec::new();
+    let mut dropped = 0usize;
+
+    for section in &mut concept.sections {
+        section.claims.retain(|claim| {
+            if !claim.validity.is_believed() {
+                return true;
+            }
+            if kept
+                .iter()
+                .any(|seen| seen.validity.is_believed() && seen.restates(claim))
+            {
+                dropped += 1;
+                return false;
+            }
+            kept.push(claim.clone());
+            true
+        });
+    }
+    concept
+        .sections
+        .retain(|section| !section.claims.is_empty());
+    dropped
+}
+
+/// Whether anything in a concept has already earned `stable` under §9.8's rules.
+///
+/// The promotion rule applied to what is on disk rather than to an arriving claim. A contested
+/// claim does not count: it is out of use until a person settles it, and it cannot be the reason
+/// the concept is in use.
+fn earned_stable(concept: &RawConcept) -> bool {
+    concept.claims().any(|claim| {
+        claim.validity.is_believed()
+            && !reconcile::is_contested(concept, claim)
+            && reconcile::promotion(claim, 1, false) == Promotion::Auto
+    })
 }
 
 /// Deletes the scratch files a run promoted, so the directory listing matches what is live.
@@ -508,6 +584,7 @@ Rules:
 - Only durable facts. A one-off question, a passing joke or a task instruction is not a fact.
 - Give every fact an attribute, and reuse the same key for the same property every time. `employer`
   today and `works_at` tomorrow means the change of job is never noticed.
+- Attribute keys are singular and lower case: `interest`, not `interests` or `Interests`.
 - Never use one attribute for two different properties. A name and a degree are `name` and
   `education`, never both `identity`, or one will wrongly overwrite the other.
 - One fact per line, each setting exactly one attribute. Split a sentence that states two

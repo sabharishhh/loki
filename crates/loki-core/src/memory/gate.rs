@@ -144,8 +144,8 @@ impl Active {
 
     /// The claims this scope may see, on a given day.
     ///
-    /// Filters on world time as well as status, so an invalidated claim cannot surface even from a
-    /// live concept.
+    /// Filters on world time and on rule 4 as well as on status, so neither an invalidated claim
+    /// nor an unsettled one can surface from a live concept.
     pub fn visible_claims(&self, scope: TierScope, today: Date) -> impl Iterator<Item = &Claim> {
         self.0
             .claims()
@@ -153,6 +153,9 @@ impl Active {
             .filter(move |c| scope.admits_origin(c.origin))
             .filter(move |c| c.validity.is_believed())
             .filter(move |c| c.validity.holds_on(today))
+            // Rule 4's "use neither", scoped to the two claims it is about. A conflict over one
+            // attribute must not hide everything else known about the entity.
+            .filter(|c| !super::reconcile::is_contested(&self.0, c))
     }
 }
 

@@ -48,6 +48,12 @@ impl Store {
             }
             writer.commit("fixture").expect("commit");
         }
+        // The fixture is written after `open`, so the index has to catch up. Without this a
+        // recall assertion measures an empty index rather than the rule under test.
+        {
+            let reader = memory.bundle().reader().await;
+            memory.index().sync(&reader).expect("sync");
+        }
         Self { memory, dir }
     }
 
@@ -63,10 +69,14 @@ impl Drop for Store {
     }
 }
 
-/// A concept rule 4 took out of use: two believed claims about one attribute, neither in use.
+/// A concept with an open conflict: two believed claims about one attribute, plus a fact that has
+/// nothing to do with either.
+///
+/// `stable`, deliberately. Rule 4 takes the two claims out of use and nothing else with them, so a
+/// concept holding a question is still a concept Loki uses.
 fn contested() -> RawConcept {
     let mut front = Frontmatter::new("Sabharish", date(2026, 1, 1));
-    front.status = Status::Draft;
+    front.status = Status::Stable;
     let mut concept = RawConcept::new(front);
     concept.add(
         "city",
@@ -99,7 +109,6 @@ async fn one_tap_settles_a_conflict_and_puts_the_concept_back_to_work() {
         .entities
         .remove(0);
     assert_eq!(before.questions.len(), 1, "{before:?}");
-    assert!(!before.in_use);
     assert_eq!(
         before.facts.len(),
         1,
@@ -121,7 +130,7 @@ async fn one_tap_settles_a_conflict_and_puts_the_concept_back_to_work() {
         .entities
         .remove(0);
     assert!(after.questions.is_empty(), "{after:?}");
-    assert!(after.in_use, "settling is what puts a concept back to work");
+    assert_eq!(after.facts.len(), 2, "the settled claim joins the facts");
     assert!(after.confirmed, "a person picked, so nothing may decay it");
 
     let bangalore = after
@@ -323,4 +332,45 @@ async fn a_correction_serializes_the_fields_the_app_reads() {
     // `wrong_for` is skipped when there was no gap, so assert the key the app reads exists on the
     // shape rather than in this particular instance.
     assert!(json.contains("\"was\""), "{json}");
+}
+
+/// Found in Sabharish's store, 2026-09-02. The name was stored, correct, stated and high
+/// confidence, and Loki answered "I don't know your name yet".
+///
+/// Rule 4 says "mark both uncertain, surface it, use neither". *Both* is the two conflicting
+/// claims. The implementation dropped the whole concept to `draft`, so one argument about a
+/// degree took the person's name out of use with it.
+#[tokio::test]
+async fn a_conflict_about_one_thing_does_not_hide_everything_else() {
+    let store = Store::new("blast-radius", &[("people/sabharish.md", contested())]).await;
+
+    let entity = store
+        .memory
+        .knowledge(today())
+        .await
+        .expect("knowledge")
+        .entities
+        .remove(0);
+
+    let usable: Vec<&str> = entity.facts.iter().map(|f| f.attribute.as_str()).collect();
+    assert_eq!(
+        usable,
+        ["education"],
+        "the unrelated fact has to stay usable while the question is open"
+    );
+
+    let recalled = store
+        .memory
+        .recall("what did Sabharish study", 0, today())
+        .expect("recall");
+    assert!(
+        recalled.iter().any(|r| r.text.contains("graduate")),
+        "an open question about the city must not make the degree unreachable: {recalled:?}"
+    );
+    assert!(
+        !recalled
+            .iter()
+            .any(|r| r.text.contains("Chennai") || r.text.contains("Bangalore")),
+        "neither side of the question may reach a prompt: {recalled:?}"
+    );
 }
