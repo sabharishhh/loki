@@ -369,6 +369,11 @@ fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
 }
 
 /// Lifts a draft concept to stable once a claim has earned it (§9.8).
+///
+/// Refuses while the concept holds a conflict nobody has resolved. Rule 4 takes a whole concept
+/// out of use, and status is per concept, so without this check the next unrelated stated fact
+/// about the same entity promotes it straight back and both conflicting claims reach a prompt.
+/// That is the failure §9.5 says the gate prevents, arriving through the promotion path instead.
 fn promote(
     concept: &mut RawConcept,
     path: &str,
@@ -378,6 +383,7 @@ fn promote(
 ) {
     if reconcile::promotion(claim, occurrences, false) == Promotion::Auto
         && concept.front.status == Status::Draft
+        && !reconcile::has_unresolved_conflict(concept)
     {
         concept.front.status = Status::Stable;
         report.promoted.push(path.to_owned());

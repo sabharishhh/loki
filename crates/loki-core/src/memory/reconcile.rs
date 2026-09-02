@@ -105,6 +105,27 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     Promotion::Hold
 }
 
+/// Whether a concept holds a conflict nobody has resolved (§9.7 rule 4).
+///
+/// Two believed claims about the same attribute of the same entity is the definition of a
+/// conflict, and rule 4 is the only path that leaves both standing: it marks them uncertain and
+/// asks a person. Everything else resolves at write time.
+///
+/// Derived from the file rather than from the run that surfaced it, because the concept is left
+/// unusable across sessions and the run that resolves it is not the run that found it.
+#[must_use]
+pub fn has_unresolved_conflict(concept: &RawConcept) -> bool {
+    let believed: Vec<&Claim> = concept
+        .claims()
+        .filter(|c| c.validity.is_believed() && !c.attribute.is_empty())
+        .collect();
+    believed.iter().enumerate().any(|(at, one)| {
+        believed[at + 1..]
+            .iter()
+            .any(|two| one.same_attribute_as(two))
+    })
+}
+
 /// Whether a concept has stopped mattering and should be archived (§9.10).
 ///
 /// Nothing is deleted by heuristic. `deprecated` stays linkable and searchable.

@@ -878,3 +878,52 @@ async fn a_claim_with_no_attribute_never_conflicts() {
         2
     );
 }
+
+/// B-34: rule 4 marks a concept `draft` so neither claim is used. An unrelated stated claim must
+/// not promote it back, or both conflicting claims reach a prompt with nobody having resolved them.
+#[tokio::test]
+async fn an_unrelated_fact_does_not_clear_a_surfaced_conflict() {
+    let store = Store::new("surface-then-promote", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![
+            about(
+                "city",
+                "Sabharish",
+                "Sabharish lives in Chennai",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+            about(
+                "city",
+                "Sabharish",
+                "Sabharish lives in Bangalore",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+            about(
+                "education",
+                "Sabharish",
+                "Sabharish is a computer science graduate",
+                date(2026, 1, 1),
+                Source::Stated,
+            ),
+        ],
+    )]);
+
+    let report = store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert_eq!(report.surfaced.len(), 1, "the two cities should conflict");
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        concept.front.status,
+        Status::Draft,
+        "a surfaced conflict must keep the concept out of use until a person resolves it"
+    );
+}
