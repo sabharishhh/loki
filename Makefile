@@ -27,6 +27,10 @@ run: app  ## Build and launch Loki.app with the key from your shell
 
 .PHONY: xcode
 xcode: core  ## Open the app in Xcode. Builds the core first so linking works
+	@# Xcode links target/debug/libloki_ffi.a by path and has no dependency on the Rust sources,
+	@# so building from Xcode alone links whatever core happens to be lying there. Building it
+	@# here covers opening the project; scripts/xcode-prebuild.sh covers every build after that,
+	@# and its header says how to install it as a scheme pre-action.
 	xed app
 
 .PHONY: test
