@@ -23,6 +23,65 @@ pub enum Status {
     Deprecated,
 }
 
+/// Who an entity is to this store (§9.4, S-21).
+///
+/// Exactly one `Owner` and one `Assistant`, both seeded before the first turn so an "I" or a "you"
+/// always has a card to land on. Everything else defaults to `Other`, so a store written before
+/// this existed reads correctly rather than declaring itself the owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// The person this store belongs to.
+    Owner,
+    /// Loki.
+    Assistant,
+    #[default]
+    Other,
+}
+
+/// Whether `name` is a name or a placeholder standing in for one (§9.4, S-21).
+///
+/// "The user's sister" is a description of somebody nobody has named yet. Keeping the difference
+/// is what lets a named card absorb a described one instead of the two sitting side by side for
+/// ever, and it is what §17.3 needs to say "you have not told me their name".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Label {
+    #[default]
+    Named,
+    Described,
+}
+
+/// An edge from this entity to another, bi-temporal like a claim (§9.4, S-21).
+///
+/// `until` is what makes a manager who changed different from a manager who was wrong. Nothing is
+/// deleted: a closed edge stays in the file and stays walkable, it simply stops being current.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Relation {
+    pub label: String,
+    /// A bundle-relative concept path.
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Date>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<Date>,
+}
+
+impl Relation {
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.until.is_none()
+    }
+}
+
+fn is_other(role: &Role) -> bool {
+    matches!(role, Role::Other)
+}
+
+fn is_named(label: &Label) -> bool {
+    matches!(label, Label::Named)
+}
+
 /// Who wrote something, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribution {
@@ -44,9 +103,16 @@ pub struct Frontmatter {
     /// An absolute instant, so staleness is a comparison. A trip expires. Your name does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_after: Option<Date>,
-    /// Other surface forms this entity is known by. Seeded from the form first used.
+    /// Other surface forms this entity is known by. Seeded from the form first used, and it grows:
+    /// a learned name, a nickname and a rename all append rather than replacing the file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_other")]
+    pub role: Role,
+    #[serde(default, skip_serializing_if = "is_named")]
+    pub label: Label,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -66,6 +132,9 @@ impl Frontmatter {
             verified: Vec::new(),
             stale_after: None,
             aliases: Vec::new(),
+            role: Role::Other,
+            label: Label::Named,
+            relations: Vec::new(),
             tags: Vec::new(),
             okf_version: "0.2".to_owned(),
         }
@@ -75,6 +144,91 @@ impl Frontmatter {
     #[must_use]
     pub fn is_human_verified(&self) -> bool {
         self.verified.iter().any(|v| v.by.starts_with("human:"))
+    }
+
+    /// Whether this entity already answers to `form`.
+    #[must_use]
+    pub fn answers_to(&self, form: &str) -> bool {
+        let form = form.trim();
+        self.name.eq_ignore_ascii_case(form)
+            || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(form))
+    }
+
+    /// Records another surface form this entity is known by.
+    ///
+    /// The whole of change C: the list was written once at creation and never again, so a person
+    /// referred to a second way became a second file. Appending costs nothing and the path, which
+    /// is the identity, never moves.
+    pub fn learn_alias(&mut self, form: &str) {
+        let form = form.trim();
+        if form.is_empty() || self.answers_to(form) {
+            return;
+        }
+        self.aliases.push(form.to_owned());
+    }
+
+    /// Adopts a real name, keeping the old one as an alias.
+    ///
+    /// A rename is one field and one alias, never a move: the path is the identity (§9.4) and
+    /// moving the file would break every link into it and lose the git history that makes a
+    /// correction reviewable.
+    pub fn rename(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || self.name.eq_ignore_ascii_case(name) {
+            self.label = Label::Named;
+            return;
+        }
+        let was = std::mem::replace(&mut self.name, name.to_owned());
+        self.learn_alias(&was);
+        self.label = Label::Named;
+    }
+
+    /// The current target of a relation, if there is exactly one.
+    #[must_use]
+    pub fn related(&self, label: &str) -> Option<&str> {
+        let mut current = self
+            .relations
+            .iter()
+            .filter(|r| r.is_current() && r.label.eq_ignore_ascii_case(label));
+        let first = current.next()?;
+        // Two current targets is not an answer to "who is my X". Case 7's two brothers are
+        // correct and unanswerable in the singular, and guessing between them would be worse.
+        current.next().is_none().then_some(first.to.as_str())
+    }
+
+    /// Records an edge, closing an earlier one when the label may only have one live target.
+    ///
+    /// Many-valued by default. §21.2 names wrongly retiring a true claim as the more damaging
+    /// error, and a second brother is far more common than a second mother.
+    pub fn relate(&mut self, label: &str, to: &str, on: Date) {
+        let label = label.trim().to_lowercase();
+        if label.is_empty() || to.is_empty() {
+            return;
+        }
+        if let Some(held) = self
+            .relations
+            .iter_mut()
+            .find(|r| r.label == label && r.to == to)
+        {
+            // Said again. Reopen it rather than adding a second copy of one edge.
+            held.until = None;
+            return;
+        }
+        if super::cardinality::relation_is_single_valued(&label) {
+            for held in self
+                .relations
+                .iter_mut()
+                .filter(|r| r.label == label && r.is_current())
+            {
+                held.until = Some(on);
+            }
+        }
+        self.relations.push(Relation {
+            label,
+            to: to.to_owned(),
+            since: Some(on),
+            until: None,
+        });
     }
 }
 

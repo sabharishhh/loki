@@ -114,6 +114,15 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
                 Err(_) => continue,
             }
         };
+        // A card with no claims at all is not knowledge. The owner and assistant cards are seeded
+        // before the first turn (§9.4), and until something is learned about them the honest
+        // answer to "what do you know" is still nothing.
+        //
+        // No claims, not no *believed* claims: an entity whose facts were all retired stays on the
+        // screen, because §17.3's whole point is being able to see what Loki used to think.
+        if concept.claims().next().is_none() {
+            continue;
+        }
         entities.push(entity(&path, &concept, today));
     }
 

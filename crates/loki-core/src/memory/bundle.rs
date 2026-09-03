@@ -43,6 +43,16 @@ pub const WORKING_SET: &str = "working-set.md";
 pub const STANDING: &str = "standing.md";
 pub const INDEX: &str = "index.md";
 
+/// The owner's card. Seeded before the first turn, so an "I" always has somewhere to land (§9.4).
+///
+/// The path is fixed and the name is not: it opens as "you" and is renamed the moment a name is
+/// learned. §11.3's import depends on this existing beforehand, or every export writes a new
+/// person for the same "I".
+pub const OWNER: &str = "people/you.md";
+
+/// Loki's own card, so a fact about the assistant is not a fact about a person it knows.
+pub const ASSISTANT: &str = "people/loki.md";
+
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
     #[error("no application support directory")]

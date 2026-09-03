@@ -93,6 +93,7 @@ impl Memory {
         scope: TierScope,
     ) -> Result<Self, MemoryError> {
         let bundle = Bundle::open(root).await?;
+        seed_singletons(&bundle, today).await?;
         {
             let reader = bundle.reader().await;
             index.sync(&reader)?;
@@ -650,6 +651,60 @@ impl Memory {
         // is a session boundary, not the end of the conversation.
         Ok(report)
     }
+}
+
+/// Writes the owner and assistant cards if they are not already there (§9.4, S-21).
+///
+/// Before the first turn rather than on first mention. Seeded lazily they would be created by
+/// whichever claim happened to arrive first, and the aliases that make "the user" resolve to the
+/// owner would not exist for the claim that needed them. §11.3's import depends on this too: every
+/// "I" in an exported chat is the same person, and with no card to point at, each export writes
+/// another one.
+///
+/// **`you` belongs to the assistant and never to the owner.** From inside a conversation "you" is
+/// Loki, so a store that answered both would file "you are Loki" onto the owner. The plan listed it
+/// under the owner; this is the correction, see D-066. `I` is left out for a second reason: it is
+/// one letter, and blocking's near-name match on a single character catches everything.
+async fn seed_singletons(bundle: &Bundle, today: Date) -> Result<(), MemoryError> {
+    use super::concept::{Frontmatter, Label, RawConcept, Role, render};
+
+    for (path, name, role, label, aliases) in [
+        (
+            bundle::OWNER,
+            // Not "you". The card's name is a surface form blocking answers to, and inside a
+            // conversation "you" is Loki. A card named that would take "you are Loki" onto the
+            // owner, which is the exact collision seeding exists to prevent.
+            "the user",
+            Role::Owner,
+            // No name has been given yet, which is exactly what `described` records.
+            Label::Described,
+            ["me", "myself", "the owner"].as_slice(),
+        ),
+        (
+            bundle::ASSISTANT,
+            "Loki",
+            Role::Assistant,
+            Label::Named,
+            ["you", "the assistant"].as_slice(),
+        ),
+    ] {
+        let exists = {
+            let reader = bundle.reader().await;
+            reader.read(path).is_ok()
+        };
+        if exists {
+            continue;
+        }
+        // Seeded with no claims, so it is `draft` and the gate keeps it out of every prompt until
+        // it has learned something. No exception needed anywhere.
+        let mut front = Frontmatter::new(name, today);
+        front.role = role;
+        front.label = label;
+        front.aliases = aliases.iter().map(|a| (*a).to_owned()).collect();
+        let writer = bundle.writer().await;
+        writer.write(path, &render(&RawConcept::new(front)))?;
+    }
+    Ok(())
 }
 
 /// Renders recalled lines for the turn zone.
