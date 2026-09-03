@@ -462,6 +462,50 @@ mod names {
         assert_eq!(card.claims().count(), 2, "one card, both facts");
     }
 
+    /// Probe cases 6 and 17. The user's name arrives as a fact about `the user`, so it names the
+    /// card that already exists rather than creating a second person, and every later mention of
+    /// that name reaches the same card.
+    #[tokio::test]
+    async fn the_owner_learns_a_name_without_becoming_a_second_person() {
+        let store = store_with(
+            "owner-name",
+            vec![
+                Fact {
+                    trigger: "my name is Sabharish",
+                    surface: "the user",
+                    attribute: "name",
+                    text: "The user's name is Sabharish",
+                    aliases: &["Sabharish"],
+                    relation: None,
+                },
+                Fact {
+                    trigger: "the user studied computer science",
+                    surface: "the user",
+                    attribute: "education",
+                    text: "The user studied computer science",
+                    aliases: &[],
+                    relation: None,
+                },
+            ],
+        )
+        .await;
+
+        let owner = store.card(loki_core::memory::bundle::OWNER).await;
+        assert_eq!(owner.front.name, "Sabharish");
+        assert_eq!(owner.front.label, Label::Named);
+        assert_eq!(owner.claims().count(), 2, "one card, both voices");
+        assert!(
+            owner.front.answers_to("the user"),
+            "{:?}",
+            owner.front.aliases
+        );
+        assert_eq!(
+            store.blocks_to("Sabharish"),
+            [loki_core::memory::bundle::OWNER],
+            "and the name reaches the owner from now on"
+        );
+    }
+
     /// Probe case 1's second half. A placeholder card that later learns a real name adopts it and
     /// keeps the old wording as a way of finding it.
     #[tokio::test]

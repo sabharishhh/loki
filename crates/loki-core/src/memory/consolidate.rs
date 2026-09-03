@@ -576,8 +576,16 @@ fn adopt(front: &mut Frontmatter, candidate: &Candidate) {
     // A named form absorbing a placeholder is the one case where the displayed name changes. The
     // path never moves: it is the identity (§9.4), and moving the file would break every link into
     // it and lose the history that makes a correction reviewable.
-    if front.label == Label::Described && !resolve::looks_described(&candidate.surface) {
-        front.rename(&candidate.surface);
+    //
+    // The name can arrive either way. "Lakshmi finished her exams" names her as the subject, and
+    // "the user's name is Sabharish" names the owner through an alias line, because the subject
+    // of that sentence is still `the user`.
+    if front.label == Label::Described
+        && let Some(name) = std::iter::once(&candidate.surface)
+            .chain(candidate.aliases.iter())
+            .find(|form| !resolve::looks_described(form))
+    {
+        front.rename(name);
     }
 }
 
@@ -923,6 +931,9 @@ Rules:
   Lakshmi` is `relation | Lakshmi | sister | the user`. Use the plain word, singular and lower
   case. Never write a relationship as an attribute; `relation` and `relationship` are not
   attributes and a fact line must not use them.
+- When a sentence gives the user's own name, write the fact against `the user` and add
+  `alias | the user | <the name>`. That is what makes their name findable, and what stops the
+  next mention of it becoming a second person.
 - Write an `alias` line whenever a sentence gives another name for someone already named: a
   nickname, a preferred name, a surname, a maiden name. `Vaidyanathan prefers to be called Ashok`
   is `alias | Vaidyanathan | Ashok`.
@@ -946,6 +957,7 @@ has just moved to Bangalore, that they want short replies, and that their sister
 everyone calls Lucky, has just finished her exams:
 
   the user | person | name | stated | - | The user's name is Sabharish
+  alias | the user | Sabharish
   the user | person | education | stated | - | Sabharish is a computer science graduate
   the user | person | city | stated | - | Sabharish lives in Bangalore
   reply length | preference | reply_style | stated | - | Sabharish prefers short replies
