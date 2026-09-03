@@ -286,6 +286,20 @@ pub fn looks_described(surface: &str) -> bool {
     OPENERS.iter().any(|opener| lower.starts_with(opener))
 }
 
+/// Whether a surface form is a name the entity is known by, as opposed to a way of reaching it.
+///
+/// The owner's card answers to `me`, `myself` and `the owner`. Those are machinery: they exist so
+/// blocking can route a claim, and telling the user or the model that Sabharish is "also called
+/// me, myself, the owner" is noise in one place and a paid token in the other.
+#[must_use]
+pub fn is_a_real_name(form: &str) -> bool {
+    const PRONOUNS: [&str; 10] = [
+        "me", "myself", "i", "you", "we", "us", "him", "her", "them", "it",
+    ];
+    let lower = form.trim().to_lowercase();
+    !lower.is_empty() && !looks_described(&lower) && !PRONOUNS.contains(&lower.as_str())
+}
+
 /// A filename from a surface form. Lowercase, one hyphen between runs of anything else.
 fn slug(surface: &str) -> String {
     let mut out = String::with_capacity(surface.len());

@@ -290,7 +290,10 @@ fn entity(
             .front
             .aliases
             .iter()
-            .filter(|form| !form.eq_ignore_ascii_case(&concept.front.name))
+            .filter(|form| {
+                !form.eq_ignore_ascii_case(&concept.front.name)
+                    && super::resolve::is_a_real_name(form)
+            })
             .cloned()
             .collect(),
         relations: concept

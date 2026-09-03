@@ -561,7 +561,7 @@ async fn the_user_can_take_a_name_or_an_edge_back() {
 
     store
         .memory
-        .forget_alias("people/zoe.md", "Zo")
+        .forget_alias("people/zoe.md", "Zo", today())
         .await
         .expect("forget alias");
     store
@@ -574,4 +574,100 @@ async fn the_user_can_take_a_name_or_an_edge_back() {
     assert!(known_as.is_empty(), "{known_as:?}");
     let (_, _, edges) = shown(&store, "Sabharish").await;
     assert!(edges.is_empty(), "{edges:?}");
+}
+
+/// The other half of "nothing is learned invisibly", pointed at the model rather than at the user.
+///
+/// Sabharish asked "what nickname has my dad got" against a store holding the alias and the edge
+/// and was told there was no nickname. Showing him the card was only half a fix: what the model
+/// reads is the working set, and neither the names nor the edges were in it.
+mod in_the_prompt {
+    use super::{Store, named, said, tied, valued};
+
+    async fn a_family() -> Store {
+        Store::told(
+            "prefix",
+            vec![
+                valued(
+                    said(
+                        "my name is Sabharish",
+                        "the user",
+                        "name",
+                        "The user's name is Sabharish",
+                    ),
+                    "Sabharish",
+                ),
+                tied(
+                    named(
+                        said(
+                            "my dad Vaidyanathan is called Ashok",
+                            "Vaidyanathan",
+                            "occupation",
+                            "Vaidyanathan is a civil contractor",
+                        ),
+                        &["Ashok"],
+                    ),
+                    "father",
+                    "the user",
+                ),
+            ],
+        )
+        .await
+    }
+
+    /// The reported question, answerable from the prefix alone.
+    #[tokio::test]
+    async fn a_nickname_reaches_the_model() {
+        let store = a_family().await;
+        let prefix = store.memory.working_set().await.expect("working set");
+        assert!(
+            prefix.contains("also called Ashok"),
+            "the store knew the nickname and could not say it: {prefix}"
+        );
+    }
+
+    /// And so does the edge, by name. "Father: people/vaidyanathan.md" would be a path shown to
+    /// somebody who has never opened the store.
+    #[tokio::test]
+    async fn an_edge_reaches_the_model_as_a_name() {
+        let store = a_family().await;
+        let prefix = store.memory.working_set().await.expect("working set");
+        assert!(
+            prefix.contains("father: Vaidyanathan"),
+            "nothing in the prompt said whose father he is: {prefix}"
+        );
+        assert!(!prefix.contains(".md"), "no paths in a prompt: {prefix}");
+    }
+
+    /// A prompt is paid for on every call of the session, so this has to add what is missing and
+    /// nothing else: not the card's own name back at it, and not an edge that has ended.
+    #[tokio::test]
+    async fn the_prefix_gains_nothing_it_already_had() {
+        let store = a_family().await;
+        store
+            .memory
+            .forget_relation(
+                "people/you.md",
+                "father",
+                "people/vaidyanathan.md",
+                super::today(),
+            )
+            .await
+            .expect("close");
+        store
+            .memory
+            .refresh_working_set(super::today())
+            .await
+            .expect("regenerate");
+
+        let prefix = store.memory.working_set().await.expect("working set");
+        assert!(
+            !prefix.contains("father:"),
+            "a closed edge is not current: {prefix}"
+        );
+        assert!(
+            !prefix.contains("also called Sabharish"),
+            "a card does not answer to its own heading: {prefix}"
+        );
+    }
 }

@@ -56,6 +56,9 @@ pub async fn generate(
 ) -> Result<Generated, WorkingSetError> {
     let ranked = index.most_used(CANDIDATES)?;
 
+    // Every card's display name, so an edge reads as "father: Vaidyanathan" rather than as a path.
+    let names = display_names(bundle).await;
+
     let mut out = String::from("# Working set\n\n");
     let mut result = Generated::default();
 
@@ -68,6 +71,7 @@ pub async fn generate(
                 Err(_) => continue,
             }
         };
+        let front = concept.front.clone();
         // The gate, not a status check. A draft cannot reach a prompt by any path.
         let Ok(active) = Active::try_from(concept, today, scope) else {
             continue;
@@ -81,6 +85,25 @@ pub async fn generate(
         }
 
         let mut block = format!("## {}\n", active.name());
+        // What this is called and who it is connected to, in the prompt for the same reason they
+        // are on the trust surface: a store that knows a nickname and cannot say it is
+        // indistinguishable from one that never heard it (S-26). Asked "what is my dad called",
+        // Loki had the name, the alias and the edge on disk and none of the three in front of it.
+        let known_as: Vec<&str> = front
+            .aliases
+            .iter()
+            .map(String::as_str)
+            .filter(|form| {
+                !form.eq_ignore_ascii_case(active.name()) && super::resolve::is_a_real_name(form)
+            })
+            .collect();
+        if !known_as.is_empty() {
+            block.push_str(&format!("- also called {}\n", known_as.join(", ")));
+        }
+        for edge in front.relations.iter().filter(|edge| edge.is_current()) {
+            let who = names.get(&edge.to).map_or(edge.to.as_str(), String::as_str);
+            block.push_str(&format!("- {}: {who}\n", edge.label));
+        }
         for claim in claims {
             block.push_str("- ");
             block.push_str(claim);
@@ -102,6 +125,20 @@ pub async fn generate(
         writer.write(WORKING_SET, &out)?;
     }
     Ok(result)
+}
+
+/// Every concept's display name, keyed by path.
+async fn display_names(bundle: &Bundle) -> std::collections::HashMap<String, String> {
+    let reader = bundle.reader().await;
+    reader
+        .concepts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|path| {
+            let name = reader.load_concept(&path).ok()?.front.name;
+            Some((path, name))
+        })
+        .collect()
 }
 
 /// Reads the working set for the frozen prefix.

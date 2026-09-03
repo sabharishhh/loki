@@ -535,8 +535,8 @@ pub unsafe extern "C" fn loki_forget_alias(
     let form = form.to_owned();
     // SAFETY: contract above.
     unsafe {
-        edit_claim(core, concept, |memory, path, _| async move {
-            memory.forget_alias(&path, &form).await
+        edit_claim(core, concept, |memory, path, today| async move {
+            memory.forget_alias(&path, &form, today).await
         })
     }
 }

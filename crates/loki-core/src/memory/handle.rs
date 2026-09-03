@@ -386,7 +386,7 @@ impl Memory {
         });
         concept.front.status = Status::Stable;
 
-        self.write_back(path, &concept, &format!("Settled by hand: {path}"))
+        self.write_back(path, &concept, &format!("Settled by hand: {path}"), today)
             .await
     }
 
@@ -431,7 +431,7 @@ impl Memory {
             by: "human:user".to_owned(),
             at: today,
         });
-        self.write_back(path, &concept, &format!("Edited by hand: {path}"))
+        self.write_back(path, &concept, &format!("Edited by hand: {path}"), today)
             .await
     }
 
@@ -460,7 +460,7 @@ impl Memory {
                 claim.replaced_by = None;
             }
         }
-        self.write_back(path, &concept, &format!("Forgotten by hand: {path}"))
+        self.write_back(path, &concept, &format!("Forgotten by hand: {path}"), today)
             .await
     }
 
@@ -597,7 +597,12 @@ impl Memory {
     ///
     /// # Errors
     /// Fails if the card cannot be read or written.
-    pub async fn forget_alias(&self, path: &str, form: &str) -> Result<(), MemoryError> {
+    pub async fn forget_alias(
+        &self,
+        path: &str,
+        form: &str,
+        today: Date,
+    ) -> Result<(), MemoryError> {
         let mut concept = {
             let reader = self.bundle.reader().await;
             reader.load_concept(path)?
@@ -610,6 +615,7 @@ impl Memory {
             path,
             &concept,
             &format!("Dropped the name {form} from {path}"),
+            today,
         )
         .await
     }
@@ -637,8 +643,21 @@ impl Memory {
                 edge.until = Some(today);
             }
         }
-        self.write_back(path, &concept, &format!("Closed {label} on {path}"))
+        self.write_back(path, &concept, &format!("Closed {label} on {path}"), today)
             .await
+    }
+
+    /// Rewrites the working set from the current files (§9.2).
+    ///
+    /// A hand edit changes what the prefix should say, and the prefix is otherwise only rebuilt by
+    /// consolidation. Without this, correcting something on the trust surface leaves the model
+    /// still reading the old version until the next session closes.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read or written.
+    pub async fn refresh_working_set(&self, today: Date) -> Result<(), MemoryError> {
+        working_set::generate(&self.bundle, &self.index, self.scope, today).await?;
+        Ok(())
     }
 
     /// Saves, commits and re-indexes. The three steps every hand edit needs, in one place.
@@ -647,6 +666,7 @@ impl Memory {
         path: &str,
         concept: &RawConcept,
         message: &str,
+        today: Date,
     ) -> Result<(), MemoryError> {
         {
             let writer = self.bundle.writer().await;
@@ -657,7 +677,10 @@ impl Memory {
             let reader = self.bundle.reader().await;
             self.index.sync(&reader)?;
         }
-        Ok(())
+        // The prefix is otherwise only rebuilt by consolidation, so a correction made on the trust
+        // surface would not reach the model until the session ended. Correcting something and
+        // watching it be repeated is the same failure as not being heard at all.
+        self.refresh_working_set(today).await
     }
 
     /// The timeline, newest first (§17.3).
