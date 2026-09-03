@@ -1,0 +1,8 @@
+# The deployment target Cargo builds against.
+#
+# Without this, the `cc` crate compiles the C in `ring` and `libgit2` against whatever SDK is
+# installed, while SwiftPM links `LokiApp` at the `platforms: [.macOS(.v26)]` floor in
+# `Package.swift`. The linker then warns once per object file, which was about two hundred lines
+# of noise burying anything real. Keep this in step with `Package.swift`.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "26.0"
