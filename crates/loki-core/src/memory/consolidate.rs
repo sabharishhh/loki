@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use jiff::civil::Date;
 
 use super::bundle::{self, Bundle, BundleError};
+use super::cardinality;
 use super::claim::{Claim, Origin};
 use super::concept::{Frontmatter, RawConcept, Status};
 use super::index::{Index, IndexError};
@@ -613,7 +614,13 @@ fn promote(concept: &mut RawConcept, path: &str, claim: &Claim, report: &mut Rep
 /// A claim with no attribute never conflicts: it cannot say what it is about, so it has no
 /// standing to displace one that can.
 fn conflicts(held: &Claim, incoming: &Claim) -> bool {
-    held.validity.is_believed() && !held.restates(incoming) && held.same_attribute_as(incoming)
+    held.validity.is_believed()
+        && !held.restates(incoming)
+        && held.same_attribute_as(incoming)
+        // Two values on a many-valued attribute are two facts, not a disagreement (S-22). A degree
+        // and a certificate are both true; a second city is not. Without this, every attribute
+        // behaved like `city` and the store quietly retired half of what it was told.
+        && cardinality::attribute_is_single_valued(&incoming.attribute)
 }
 
 /// Archives stable concepts that have aged out without being used (§9.10).

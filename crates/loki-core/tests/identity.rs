@@ -150,3 +150,151 @@ async fn reopening_does_not_seed_a_second_pair() {
     let people = reader.concepts().expect("concepts");
     assert_eq!(people.len(), 2, "{people:?}");
 }
+
+/// Cardinality, end to end (S-22). Two claims on one attribute are two facts or a correction, and
+/// which one it is depends on the property, not on the shape of the sentence.
+mod cardinality {
+    use super::{Store, today};
+    use async_trait::async_trait;
+    use loki_core::memory::claim::Origin;
+    use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
+    use loki_core::memory::index::Candidate as EntityCandidate;
+    use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
+
+    /// Emits one fact per staged line, keyed on a fragment of what was said.
+    struct Says(Vec<(&'static str, &'static str, &'static str)>);
+
+    #[async_trait]
+    impl Extractor for Says {
+        async fn extract(&self, _e: &str, text: &str) -> Result<Vec<Candidate>, ConsolidateError> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|(trigger, _, _)| text.contains(trigger))
+                .map(|(_, attribute, fact)| Candidate {
+                    surface: "Sabharish".to_owned(),
+                    kind: Kind::Person,
+                    heading: (*attribute).to_owned(),
+                    attribute: (*attribute).to_owned(),
+                    text: (*fact).to_owned(),
+                    days_ago: None,
+                    valid_from: None,
+                    origin: Origin::Stated,
+                    tags: vec![],
+                })
+                .collect())
+        }
+    }
+
+    struct FirstMatch;
+
+    #[async_trait]
+    impl Matcher for FirstMatch {
+        async fn decide(
+            &self,
+            _s: &str,
+            _c: &str,
+            candidates: &[EntityCandidate],
+        ) -> Result<Decision, ResolveError> {
+            Ok(if candidates.is_empty() {
+                Decision::New
+            } else {
+                Decision::Existing(0)
+            })
+        }
+    }
+
+    /// Runs the staged lines one session per line, which is what a person shutting the app
+    /// between thoughts actually produces, and returns what the store believes about them.
+    async fn believed(
+        label: &str,
+        staged: &[(&'static str, &'static str, &'static str)],
+    ) -> Vec<String> {
+        let store = Store::open(label).await;
+        let extractor = Says(staged.to_vec());
+        for (said, _, _) in staged {
+            store.memory.record("user", said).await.expect("record");
+            store
+                .memory
+                .close(&extractor, &FirstMatch, &Unbounded, today())
+                .await
+                .expect("close");
+        }
+        store
+            .memory
+            .knowledge(today())
+            .await
+            .expect("knowledge")
+            .entities
+            .into_iter()
+            .flat_map(|e| e.facts)
+            .map(|f| f.text)
+            .collect()
+    }
+
+    /// Probe case 10. Sabharish's own case: a certificate on top of a degree, both true.
+    #[tokio::test]
+    async fn a_certificate_does_not_retire_a_degree() {
+        let facts = believed(
+            "add",
+            &[
+                (
+                    "degree",
+                    "education",
+                    "Sabharish has a degree in computer science",
+                ),
+                (
+                    "certified",
+                    "education",
+                    "Sabharish is a certified machine learning engineer",
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(facts.len(), 2, "{facts:?}");
+    }
+
+    /// Probe case 11. The same shape, and the opposite right answer.
+    #[tokio::test]
+    async fn moving_house_replaces_the_old_address() {
+        let facts = believed(
+            "replace",
+            &[
+                ("Chennai", "city", "Sabharish lives in Chennai"),
+                ("Bangalore", "city", "Sabharish lives in Bangalore"),
+            ],
+        )
+        .await;
+        assert_eq!(facts, ["Sabharish lives in Bangalore"], "{facts:?}");
+    }
+
+    /// Probe case 12. Two clients is a consultant, not a contradiction, which is why `employer`
+    /// is many-valued while the relation of the same name is not.
+    #[tokio::test]
+    async fn a_consultant_keeps_both_clients() {
+        let facts = believed(
+            "consult",
+            &[
+                ("Acme", "employer", "Sabharish consults for Acme"),
+                ("Globex", "employer", "Sabharish consults for Globex"),
+            ],
+        )
+        .await;
+        assert_eq!(facts.len(), 2, "{facts:?}");
+    }
+
+    /// The case that keeps the list from being empty. Two ship dates cannot both be true, and
+    /// leaving both live is the PrefEval failure §9.5 exists to prevent.
+    #[tokio::test]
+    async fn two_ship_dates_leave_one() {
+        let facts = believed(
+            "ships",
+            &[
+                ("the 30th", "deadline", "Atlas ships on the 30th"),
+                ("the 20th", "deadline", "Atlas ships on the 20th"),
+            ],
+        )
+        .await;
+        assert_eq!(facts, ["Atlas ships on the 20th"], "{facts:?}");
+    }
+}

@@ -196,18 +196,20 @@ async fn a_correction_supersedes_and_records_how_long_it_was_wrong() {
     let extractor = Scripted::new(vec![
         (
             "episodes/a.md".to_string(),
-            vec![candidate(
+            vec![about(
+                "city",
                 "Sabharish",
-                "on the design team",
+                "lives in Chennai",
                 date(2026, 3, 1),
                 Origin::Stated,
             )],
         ),
         (
             "episodes/b.md".to_string(),
-            vec![candidate(
+            vec![about(
+                "city",
                 "Sabharish",
-                "on the infra team",
+                "lives in Bangalore",
                 date(2026, 7, 15),
                 Origin::Stated,
             )],
@@ -236,10 +238,10 @@ async fn a_correction_supersedes_and_records_how_long_it_was_wrong() {
     let concept = store.concept_at("people/sabharish.md").await;
     let old = concept
         .claims()
-        .find(|c| c.text == "on the design team")
+        .find(|c| c.text == "lives in Chennai")
         .expect("held claim");
     assert!(!old.validity.is_believed());
-    assert_eq!(old.replaced_by.as_deref(), Some("on the infra team"));
+    assert_eq!(old.replaced_by.as_deref(), Some("lives in Bangalore"));
     assert_eq!(old.validity.wrong_for_days(), Some(45));
 }
 
@@ -250,18 +252,20 @@ async fn a_conflict_with_no_clear_winner_is_surfaced_not_guessed() {
     let extractor = Scripted::new(vec![
         (
             "episodes/a.md".to_string(),
-            vec![candidate(
+            vec![about(
+                "city",
                 "Meera",
-                "at Acme",
+                "lives in Chennai",
                 date(2026, 3, 1),
                 Origin::Stated,
             )],
         ),
         (
             "episodes/b.md".to_string(),
-            vec![candidate(
+            vec![about(
+                "city",
                 "Meera",
-                "at Globex",
+                "lives in Bangalore",
                 date(2026, 3, 1),
                 Origin::Stated,
             )],
@@ -1263,7 +1267,7 @@ async fn a_pass_that_would_retire_most_of_the_store_is_refused() {
     let store = Store::new("bounded-loss", &["episodes/a.md", "episodes/b.md"]).await;
 
     // Six facts about one person, each about a different property.
-    let settled: Vec<Candidate> = ["name", "city", "employer", "role", "education", "pronouns"]
+    let settled: Vec<Candidate> = ["name", "city", "age", "birthday", "timezone", "pronouns"]
         .iter()
         .map(|attribute| {
             about(
@@ -1277,7 +1281,7 @@ async fn a_pass_that_would_retire_most_of_the_store_is_refused() {
         .collect();
 
     // Then an extraction that contradicts every one of them. A model having a bad day.
-    let wrecking: Vec<Candidate> = ["name", "city", "employer", "role", "education", "pronouns"]
+    let wrecking: Vec<Candidate> = ["name", "city", "age", "birthday", "timezone", "pronouns"]
         .iter()
         .map(|attribute| {
             about(

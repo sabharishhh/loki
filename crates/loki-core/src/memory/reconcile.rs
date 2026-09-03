@@ -175,6 +175,12 @@ pub fn is_shadowed(concept: &RawConcept, ordinal: u32) -> bool {
     if !claim.validity.is_believed() || claim.attribute.is_empty() {
         return false;
     }
+    // Only a single-valued attribute can be overridden (S-22). On a many-valued one the two claims
+    // are both true and both belong in the prompt: the second brother, the second client, the
+    // certificate on top of the degree.
+    if !super::cardinality::attribute_is_single_valued(&claim.attribute) {
+        return false;
+    }
     concept
         .claims()
         .skip(ordinal as usize + 1)

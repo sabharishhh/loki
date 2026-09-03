@@ -15,9 +15,16 @@
 
 /// Attributes where a later claim replaces an earlier one.
 ///
-/// Deliberately short and deliberately boring. Every entry is a property of a person that has
-/// exactly one value at a time by the nature of the thing, not by how often it changes.
-const SINGLE_VALUED_ATTRIBUTES: [&str; 7] = [
+/// Deliberately short and deliberately boring. Every entry holds exactly one value at a time by
+/// the nature of the thing, not by how often it changes: a person lives in one city, a release
+/// ships on one date.
+///
+/// **The list grows with evidence, never with a hunch.** Adding a key here means a later claim can
+/// retire an earlier one, which §21.2 names as the more damaging error, so each entry should come
+/// with the case that showed it was needed. `deadline` is here because "ships on the 30th, no the
+/// 20th, actually the 30th" otherwise leaves two live answers, which is the PrefEval failure §9.5
+/// exists to prevent. `employer` is deliberately absent, because a consultant has two.
+const SINGLE_VALUED_ATTRIBUTES: [&str; 8] = [
     "name",
     "birthday",
     "city",
@@ -25,6 +32,7 @@ const SINGLE_VALUED_ATTRIBUTES: [&str; 7] = [
     "pronouns",
     "age",
     "preferred_name",
+    "deadline",
 ];
 
 /// Relation labels where one live edge is the whole truth.
@@ -61,6 +69,13 @@ mod tests {
     fn employer_is_many_as_an_attribute_and_one_as_a_relation() {
         assert!(!attribute_is_single_valued("employer"));
         assert!(relation_is_single_valued("employer"));
+    }
+
+    /// Two values that cannot both be true are not two facts. Found by `other_people.rs`, which
+    /// says a person changing their mind mid-sentence must be left with one answer.
+    #[test]
+    fn a_ship_date_is_one_date() {
+        assert!(attribute_is_single_valued("deadline"));
     }
 
     /// Anything nobody listed accumulates. This is the direction §21.2 asks for, and it is what
