@@ -505,12 +505,7 @@ fn merge(
     // twice. Both used to land as new claims, and the reworded ones then read as corrections to
     // something that had not changed.
     if held_restatements(concept, &claim) > 0 {
-        if let Some(held) = concept
-            .claims_mut()
-            .find(|held| held.validity.is_believed() && held.restates(&claim))
-        {
-            held.reinforced_by(&claim);
-        }
+        reaffirm(concept, &claim);
         promote(concept, path, &claim, report);
         return;
     }
@@ -551,6 +546,31 @@ fn merge(
         outcome,
         settings.today,
     );
+}
+
+/// Folds a restatement into the claim it repeats, and moves it to the end of its section.
+///
+/// **The move is the point.** Rule 4 shadows by file order, so file order has to mean "order of
+/// most recent assertion" rather than order of first appearance. Without it, someone saying "the
+/// 30th, no the 20th, actually the 30th" ends up with the 20th: the third statement is absorbed by
+/// the copy of the first, which is sitting behind the second and stays shadowed.
+///
+/// Saying a thing again is the ordinary way a person insists, and the store has to hear the
+/// insistence rather than only the first time they said it.
+fn reaffirm(concept: &mut RawConcept, claim: &Claim) {
+    for section in &mut concept.sections {
+        let Some(at) = section
+            .claims
+            .iter()
+            .position(|held| held.validity.is_believed() && held.restates(claim))
+        else {
+            continue;
+        };
+        let mut held = section.claims.remove(at);
+        held.reinforced_by(claim);
+        section.claims.push(held);
+        return;
+    }
 }
 
 /// How many believed claims already say what this one says.
