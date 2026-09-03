@@ -76,6 +76,49 @@ impl ConceptId {
     }
 }
 
+/// One claim inside one concept. Its path plus its position (§17.1).
+///
+/// Composite rather than a counter, because a claim has no id of its own: it is a line in a file,
+/// and §10.6's recall log addresses it the same way `record_use` already does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ClaimId {
+    pub concept: ConceptId,
+    pub ordinal: u32,
+}
+
+impl ClaimId {
+    #[must_use]
+    pub const fn new(concept: ConceptId, ordinal: u32) -> Self {
+        Self { concept, ordinal }
+    }
+}
+
+impl std::fmt::Display for ClaimId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.concept.as_str(), self.ordinal)
+    }
+}
+
+/// A digest of the query a retrieval ran, so §10.6 can count distinct questions.
+///
+/// The digest, never the text. A log of what someone asked is a different and more sensitive
+/// record than a log of what was returned.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QueryHash(String);
+
+impl QueryHash {
+    #[must_use]
+    pub fn new(digest: impl Into<String>) -> Self {
+        Self(digest.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The memory bundle as it stood at a point in time.
 ///
 /// A git revision of the bundle. A checkpoint records one so a resume knows what memory looked

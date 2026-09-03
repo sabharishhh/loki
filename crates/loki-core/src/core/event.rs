@@ -5,11 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ids::{ActionId, ConceptId, ContentHash, ScopeId, StepId, TaskId};
+use super::ids::{ActionId, ClaimId, ConceptId, ContentHash, QueryHash, ScopeId, StepId, TaskId};
 use super::payload::{Args, PartialOutput, ToolOutput};
 use super::vocab::{
-    ActionKind, BlockReason, CallPath, Cents, CostModel, Locality, ModelRole, ScopeKind,
-    TaskStatus, Tier, WriteOp,
+    ActionKind, BlockReason, CallPath, Cents, CostModel, Lane, Locality, ModelRole, Rung,
+    ScopeKind, TaskStatus, Tier, WriteOp,
 };
 
 /// Something the system did.
@@ -58,6 +58,9 @@ pub enum Event {
         task: TaskId,
         url: String,
         hash: ContentHash,
+        /// Which step of §12.2's ladder answered. §21.5 scores the distribution, and nothing
+        /// emits this until Phase 5: adding the field later is a Ring 1 change made twice.
+        rung: Rung,
         cost: CostModel,
     },
     ActionJournaled {
@@ -69,7 +72,11 @@ pub enum Event {
         action: ActionId,
     },
     MemoryRecalled {
-        concept_ids: Vec<ConceptId>,
+        /// Claims, not concepts. §10.6's log counts a claim, and a concept is too coarse to say
+        /// which line answered.
+        claim_ids: Vec<ClaimId>,
+        lane: Lane,
+        query_hash: QueryHash,
     },
     MemoryWritten {
         op: WriteOp,
@@ -168,7 +175,9 @@ mod tests {
                 ms: 1240,
             },
             Event::MemoryRecalled {
-                concept_ids: vec![ConceptId::new("people/meera.md")],
+                claim_ids: vec![ClaimId::new(ConceptId::new("people/meera.md"), 0)],
+                lane: Lane::Automatic,
+                query_hash: QueryHash::new("0f1e2d3c4b5a6978"),
             },
             Event::MemoryWritten {
                 op: WriteOp::Invalidated,
@@ -187,6 +196,7 @@ mod tests {
                 },
             },
             Event::Fetched {
+                rung: Rung::Direct,
                 task: TaskId::new(0),
                 url: "https://example.com".into(),
                 hash: ContentHash::new("deadbeef"),

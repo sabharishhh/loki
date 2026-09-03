@@ -19,7 +19,7 @@ pub fn plain(event: &Event) -> Option<String> {
         },
         Event::Searched { query, .. } => format!("Searching for {query}."),
         Event::Fetched { url, .. } => format!("Reading {url}."),
-        Event::MemoryRecalled { concept_ids } => match concept_ids.len() {
+        Event::MemoryRecalled { claim_ids, .. } => match claim_ids.len() {
             0 => return None,
             1 => "Recalling one thing I know.".into(),
             n => format!("Recalling {n} things I know."),
@@ -139,12 +139,18 @@ pub fn trace(event: &Event) -> String {
             action.get()
         ),
         Event::ActionUndone { action } => format!("ActionUndone action={}", action.get()),
-        Event::MemoryRecalled { concept_ids } => {
-            let ids: Vec<&str> = concept_ids
-                .iter()
-                .map(super::ids::ConceptId::as_str)
-                .collect();
-            format!("MemoryRecalled {}", ids.join(", "))
+        Event::MemoryRecalled {
+            claim_ids,
+            lane,
+            query_hash,
+        } => {
+            let ids: Vec<String> = claim_ids.iter().map(ToString::to_string).collect();
+            format!(
+                "MemoryRecalled lane={} query={} {}",
+                lane.name(),
+                query_hash.as_str(),
+                ids.join(", ")
+            )
         }
         Event::MemoryWritten { op, concept_id } => {
             format!("MemoryWritten {op:?} {}", concept_id.as_str())

@@ -15,11 +15,11 @@ use tokio_util::sync::CancellationToken;
 use super::budget::{Budget, Verdict};
 use super::checkpoint::Checkpoint;
 use super::event::Event;
-use super::ids::{IdGen, TaskId};
+use super::ids::{ClaimId, ConceptId, IdGen, QueryHash, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::temporal;
-use super::vocab::{BlockReason, Cents, ModelRole, ScopeKind, TaskStatus};
+use super::vocab::{BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory};
 use crate::ports::clock::Clock;
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
@@ -289,13 +289,19 @@ impl Loop {
             } else {
                 memory.mark_used(&recalled)?;
                 // One row per returned claim, for §10.6's three counted signals. Lane 1, because
-                // this is automatic recall; lane 2 will record its own.
-                memory.note_recall(
-                    &recalled,
-                    &message,
-                    today,
-                    crate::memory::index::Lane::Automatic,
-                )?;
+                // this is automatic recall; lane 2 records its own.
+                memory.note_recall(&recalled, &message, today, Lane::Automatic)?;
+                // Principle 7: nothing acts outside the event stream, and a retrieval is an act.
+                // The log and the event carry the same digest, so the two can be lined up.
+                self.events.emit(&Event::MemoryRecalled {
+                    claim_ids: recalled
+                        .iter()
+                        .filter(|r| r.layer == crate::memory::index::Layer::Consolidated)
+                        .map(|r| ClaimId::new(ConceptId::new(&r.path), r.ordinal))
+                        .collect(),
+                    lane: Lane::Automatic,
+                    query_hash: QueryHash::new(crate::memory::index::query_hash(&message)),
+                });
                 // Marked in the buffer so the next pass does not read Loki's own words back as a
                 // fresh statement from the user (§9.8).
                 memory.note_recalled(&recalled).await?;

@@ -655,3 +655,25 @@ async fn the_recall_counts_survive_in_the_file() {
         "the count is written into the record, not only the index: {text}"
     );
 }
+
+/// Principle 7: nothing acts outside the event stream, and a retrieval is an act. §10.6's log is
+/// a consumer of this event, so the two have to carry the same digest or they cannot be lined up.
+#[test]
+fn one_query_hashes_the_same_way_everywhere() {
+    use loki_core::memory::index::query_hash;
+
+    assert_eq!(
+        query_hash("What is my name?"),
+        query_hash("what is my name?")
+    );
+    assert_eq!(
+        query_hash(" what is my name? "),
+        query_hash("what is my name?")
+    );
+    assert_ne!(query_hash("what is my name"), query_hash("where do I live"));
+    assert_eq!(
+        query_hash("x").len(),
+        16,
+        "fixed width, so a log column is bounded"
+    );
+}

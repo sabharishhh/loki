@@ -42,6 +42,46 @@ pub enum CallPath {
     Script,
 }
 
+/// Which lane a retrieval ran on (§10.1, §10.8).
+///
+/// Counted separately in §10.6's log because they are different evidence: lane 1 chose the claim
+/// out of a ranked corpus, and on lane 2 the agent went looking for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lane {
+    /// Automatic recall, on every turn, no model call.
+    Automatic,
+    /// The agent searching memory directly, under a budget.
+    Deliberate,
+}
+
+impl Lane {
+    /// The word written into the recall log.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Deliberate => "deliberate",
+        }
+    }
+}
+
+/// Which step of §12.2's ladder answered a fetch.
+///
+/// Recorded on every fetch because §12.9 requires it and §21.5 scores the distribution: the share
+/// of fetches each rung answers is the only honest early warning that the free path is failing.
+/// Nothing emits it until Phase 5, and adding the field afterwards is a Ring 1 change made twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rung {
+    /// `rquest`. TLS and HTTP2 parity, no browser.
+    Direct,
+    /// `spider`. HTTP first, a browser only for pages that genuinely need one.
+    Rendered,
+    /// A paid per-URL fallback. Designed, not shipped (§12.4).
+    Paid,
+}
+
 /// Where a model runs. A capability, not a setting.
 ///
 /// The prompt gate reads this to decide whether a `private` claim is allowed into a request.

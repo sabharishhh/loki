@@ -206,24 +206,7 @@ impl Recalled {
     }
 }
 
-/// Which lane returned a claim (§10.6). Counted separately because they are different evidence:
-/// lane 1 chose it, and on lane 2 the agent went looking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lane {
-    /// Automatic recall, on every turn (§10.1).
-    Automatic,
-    /// The agent searching memory directly (§10.8).
-    Deliberate,
-}
-
-impl Lane {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::Deliberate => "deliberate",
-        }
-    }
-}
+pub use crate::core::vocab::Lane;
 
 /// Names one claim inside one concept.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1465,7 +1448,10 @@ fn file_stamp(root: &Path, path: &str) -> i64 {
 ///
 /// Not a cryptographic hash and not meant to be: it groups repeats of one question, and the raw
 /// text is not kept because a query log is a record of what someone asked.
-fn query_hash(query: &str) -> String {
+///
+/// Public so the `MemoryRecalled` event and the recall log carry the same digest. Two hashes for
+/// one query would make the event stream and the log impossible to line up.
+pub fn query_hash(query: &str) -> String {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     query.trim().to_lowercase().hash(&mut hasher);
