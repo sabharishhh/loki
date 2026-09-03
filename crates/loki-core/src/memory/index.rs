@@ -241,7 +241,23 @@ pub struct Candidate {
     pub path: String,
     pub name: String,
     pub why: Blocking,
+    /// `people`, `projects` or `preferences`, from the directory the file sits in.
+    ///
+    /// Evidence about identity, never a partition (§9.4). A person and a project sharing a name is
+    /// weak evidence they are different things, not proof, and filtering on it would make the
+    /// same entity extracted twice under two kinds into two files that can never meet.
+    pub kind: String,
+    /// A few things already believed about this candidate, for the match call.
+    ///
+    /// Without these the matcher is asked whether two identical strings are the same person, which
+    /// has no answer. Given "on the design team" against "runs infra" it has one.
+    pub facts: Vec<String>,
 }
+
+/// Believed claims shown to the matcher per candidate.
+///
+/// Enough to tell two people apart and few enough that five candidates stay a bounded prompt.
+const FACTS_PER_CANDIDATE: usize = 3;
 
 /// Adds matching turns from the live session to the results.
 ///
@@ -316,7 +332,15 @@ fn promote(best: &mut HashMap<String, Candidate>, path: String, name: String, wh
                 c.why = why;
             }
         })
-        .or_insert(Candidate { path, name, why });
+        .or_insert_with(|| Candidate {
+            kind: path
+                .split_once('/')
+                .map_or_else(String::new, |(dir, _)| dir.to_owned()),
+            path,
+            name,
+            why,
+            facts: Vec::new(),
+        });
 }
 
 /// Uses recorded since the last flush, for consolidation to fold back into the files.
@@ -1167,6 +1191,25 @@ impl Index {
                 .then_with(|| a.path.cmp(&b.path))
         });
         out.truncate(limit);
+
+        // Only for what survived the cap, so the cost is a handful of rows rather than a join
+        // across the store.
+        let mut facts = db
+            .prepare(
+                "SELECT cl.text FROM claim cl JOIN concept c ON c.id = cl.concept
+                 WHERE c.path = ?1 AND cl.unlearned IS NULL AND cl.shadowed = 0
+                 ORDER BY cl.ordinal LIMIT ?2",
+            )
+            .map_err(IndexError::Read)?;
+        for candidate in &mut out {
+            candidate.facts = facts
+                .query_map(params![candidate.path, FACTS_PER_CANDIDATE], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(IndexError::Read)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(IndexError::Read)?;
+        }
         Ok(out)
     }
 

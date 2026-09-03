@@ -125,6 +125,12 @@ pub async fn resolve(
     if let Some((whose, _)) = descriptor(trimmed) {
         candidates.retain(|c| !c.name.eq_ignore_ascii_case(whose));
     }
+    // Kind as evidence, never as a filter (§9.4). A candidate of the same kind is a likelier match
+    // and goes first; one of a different kind still gets shown, because the same entity extracted
+    // once as a person and once as a project must be able to meet. §12's fetched pages need this
+    // more than conversation does: a page about Apple must not merge with an allergy to apples,
+    // and it is the matcher, seeing both kinds and both sets of facts, that can tell.
+    candidates.sort_by_key(|c| u8::from(c.kind != kind.directory()));
     if candidates.is_empty() {
         return Ok(fresh(trimmed, kind));
     }
@@ -339,13 +345,23 @@ impl<'a> ModelMatcher<'a> {
 const INSTRUCTIONS: &str = "\
 You decide which known entity a statement is about.
 
+Each entity is listed with its kind and with a few things already believed about it. Read those
+before answering: the name alone cannot tell two people apart, and the facts usually can.
+
 Answer with one line and nothing else:
   MATCH <number>   the statement is about that numbered entity
   NEW              the statement is about none of them
   TIE <a> <b>      two or more are equally plausible and you cannot tell them apart
 
-Prefer NEW over a guess. Two different people can share a name; if the statement gives you no way
-to tell which one it is, answer TIE.";
+Prefer NEW over a guess. A new file is a duplicate somebody can merge in one tap; a wrong match
+writes a fact onto the wrong person, and nothing ever surfaces it.
+
+- If a known entity's facts contradict the statement, it is a different entity. Someone on the
+  design team is not the person who runs infra, whatever they are both called.
+- A different kind is evidence, not proof. The company Apple and an allergy to apples are
+  different things; a person also filed as a project is one thing filed twice.
+- Two entities that both fit and cannot be told apart are a TIE. That is a real answer, and it is
+  the right one for two people who share a name.";
 
 #[async_trait]
 impl Matcher for ModelMatcher<'_> {
@@ -360,7 +376,17 @@ impl Matcher for ModelMatcher<'_> {
         let _ = writeln!(prompt, "Referring to: {surface}\n");
         let _ = writeln!(prompt, "Known entities:");
         for (at, candidate) in candidates.iter().enumerate() {
-            let _ = writeln!(prompt, "  {at}. {} ({})", candidate.name, candidate.path);
+            let _ = writeln!(
+                prompt,
+                "  {at}. {} [{}] ({})",
+                candidate.name, candidate.kind, candidate.path
+            );
+            for fact in &candidate.facts {
+                let _ = writeln!(prompt, "       - {fact}");
+            }
+            if candidate.facts.is_empty() {
+                let _ = writeln!(prompt, "       - nothing known yet");
+            }
         }
 
         let request = Request {

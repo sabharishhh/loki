@@ -664,3 +664,158 @@ mod relations {
         assert!(owner.front.related("sister").is_some());
     }
 }
+
+/// Merge safety. The opposite error from a split, quieter and more damaging: a split leaves two
+/// visible rows and a merge silently hides a true fact (§21.2).
+mod merging {
+    use super::{Store, today};
+    use async_trait::async_trait;
+    use loki_core::memory::claim::Origin;
+    use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
+    use loki_core::memory::index::Candidate as EntityCandidate;
+    use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
+
+    struct Says(&'static str, &'static str, Kind);
+
+    #[async_trait]
+    impl Extractor for Says {
+        async fn extract(&self, _e: &str, text: &str) -> Result<Vec<Candidate>, ConsolidateError> {
+            if !text.contains(self.1) {
+                return Ok(vec![]);
+            }
+            Ok(vec![Candidate {
+                surface: self.0.to_owned(),
+                kind: self.2,
+                heading: "note".to_owned(),
+                attribute: "note".to_owned(),
+                text: self.1.to_owned(),
+                days_ago: None,
+                valid_from: None,
+                origin: Origin::Stated,
+                tags: vec![],
+                aliases: vec![],
+                relation: None,
+            }])
+        }
+    }
+
+    /// Records what the matcher was shown, and always answers NEW.
+    struct Watcher(std::sync::Mutex<Vec<EntityCandidate>>);
+
+    #[async_trait]
+    impl Matcher for Watcher {
+        async fn decide(
+            &self,
+            _s: &str,
+            _c: &str,
+            candidates: &[EntityCandidate],
+        ) -> Result<Decision, ResolveError> {
+            self.0
+                .lock()
+                .expect("lock")
+                .extend(candidates.iter().cloned());
+            Ok(Decision::New)
+        }
+    }
+
+    /// Probe case 3, and the worst result in the whole probe. Two Meeras merged because the
+    /// matcher was asked whether two identical strings were the same person, which has no answer.
+    /// It sees what is already believed about each now.
+    #[tokio::test]
+    async fn the_matcher_is_shown_what_it_needs_to_tell_two_people_apart() {
+        let store = Store::open("two-meeras").await;
+        let watcher = Watcher(std::sync::Mutex::new(Vec::new()));
+
+        store
+            .memory
+            .record("user", "Meera is on the design team")
+            .await
+            .expect("record");
+        store
+            .memory
+            .close(
+                &Says("Meera", "Meera is on the design team", Kind::Person),
+                &watcher,
+                &Unbounded,
+                today(),
+            )
+            .await
+            .expect("close");
+
+        store
+            .memory
+            .record("user", "the other Meera runs infra")
+            .await
+            .expect("record");
+        store
+            .memory
+            .close(
+                &Says("Meera", "the other Meera runs infra", Kind::Person),
+                &watcher,
+                &Unbounded,
+                today(),
+            )
+            .await
+            .expect("close");
+
+        let seen = watcher.0.lock().expect("lock");
+        let meera = seen
+            .iter()
+            .find(|c| c.path == "people/meera.md")
+            .expect("the first Meera was offered as a candidate");
+        assert!(
+            meera.facts.iter().any(|f| f.contains("design team")),
+            "the matcher has to see the facts, not just the name: {:?}",
+            meera.facts
+        );
+        assert_eq!(meera.kind, "people");
+    }
+
+    /// Probe case 16. Apple the company and apple the fruit. Kind is evidence and not a filter, so
+    /// the two are still offered to each other rather than being partitioned apart, which is what
+    /// §12's fetched pages will need when one of them is written from outside.
+    #[tokio::test]
+    async fn a_different_kind_is_evidence_and_still_offered() {
+        let store = Store::open("apple").await;
+        let watcher = Watcher(std::sync::Mutex::new(Vec::new()));
+
+        store
+            .memory
+            .record("user", "Apple announced a new laptop")
+            .await
+            .expect("record");
+        store
+            .memory
+            .close(
+                &Says("Apple", "Apple announced a new laptop", Kind::Project),
+                &watcher,
+                &Unbounded,
+                today(),
+            )
+            .await
+            .expect("close");
+
+        store
+            .memory
+            .record("user", "I am allergic to apple")
+            .await
+            .expect("record");
+        store
+            .memory
+            .close(
+                &Says("apple", "I am allergic to apple", Kind::Preference),
+                &watcher,
+                &Unbounded,
+                today(),
+            )
+            .await
+            .expect("close");
+
+        let seen = watcher.0.lock().expect("lock");
+        assert!(
+            seen.iter().any(|c| c.path == "projects/apple.md"),
+            "a different kind must still reach the matcher: {:?}",
+            seen.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+    }
+}
