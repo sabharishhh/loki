@@ -17,6 +17,7 @@ use super::index::{Index, IndexError, Lane, Layer, Query, Recalled, Session, Use
 use super::knowledge;
 use super::reconcile::Reference;
 use super::resolve::Matcher;
+use super::runtime;
 use super::timeline;
 use super::working_set::{self, WorkingSetError};
 use crate::core::temporal;
@@ -250,6 +251,30 @@ impl Memory {
         }
         let writer = self.bundle.writer().await;
         Ok(writer.append(bundle::CURRENT, &lines.concat())?)
+    }
+
+    /// Lane 2: the agent searching memory directly, when lane 1 was not enough (§10.8).
+    ///
+    /// The caller decides whether to call this, using [`runtime::should_escalate`] on the absolute
+    /// score lane 1 already returned. Nothing here decides, because a model deciding whether to
+    /// search is a step it will sometimes skip.
+    ///
+    /// # Errors
+    /// Fails if the bundle or index cannot be reached.
+    pub async fn search_deeply(
+        &self,
+        question: &str,
+        navigator: &dyn runtime::Navigator,
+        today: Date,
+    ) -> Result<runtime::Found, runtime::RuntimeError> {
+        let rt = runtime::Runtime::new(&self.bundle, &self.index, self.scope);
+        runtime::search(question, &rt, navigator, today).await
+    }
+
+    /// The memory runtime, for a caller that wants one primitive rather than a whole search.
+    #[must_use]
+    pub const fn runtime(&self) -> runtime::Runtime<'_> {
+        runtime::Runtime::new(&self.bundle, &self.index, self.scope)
     }
 
     /// Records what retrieval returned, for §10.6's three counted signals.

@@ -13,5 +13,6 @@ pub mod index;
 pub mod knowledge;
 pub mod reconcile;
 pub mod resolve;
+pub mod runtime;
 pub mod timeline;
 pub mod working_set;

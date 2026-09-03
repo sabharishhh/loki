@@ -677,3 +677,211 @@ fn one_query_hashes_the_same_way_everywhere() {
         "fixed width, so a log column is bounded"
     );
 }
+
+/// §10.8's escalation, end to end. Lane 2 fires when lane 1 was not enough and stays out of the
+/// way when it was, and a miss is reported as a miss.
+mod lane_two {
+    use super::{App, today};
+    use async_trait::async_trait;
+    use loki_core::memory::index::{Query, Visibility};
+    use loki_core::memory::runtime::{Found, Navigator, Op, RuntimeError, should_escalate};
+
+    /// Walks §10.8's own route: start from the catalog, narrow with a ranked search, stop.
+    struct Route {
+        steps: std::sync::Mutex<Vec<Op>>,
+    }
+
+    impl Route {
+        fn to(question: &str) -> Self {
+            Self {
+                steps: std::sync::Mutex::new(vec![
+                    Op::Catalog,
+                    Op::Search {
+                        query: question.to_owned(),
+                    },
+                ]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Navigator for Route {
+        async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+            let mut steps = self.steps.lock().expect("lock");
+            Ok(if steps.is_empty() {
+                None
+            } else {
+                Some(steps.remove(0))
+            })
+        }
+    }
+
+    /// A navigator that never stops, for checking the budget actually bounds the loop.
+    struct Endless;
+
+    #[async_trait]
+    impl Navigator for Endless {
+        async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+            Ok(Some(Op::Ls {
+                dir: "nowhere".to_owned(),
+            }))
+        }
+    }
+
+    /// The trigger is two conditions and a threshold, and no model is asked.
+    #[tokio::test]
+    async fn a_question_lane_one_answered_does_not_escalate() {
+        let app = App::open("no-escalation").await;
+        app.say("my name is Sabharish").await;
+        app.close().await;
+
+        let best = app
+            .memory
+            .index()
+            .recall(&Query::prefetch(
+                "what is my name",
+                loki_core::memory::gate::TierScope::normal(loki_core::core::vocab::Locality::Cloud),
+                today(),
+                5,
+            ))
+            .expect("recall")
+            .first()
+            .map(|hit| hit.score.value());
+
+        assert!(best.is_some(), "lane 1 found it");
+        assert!(
+            !should_escalate("what is my name", best),
+            "a good hit means no second round trip: {best:?}"
+        );
+    }
+
+    /// The case B-32 was about: a question about the past that lane 1 cannot answer.
+    #[tokio::test]
+    async fn a_question_lane_one_missed_escalates_and_lane_two_finds_it() {
+        let app = App::open("escalation").await;
+        app.say("I did computer science").await;
+        app.close().await;
+
+        // Keyword recall cannot bridge "study" to "graduate", so lane 1 comes back empty.
+        let best = app
+            .memory
+            .index()
+            .recall(&Query::prefetch(
+                "what did I study",
+                loki_core::memory::gate::TierScope::normal(loki_core::core::vocab::Locality::Cloud),
+                today(),
+                5,
+            ))
+            .expect("recall")
+            .first()
+            .map(|hit| hit.score.value());
+        assert!(best.is_none(), "lane 1 has nothing: {best:?}");
+        assert!(should_escalate("what did I study", best));
+
+        // Lane 2 goes looking with a query the store can actually match.
+        let found = app
+            .memory
+            .search_deeply("computer science", &Route::to("computer science"), today())
+            .await
+            .expect("lane 2");
+        assert!(
+            found.render().contains("computer science"),
+            "{}",
+            found.render()
+        );
+        assert!(found.searched <= 8, "the budget holds: {}", found.searched);
+    }
+
+    /// §10.8's honest exhaustion, applied inward.
+    #[tokio::test]
+    async fn a_lane_two_miss_is_reported_as_a_miss() {
+        let app = App::open("lane2-miss").await;
+        app.say("my name is Sabharish").await;
+        app.close().await;
+
+        let found = app
+            .memory
+            .search_deeply(
+                "my sister's phone number",
+                &Route::to("sister phone number"),
+                today(),
+            )
+            .await
+            .expect("lane 2");
+
+        // The catalog is never empty once anything is stored, so the honest answer here is that
+        // it looked and what it found does not answer the question.
+        assert!(
+            !found.render().contains("phone"),
+            "nothing was invented: {}",
+            found.render()
+        );
+    }
+
+    /// The budget bounds the loop even when the navigator will not stop.
+    #[tokio::test]
+    async fn the_search_budget_stops_a_runaway() {
+        let app = App::open("budget").await;
+        app.say("my name is Sabharish").await;
+        app.close().await;
+
+        let found = app
+            .memory
+            .search_deeply("anything", &Endless, today())
+            .await
+            .expect("lane 2");
+
+        assert_eq!(found.searched, 8, "§10.5's hard budget of eight");
+        assert!(
+            found.out_of_budget,
+            "and it says so rather than looking empty"
+        );
+        assert!(found.render().contains("ran out of searches"));
+    }
+
+    /// §10.6: a candidate is searchable on lane 2 and never prompt-eligible.
+    #[tokio::test]
+    async fn lane_two_reaches_what_lane_one_may_not() {
+        let app = App::open("lane2-candidates").await;
+        app.say("keep it brief").await;
+        app.close().await;
+
+        let prompt = app.recall("short replies");
+        assert!(
+            prompt.is_empty(),
+            "a guess is not prompt-eligible: {prompt:?}"
+        );
+
+        let hits = app
+            .memory
+            .index()
+            .recall(&Query {
+                visibility: Visibility::Everything,
+                ..Query::prefetch(
+                    "short replies",
+                    loki_core::memory::gate::TierScope::normal(
+                        loki_core::core::vocab::Locality::Cloud,
+                    ),
+                    today(),
+                    5,
+                )
+            })
+            .expect("recall");
+        assert!(
+            hits.iter().any(|h| h.text.contains("short replies")),
+            "and lane 2 can still find it: {hits:?}"
+        );
+    }
+
+    /// A found result and an empty one are different answers, not the same answer twice.
+    #[test]
+    fn the_three_outcomes_read_differently() {
+        let found = Found {
+            lines: vec!["people/sabharish.md#0: The user's name is Sabharish".to_owned()],
+            searched: 2,
+            out_of_budget: false,
+        };
+        assert!(found.render().contains("found"));
+        assert!(!Found::default().render().contains("found:"));
+    }
+}
