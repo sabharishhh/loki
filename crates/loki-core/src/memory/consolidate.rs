@@ -22,7 +22,7 @@ use jiff::civil::Date;
 use super::bundle::{self, Bundle, BundleError};
 use super::cardinality;
 use super::claim::{Claim, Origin};
-use super::concept::{Frontmatter, RawConcept, Status};
+use super::concept::{Frontmatter, Label, RawConcept, Status};
 use super::index::{Index, IndexError};
 use super::reconcile::{self, Precedence, Promotion, Reference};
 use super::resolve::{self, Kind, Matcher, Resolution, ResolveError};
@@ -83,6 +83,28 @@ pub struct Candidate {
     /// writes `connector`.
     pub origin: Origin,
     pub tags: Vec<String>,
+    /// Other names for the entity that this same sentence gave: a nickname, a preferred name, a
+    /// surname the first mention did not carry.
+    ///
+    /// Separate from `surface`, which is how the sentence referred to the entity. "My father
+    /// Vaidyanathan prefers to be called Ashok" refers to him one way and names him two others,
+    /// and without this the third form is unfindable.
+    pub aliases: Vec<String>,
+    /// An edge this sentence asserts: this entity is the `label` of `of` (§9.4, S-21).
+    ///
+    /// The coreference mechanism as well as the graph. "My sister Lakshmi" says Lakshmi is the
+    /// owner's sister, so a later "the user's sister" resolves through that edge to her card
+    /// rather than creating a second one.
+    pub relation: Option<RelationTo>,
+}
+
+/// One edge, as extraction reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationTo {
+    /// `sister`, `manager`, `father`. Lower case, open vocabulary.
+    pub label: String,
+    /// Whose. A surface form, resolved the same way the claim's own subject is.
+    pub of: String,
 }
 
 impl Candidate {
@@ -291,11 +313,16 @@ async fn pass(
         report.extracted += candidates.len();
 
         for candidate in candidates {
+            let edge = candidate.relation.as_ref().map(|r| resolve::Edge {
+                label: &r.label,
+                of: &r.of,
+            });
             let resolution = resolve::resolve(
                 &candidate.surface,
                 &candidate.tags,
                 &candidate.text,
                 candidate.kind,
+                edge.as_ref(),
                 index,
                 matcher,
             )
@@ -414,6 +441,11 @@ async fn absorb(
         claim = claim.dated(valid_from);
     }
 
+    let landed = match &resolution {
+        Resolution::Existing { path } | Resolution::New { path, .. } => Some(path.clone()),
+        Resolution::Ambiguous { .. } => None,
+    };
+
     match resolution {
         Resolution::Ambiguous { between } => {
             // §9.4's known failure, two people with the same name. Create neither.
@@ -433,6 +465,7 @@ async fn absorb(
                 reader.load_concept(&path).ok()
             };
             if let Some(mut concept) = existing {
+                adopt(&mut concept.front, candidate);
                 merge(&mut concept, &path, candidate, claim, report, settings);
                 // Scoped, because `refresh` below takes a reader and the write guard excludes it.
                 {
@@ -443,6 +476,15 @@ async fn absorb(
                 let mut front = Frontmatter::new(&candidate.surface, settings.today);
                 front.aliases = aliases;
                 front.tags.clone_from(&candidate.tags);
+                // A card created from "the client from Tuesday" is a placeholder, not a name.
+                // Recording that is what lets a real name absorb it later instead of the two
+                // sitting side by side for ever.
+                front.label = if resolve::looks_described(&candidate.surface) {
+                    Label::Described
+                } else {
+                    Label::Named
+                };
+                adopt(&mut front, candidate);
                 // What the user stated is usable at once; what was merely inferred waits for a
                 // second occurrence. See `reconcile::promotion` for why the old rule could never
                 // let a first mention through at all.
@@ -461,6 +503,7 @@ async fn absorb(
                 report.created.push(path);
             }
             refresh(bundle, index).await?;
+            record_edge(candidate, landed.as_deref(), bundle, index, settings).await?;
             Ok(())
         }
         Resolution::Existing { path } => {
@@ -468,14 +511,73 @@ async fn absorb(
                 let reader = bundle.reader().await;
                 reader.load_concept(&path)?
             };
+            adopt(&mut concept.front, candidate);
             merge(&mut concept, &path, candidate, claim, report, settings);
             {
                 let writer = bundle.writer().await;
                 writer.save_concept(&path, &concept)?;
             }
             refresh(bundle, index).await?;
+            record_edge(candidate, landed.as_deref(), bundle, index, settings).await?;
             Ok(())
         }
+    }
+}
+
+/// Writes the edge a sentence asserted onto the entity it belongs to (change E, S-21).
+///
+/// The edge lives on the *other* end: "Lakshmi is the user's sister" is a fact about Lakshmi and an
+/// edge on the user's card, because that is the direction the question comes from. §22.4 rejected a
+/// graph database and this is why it holds: an edge is four fields of frontmatter.
+///
+/// Silently does nothing when the other end does not exist yet. An edge to a card nobody wrote is
+/// a dangling pointer, and creating the card to hold it would invent a person out of a preposition.
+async fn record_edge(
+    candidate: &Candidate,
+    landed: Option<&str>,
+    bundle: &Bundle,
+    index: &Index,
+    settings: Settings,
+) -> Result<(), ConsolidateError> {
+    let (Some(relation), Some(to)) = (candidate.relation.as_ref(), landed) else {
+        return Ok(());
+    };
+    let Some(from) = index.path_answering_to(&relation.of)? else {
+        return Ok(());
+    };
+    if from == to {
+        return Ok(());
+    }
+    let mut owner = {
+        let reader = bundle.reader().await;
+        match reader.load_concept(&from) {
+            Ok(concept) => concept,
+            Err(_) => return Ok(()),
+        }
+    };
+    owner.front.relate(&relation.label, to, settings.today);
+    {
+        let writer = bundle.writer().await;
+        writer.save_concept(&from, &owner)?;
+    }
+    refresh(bundle, index).await
+}
+
+/// Records everything this candidate says about what the entity is called (change C, S-21).
+///
+/// Three things at once, all of them appends: the form the sentence used, any other names it gave,
+/// and a real name replacing a placeholder. The alias list was written once at creation and never
+/// again, which is why one person referred to a second way became a second file.
+fn adopt(front: &mut Frontmatter, candidate: &Candidate) {
+    front.learn_alias(&candidate.surface);
+    for alias in &candidate.aliases {
+        front.learn_alias(alias);
+    }
+    // A named form absorbing a placeholder is the one case where the displayed name changes. The
+    // path never moves: it is the identity (§9.4), and moving the file would break every link into
+    // it and lose the history that makes a correction reviewable.
+    if front.label == Label::Described && !resolve::looks_described(&candidate.surface) {
+        front.rename(&candidate.surface);
     }
 }
 
@@ -791,6 +893,11 @@ PROPERTY of the entity the fact sets: name, employer, role, city, education, bir
 reply_style. Two facts sharing an entity and an attribute are treated as competing, and the newer
 one replaces the older. Two facts with different attributes both stand.
 
+Two more line shapes, for what a sentence says about the entity rather than about the world:
+
+  relation | <entity> | <label> | <whose>
+  alias | <entity> | <another name for the same entity>
+
 Four rules about the writing itself, which matter more than any of the rest:
 - Stay faithful to the source. Reorganize, never invent.
 - Preserve every metadata field exactly: attribute, origin, world time, system time.
@@ -808,6 +915,21 @@ Rules:
   properties into two lines.
 - The entity is what the fact is ABOUT, not who mentioned it. A preference about how the assistant
   behaves belongs to that preference, never to the person who expressed it.
+- **The person you are talking to is always `the user`**, whatever they call themselves and whatever
+  you call them. Their name is a fact about `the user`, not the name of a second person. Write
+  `the user | person | name | stated | - | The user's name is Sabharish`, never `Sabharish | ...`.
+- **You are `Loki`.** A fact about the assistant belongs to `Loki`, never to `the user`.
+- Write a `relation` line whenever a sentence says how two people are connected: `my sister
+  Lakshmi` is `relation | Lakshmi | sister | the user`. Use the plain word, singular and lower
+  case. Never write a relationship as an attribute; `relation` and `relationship` are not
+  attributes and a fact line must not use them.
+- Write an `alias` line whenever a sentence gives another name for someone already named: a
+  nickname, a preferred name, a surname, a maiden name. `Vaidyanathan prefers to be called Ashok`
+  is `alias | Vaidyanathan | Ashok`.
+- If a sentence refers to someone only by their connection to somebody else, use that description
+  as the entity and write the relation line too: `my sister is studious` is
+  `the user's sister | person | trait | stated | - | The user's sister is studious` plus
+  `relation | the user's sister | sister | the user`.
 - Use the same entity name every time you refer to the same thing, so it resolves to one file.
 - `stated` means the user said it about themselves or their world. `inferred` means you worked it
   out. Prefer `inferred` when unsure, since a stated fact is trusted immediately.
@@ -820,12 +942,16 @@ Rules:
   reading as a second fact.
 
 Example, for a transcript where the user says they are Sabharish, a computer science graduate who
-has just moved to Bangalore, and that they want short replies:
+has just moved to Bangalore, that they want short replies, and that their sister Lakshmi, who
+everyone calls Lucky, has just finished her exams:
 
-  Sabharish | person | name | stated | - | The user's name is Sabharish
-  Sabharish | person | education | stated | - | Sabharish is a computer science graduate
-  Sabharish | person | city | stated | - | Sabharish lives in Bangalore
+  the user | person | name | stated | - | The user's name is Sabharish
+  the user | person | education | stated | - | Sabharish is a computer science graduate
+  the user | person | city | stated | - | Sabharish lives in Bangalore
   reply length | preference | reply_style | stated | - | Sabharish prefers short replies
+  Lakshmi | person | status | stated | - | Lakshmi has finished her exams
+  relation | Lakshmi | sister | the user
+  alias | Lakshmi | Lucky
 - If the transcript states nothing durable, output nothing at all.";
 
 #[async_trait]
@@ -868,47 +994,95 @@ impl Extractor for ModelExtractor<'_> {
 /// Tolerant, and it drops what it cannot read rather than failing the run. A malformed line costs
 /// one fact; an error costs the whole session's memory.
 fn parse_candidates(answer: &str) -> Vec<Candidate> {
-    answer
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split('|').map(str::trim).collect();
-            let [surface, kind, attribute, source, when, fact] = parts.as_slice() else {
-                return None;
-            };
-            if surface.is_empty() || fact.is_empty() {
-                return None;
+    let mut facts: Vec<Candidate> = Vec::new();
+    let mut relations: Vec<(String, RelationTo)> = Vec::new();
+    let mut aliases: Vec<(String, String)> = Vec::new();
+
+    for line in answer.lines() {
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        // The two extra line kinds are told apart by their first field rather than by their arity,
+        // so a fact line that lost a column is dropped as malformed instead of read as an edge.
+        match parts.as_slice() {
+            [tag, subject, label, of] if tag.eq_ignore_ascii_case("relation") => {
+                if !subject.is_empty() && !label.is_empty() && !of.is_empty() {
+                    relations.push((
+                        (*subject).to_owned(),
+                        RelationTo {
+                            label: label.to_lowercase(),
+                            of: (*of).to_owned(),
+                        },
+                    ));
+                }
             }
-            Some(Candidate {
-                surface: (*surface).to_owned(),
-                kind: match kind.to_lowercase().as_str() {
-                    "project" => Kind::Project,
-                    "preference" => Kind::Preference,
-                    _ => Kind::Person,
-                },
-                // The section a claim is filed under is its attribute, so a reader opening the
-                // file sees the same grouping reconciliation uses.
-                heading: if attribute.is_empty() {
-                    "Notes".to_owned()
-                } else {
-                    (*attribute).to_owned()
-                },
-                attribute: super::claim::normalize_attribute(attribute),
-                text: (*fact).to_owned(),
-                days_ago: None,
-                valid_from: when.parse::<Date>().ok(),
-                // Anything the extractor will not vouch for is inferred, so §9.7 rule 3 keeps it
-                // below anything the user actually said. This pass reads a conversation, so it
-                // can only ever produce the two user-facing origins: `web` and `connector` are
-                // written by the passes that read those, never claimed by a model.
-                origin: if source.eq_ignore_ascii_case("stated") {
-                    Origin::Stated
-                } else {
-                    Origin::Inferred
-                },
-                tags: Vec::new(),
-            })
-        })
-        .collect()
+            [tag, subject, other] if tag.eq_ignore_ascii_case("alias") => {
+                if !subject.is_empty() && !other.is_empty() {
+                    aliases.push(((*subject).to_owned(), (*other).to_owned()));
+                }
+            }
+            [surface, kind, attribute, source, when, fact] => {
+                if surface.is_empty() || fact.is_empty() {
+                    continue;
+                }
+                facts.push(Candidate {
+                    surface: (*surface).to_owned(),
+                    kind: match kind.to_lowercase().as_str() {
+                        "project" => Kind::Project,
+                        "preference" => Kind::Preference,
+                        _ => Kind::Person,
+                    },
+                    // The section a claim is filed under is its attribute, so a reader opening the
+                    // file sees the same grouping reconciliation uses.
+                    heading: if attribute.is_empty() {
+                        "Notes".to_owned()
+                    } else {
+                        (*attribute).to_owned()
+                    },
+                    attribute: super::claim::normalize_attribute(attribute),
+                    text: (*fact).to_owned(),
+                    days_ago: None,
+                    valid_from: when.parse::<Date>().ok(),
+                    // Anything the extractor will not vouch for is inferred, so §9.7 rule 3 keeps
+                    // it below anything the user actually said. This pass reads a conversation, so
+                    // it can only ever produce the two user-facing origins: `web` and `connector`
+                    // are written by the passes that read those, never claimed by a model.
+                    origin: if source.eq_ignore_ascii_case("stated") {
+                        Origin::Stated
+                    } else {
+                        Origin::Inferred
+                    },
+                    tags: Vec::new(),
+                    aliases: Vec::new(),
+                    relation: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // An edge or a nickname needs a claim to travel with, because a candidate is what the write
+    // path moves. A relation line naming an entity nothing else mentioned is dropped rather than
+    // written on its own: an edge to a card with no facts is a card nobody can see.
+    for (subject, relation) in relations {
+        if let Some(candidate) = facts
+            .iter_mut()
+            .find(|c| c.surface.eq_ignore_ascii_case(&subject))
+        {
+            candidate.relation = Some(relation);
+        }
+    }
+    for (subject, other) in aliases {
+        if let Some(candidate) = facts
+            .iter_mut()
+            .find(|c| c.surface.eq_ignore_ascii_case(&subject))
+            && !candidate
+                .aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&other))
+        {
+            candidate.aliases.push(other);
+        }
+    }
+    facts
 }
 
 #[cfg(test)]

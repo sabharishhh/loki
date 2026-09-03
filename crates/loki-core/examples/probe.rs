@@ -98,6 +98,8 @@ impl Extractor for Staged {
                     valid_from: None,
                     origin: fact.origin,
                     tags: vec![],
+                    aliases: vec![],
+                    relation: None,
                 });
             }
         }

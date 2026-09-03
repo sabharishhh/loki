@@ -104,6 +104,7 @@ pub async fn resolve(
     tags: &[String],
     claim: &str,
     kind: Kind,
+    relation: Option<&Edge<'_>>,
     index: &Index,
     matcher: &dyn Matcher,
 ) -> Result<Resolution, ResolveError> {
@@ -112,7 +113,18 @@ pub async fn resolve(
         return Err(ResolveError::NoSurfaceForm);
     }
 
-    let candidates = index.candidates(trimmed, tags, MAX_CANDIDATES)?;
+    // The graph before the strings. An edge is something somebody said outright, so it beats every
+    // guess blocking could make, and it is what turns "my sister" and "Lakshmi" into one card.
+    if let Some(path) = through_the_graph(trimmed, relation, index)? {
+        return Ok(Resolution::Existing { path });
+    }
+
+    let mut candidates = index.candidates(trimmed, tags, MAX_CANDIDATES)?;
+    // A descriptor is never the thing it describes. "The user's sister" reads as a near-name match
+    // for "the user", and merging there writes a fact about one person onto another.
+    if let Some((whose, _)) = descriptor(trimmed) {
+        candidates.retain(|c| !c.name.eq_ignore_ascii_case(whose));
+    }
     if candidates.is_empty() {
         return Ok(fresh(trimmed, kind));
     }
@@ -144,6 +156,85 @@ pub async fn resolve(
         }
     };
     Ok(resolution)
+}
+
+/// An edge a sentence asserted: this entity is the `label` of `of`.
+///
+/// Borrowed rather than owned because the caller already has both strings, and resolution is on
+/// the write path for every claim in an import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edge<'a> {
+    pub label: &'a str,
+    pub of: &'a str,
+}
+
+/// Follows a relation to the card it already points at (§9.4, S-21).
+///
+/// Two ways in, and what they are allowed to do differs.
+///
+/// A **descriptor** like "my father" or "Vaidyanathan's brother" names nobody, so following the
+/// edge is the only way to know who it means. It resolves to whatever the edge points at.
+///
+/// An **explicit edge** on a named entity may only absorb a *placeholder*. "Karthik is my brother"
+/// must not merge into the brother already on file, because two brothers is the ordinary case and
+/// merging them loses a person; "Lakshmi is my sister" absorbing the card that says only "the
+/// user's sister" loses nothing, because that card was standing in for a name all along.
+fn through_the_graph(
+    surface: &str,
+    relation: Option<&Edge<'_>>,
+    index: &Index,
+) -> Result<Option<String>, ResolveError> {
+    let described = descriptor(surface);
+    let Some((whose, label)) = described.or_else(|| relation.map(|e| (e.of, e.label))) else {
+        return Ok(None);
+    };
+    let Some(from) = index.path_answering_to(whose)? else {
+        return Ok(None);
+    };
+    let Some(to) = index.related(&from, label)? else {
+        return Ok(None);
+    };
+    if described.is_none() && !index.describes(&to)? {
+        return Ok(None);
+    }
+    Ok(Some(to))
+}
+
+/// Reads a surface form that points at somebody through somebody else.
+///
+/// "my father" and "the user's sister" both mean the owner's; "Vaidyanathan's brother" means his.
+/// Only a single-word label counts: "the user's old school friend" is a description of a person,
+/// not a relation anything can follow, and treating it as one would invent an edge nobody said.
+#[must_use]
+pub fn descriptor(surface: &str) -> Option<(&str, &str)> {
+    let trimmed = surface.trim();
+    let lower = trimmed.to_lowercase();
+
+    // "my X" and "our X" are the owner's, whoever the owner turns out to be.
+    for opener in ["my ", "our "] {
+        if let Some(rest) = lower.strip_prefix(opener) {
+            let label = &trimmed[trimmed.len() - rest.len()..];
+            return one_word(label).map(|label| (OWNER_FORM, label));
+        }
+    }
+
+    let at = trimmed.find("'s ").or_else(|| trimmed.find("\u{2019}s "))?;
+    let whose = trimmed[..at].trim();
+    // The separator is three characters either way: the apostrophe, the s and the space.
+    let label = trimmed[at..].chars().skip(3).count();
+    let label = &trimmed[trimmed.len() - label..];
+    if whose.is_empty() {
+        return None;
+    }
+    one_word(label).map(|label| (whose, label))
+}
+
+/// The surface form the owner's card answers to. Seeded before the first turn (§9.4).
+const OWNER_FORM: &str = "the user";
+
+fn one_word(label: &str) -> Option<&str> {
+    let label = label.trim();
+    (!label.is_empty() && !label.contains(char::is_whitespace)).then_some(label)
 }
 
 /// An existing concept for this exact surface form, filed under a different kind (§9.4).
@@ -180,6 +271,28 @@ fn fresh(surface: &str, kind: Kind) -> Resolution {
         path: format!("{}/{}.md", kind.directory(), slug(surface)),
         aliases: vec![surface.to_owned()],
     }
+}
+
+/// Whether a surface form describes an entity rather than naming it (§9.4, S-21).
+///
+/// "The user's sister" and "the client from Tuesday" are placeholders standing in for names nobody
+/// has given. Deterministic string work rather than a model call: this decides whether a later real
+/// name may absorb the card, and a rule a person can read is worth more here than a judgement.
+///
+/// One-sided, like every other guard in this module. A missed descriptor costs a card that keeps
+/// its placeholder name; a false positive would let an ordinary name be overwritten.
+#[must_use]
+pub fn looks_described(surface: &str) -> bool {
+    let lower = surface.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // A possessive is the giveaway: something is being pointed at through something else.
+    if lower.contains("'s ") || lower.contains("\u{2019}s ") {
+        return true;
+    }
+    const OPENERS: [&str; 8] = ["the ", "my ", "a ", "an ", "his ", "her ", "their ", "our "];
+    OPENERS.iter().any(|opener| lower.starts_with(opener))
 }
 
 /// A filename from a surface form. Lowercase, one hyphen between runs of anything else.

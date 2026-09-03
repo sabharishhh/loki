@@ -167,6 +167,8 @@ impl Extractor for OneFact {
             valid_from: Some(date(2026, 1, 1)),
             origin: Origin::Stated,
             tags: vec![],
+            aliases: vec![],
+            relation: None,
         }])
     }
 }

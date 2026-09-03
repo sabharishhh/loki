@@ -123,6 +123,8 @@ fn about(
         valid_from: Some(valid_from),
         origin,
         tags: vec![],
+        aliases: vec![],
+        relation: None,
     }
 }
 

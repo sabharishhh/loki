@@ -56,6 +56,8 @@ fn claim(attribute: &str, kind: Kind, surface: &str, text: &str, origin: Origin)
         valid_from: None,
         origin,
         tags: vec![],
+        aliases: vec![],
+        relation: None,
     }
 }
 

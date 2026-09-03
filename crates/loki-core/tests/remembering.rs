@@ -113,6 +113,8 @@ impl Extractor for OneFact {
             valid_from: Some(date(2026, 1, 1)),
             origin: loki_core::memory::claim::Origin::Stated,
             tags: vec![],
+            aliases: vec![],
+            relation: None,
         }])
     }
 }

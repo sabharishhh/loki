@@ -214,6 +214,7 @@ async fn an_unknown_entity_costs_no_model_call() {
         &[],
         "Priya runs the platform team",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -244,6 +245,7 @@ async fn a_match_resolves_into_the_existing_file() {
         &[],
         "Meera moved to the infra team",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -274,6 +276,7 @@ async fn a_genuine_tie_creates_neither() {
         &[],
         "Meera said she would send it over",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -302,6 +305,7 @@ async fn an_out_of_range_match_becomes_a_new_entity() {
         &[],
         "Meera moved teams",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -321,6 +325,7 @@ async fn a_tie_that_names_one_candidate_is_not_a_tie() {
         &[],
         "Meera moved teams",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -340,6 +345,7 @@ async fn an_empty_surface_form_is_refused() {
         &[],
         "something",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -393,6 +399,7 @@ async fn one_surface_under_two_kinds_resolves_to_one_file() {
         &[],
         "Loki prefers short replies",
         Kind::Person,
+        None,
         &store.index,
         &matcher,
     )
@@ -419,6 +426,7 @@ async fn a_name_nothing_matches_still_creates_its_own_file() {
         &[],
         "Meera works on infra",
         Kind::Preference,
+        None,
         &store.index,
         &matcher,
     )
@@ -438,6 +446,7 @@ async fn a_name_nothing_matches_still_creates_its_own_file() {
         &[],
         "Sabharish runs it on Fridays",
         Kind::Project,
+        None,
         &store.index,
         &matcher,
     )

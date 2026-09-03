@@ -24,7 +24,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS concept (
     name        TEXT    NOT NULL,
     status      TEXT    NOT NULL,
     verified    INTEGER NOT NULL DEFAULT 0,
+    described   INTEGER NOT NULL DEFAULT 0,
     stale_after INTEGER,
     mtime       INTEGER NOT NULL,
     len         INTEGER NOT NULL
@@ -462,6 +463,13 @@ CREATE TABLE IF NOT EXISTS link (
     dst TEXT NOT NULL,
     PRIMARY KEY (src, dst)
 );
+CREATE TABLE IF NOT EXISTS relation (
+    src   TEXT NOT NULL,
+    label TEXT NOT NULL,
+    dst   TEXT NOT NULL,
+    until INTEGER,
+    PRIMARY KEY (src, label, dst)
+);
 CREATE TABLE IF NOT EXISTS alias (
     concept INTEGER NOT NULL REFERENCES concept(id) ON DELETE CASCADE,
     text    TEXT    NOT NULL,
@@ -486,6 +494,7 @@ CREATE INDEX IF NOT EXISTS recall_by_day ON recall_event(day);
 CREATE INDEX IF NOT EXISTS claim_by_concept ON claim(concept);
 CREATE INDEX IF NOT EXISTS link_by_src ON link(src);
 CREATE INDEX IF NOT EXISTS link_by_dst ON link(dst);
+CREATE INDEX IF NOT EXISTS relation_by_src ON relation(src, label);
 CREATE INDEX IF NOT EXISTS alias_by_text ON alias(text);
 CREATE INDEX IF NOT EXISTS tag_by_text ON tag(text);
 ";
@@ -543,6 +552,7 @@ impl Index {
                 "DROP TABLE IF EXISTS claim;
                  DROP TABLE IF EXISTS concept;
                  DROP TABLE IF EXISTS link;
+                 DROP TABLE IF EXISTS relation;
                  DROP TABLE IF EXISTS alias;
                  DROP TABLE IF EXISTS tag;
                  DROP TABLE IF EXISTS turn;
@@ -1012,6 +1022,81 @@ impl Index {
     ///
     /// # Errors
     /// Fails if the index cannot be read.
+    /// The single concept that answers to this exact surface form, by name or alias.
+    ///
+    /// Exact only, and only when there is one. This resolves the *whose* half of a descriptor like
+    /// "the user's sister", which then decides where a claim is written, so a near match would put
+    /// a fact on the wrong person's edge. Blocking is where fuzziness belongs.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn path_answering_to(&self, surface: &str) -> Result<Option<String>, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let needle = surface.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = db
+            .prepare(
+                "SELECT DISTINCT c.path FROM alias a JOIN concept c ON c.id = a.concept
+                 WHERE a.text = ?1 LIMIT 2",
+            )
+            .map_err(IndexError::Read)?;
+        let mut paths: Vec<String> = stmt
+            .query_map(params![needle], |r| r.get::<_, String>(0))
+            .map_err(IndexError::Read)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(IndexError::Read)?;
+        // Two entities answering to one form is §9.4's known ambiguity, not something to pick
+        // between. The caller falls back to blocking, which surfaces it properly.
+        Ok((paths.len() == 1).then(|| paths.remove(0)))
+    }
+
+    /// Whether this concept's name is a placeholder rather than a name (§9.4, S-21).
+    ///
+    /// What decides whether a named entity may absorb a card through an edge. Absorbing a
+    /// placeholder is a merge nobody loses anything by; absorbing a named card would make a second
+    /// brother into the first one.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn describes(&self, path: &str) -> Result<bool, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        Ok(db
+            .query_row(
+                "SELECT described FROM concept WHERE path = ?1",
+                params![path],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(IndexError::Read)?
+            == Some(1))
+    }
+
+    /// The current target of `src`'s `label` edge, when there is exactly one (§9.4, S-21).
+    ///
+    /// Closed edges are excluded and two live targets return nothing: "who is my brother" has no
+    /// singular answer when there are two, and guessing between them is worse than not answering.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn related(&self, src: &str, label: &str) -> Result<Option<String>, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let mut stmt = db
+            .prepare(
+                "SELECT dst FROM relation WHERE src = ?1 AND label = ?2 AND until IS NULL LIMIT 2",
+            )
+            .map_err(IndexError::Read)?;
+        let mut found: Vec<String> = stmt
+            .query_map(params![src, label.trim().to_lowercase()], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(IndexError::Read)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(IndexError::Read)?;
+        Ok((found.len() == 1).then(|| found.remove(0)))
+    }
+
     pub fn candidates(
         &self,
         surface: &str,
@@ -1139,14 +1224,16 @@ fn put_concept(
     remove_concept(tx, path)?;
 
     let verified = i64::from(concept.front.is_human_verified());
+    let described = i64::from(concept.front.label == super::concept::Label::Described);
     tx.execute(
-        "INSERT INTO concept(path, name, status, verified, stale_after, mtime, len)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO concept(path, name, status, verified, described, stale_after, mtime, len)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             path,
             concept.front.name,
             status_str(concept.front.status),
             verified,
+            described,
             concept.front.stale_after.map(to_days),
             mtime,
             len
@@ -1212,6 +1299,27 @@ fn put_concept(
         )
         .map_err(IndexError::Write)?;
     }
+
+    for relation in &concept.front.relations {
+        tx.execute(
+            "INSERT OR REPLACE INTO relation(src, label, dst, until) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                path,
+                relation.label.to_lowercase(),
+                relation.to,
+                relation.until.map(to_days)
+            ],
+        )
+        .map_err(IndexError::Write)?;
+        // Also an ordinary link, so §10.1's link-distance signal treats a relation the same as a
+        // mention. Two people connected by an edge are related whether or not either file happens
+        // to name the other in prose.
+        tx.execute(
+            "INSERT OR IGNORE INTO link(src, dst) VALUES (?1, ?2)",
+            params![path, relation.to],
+        )
+        .map_err(IndexError::Write)?;
+    }
     Ok(())
 }
 
@@ -1246,6 +1354,8 @@ fn remove_concept(tx: &rusqlite::Transaction<'_>, path: &str) -> Result<(), Inde
     tx.execute("DELETE FROM tag WHERE concept = ?1", params![id])
         .map_err(IndexError::Write)?;
     tx.execute("DELETE FROM link WHERE src = ?1", params![path])
+        .map_err(IndexError::Write)?;
+    tx.execute("DELETE FROM relation WHERE src = ?1", params![path])
         .map_err(IndexError::Write)?;
     tx.execute("DELETE FROM concept WHERE id = ?1", params![id])
         .map_err(IndexError::Write)?;
