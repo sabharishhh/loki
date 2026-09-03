@@ -24,7 +24,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -341,7 +341,14 @@ impl Corpus {
 
     pub(crate) fn create(self, db: &Connection) -> rusqlite::Result<()> {
         db.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5(title, body);",
+            // Porter stemming, which §10.5 names as the first of the cheap wins that come before
+            // any semantic index. It is what makes "replies" find "reply" and "lives" find
+            // "lived", and it costs one word in a schema rather than an embedding model.
+            //
+            // It does not close the semantic gap: "what did I study" still will not find "is a
+            // computer science graduate", because those share no word to stem. §10.5 puts that on
+            // a local embedding index, after two failed keyword rounds.
+            "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5(title, body, tokenize = 'porter unicode61');",
             self.table
         ))
     }
@@ -549,8 +556,10 @@ impl Index {
         let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
         let tx = db.transaction().map_err(IndexError::Write)?;
 
-        let mut on_disk = reader.concepts()?;
-        on_disk.extend(reader.scratch_concepts()?);
+        // `concepts` already covers drafts. §10.6: candidates are indexed and filtered at query
+        // time, never omitted, or the review screen and recall-driven promotion both become
+        // impossible.
+        let on_disk = reader.concepts()?;
 
         let mut known: HashMap<String, (i64, i64)> = HashMap::new();
         {

@@ -241,12 +241,19 @@ pub fn render(entry: &Entry) -> String {
 /// not news. Silence when nothing happened, because a card that says "learned nothing today"
 /// teaches people to ignore the card.
 #[must_use]
-pub fn summary(entries: &[Entry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| e.kind != Kind::Learned || !e.text.is_empty())
+pub fn summary(entries: &[Entry], rejected: Option<&str>) -> Vec<String> {
+    // A pass that declined to retire most of your memory goes first and always. §17.4 names it
+    // explicitly, and it is the one line here that is about Loki rather than about you.
+    let refusal = rejected.map(|why| format!("I held back: {why}."));
+    refusal
+        .into_iter()
+        .chain(
+            entries
+                .iter()
+                .filter(|e| e.kind != Kind::Learned || !e.text.is_empty())
+                .map(render),
+        )
         .take(3)
-        .map(render)
         .collect()
 }
 
@@ -298,7 +305,7 @@ mod tests {
     #[test]
     fn the_summary_is_capped_at_three_lines() {
         let entries: Vec<Entry> = (0..7).map(|_| corrected()).collect();
-        assert_eq!(summary(&entries).len(), 3);
+        assert_eq!(summary(&entries, None).len(), 3);
     }
 
     /// A row has to say who and what, or it reads as a bare value with no meaning.
@@ -323,7 +330,15 @@ mod tests {
 
     #[test]
     fn nothing_happening_says_nothing() {
-        assert!(summary(&[]).is_empty());
+        assert!(summary(&[], None).is_empty());
+    }
+
+    /// §17.4: a pass that declined to retire most of your memory is worth one line, and it leads.
+    #[test]
+    fn a_refused_pass_is_the_first_thing_said() {
+        let lines = summary(&[corrected()], Some("it would have retired 9 of 10 claims"));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("I held back:"), "{lines:?}");
     }
 
     #[test]

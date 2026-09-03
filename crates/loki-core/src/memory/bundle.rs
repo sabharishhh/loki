@@ -23,8 +23,18 @@ use super::history::{self, Change, Revision, RevisionId};
 
 /// The layout from section 9.3.
 const DIRECTORIES: [&str; 4] = ["people", "projects", "preferences", "episodes"];
-/// Agent-owned. Everything here is draft and nothing reaches a prompt.
-pub const SCRATCH: &str = "scratch";
+/// The session buffer (§9.3). Everything in it is a candidate, and it is cleared on consolidation.
+///
+/// Replaced `scratch/` in v0.9. A directory of draft files that nothing could read into a prompt
+/// produced a hole: promotion "on use without correction" could never fire, because a draft was
+/// never retrievable. One append-only file readable during the session removes a directory, a
+/// status transition, and that whole class of bug.
+///
+/// It is also what stops re-extraction. Consolidation reads the buffer rather than the episode, so
+/// a second close in one session sees only what was said since the first. Reading the episode
+/// meant every close re-extracted the whole day and the extractor, being a model, worded each fact
+/// differently every time.
+pub const CURRENT: &str = "current.md";
 /// Chronological history. Feeds the timeline.
 pub const LOG: &str = "log.md";
 /// Generated, never hand-edited.
@@ -301,10 +311,10 @@ fn search_in(root: &Path, query: &str) -> Result<Vec<Hit>, BundleError> {
 }
 
 fn concept_paths(root: &Path) -> Result<Vec<String>, BundleError> {
-    let generated = [INDEX, LOG, WORKING_SET, STANDING];
+    let generated = [INDEX, LOG, WORKING_SET, STANDING, CURRENT];
     Ok(markdown_files(root, ".")?
         .into_iter()
-        .filter(|p| !p.starts_with(SCRATCH) && !generated.contains(&p.as_str()))
+        .filter(|p| !generated.contains(&p.as_str()))
         .collect())
 }
 
@@ -370,19 +380,6 @@ macro_rules! read_ops {
 
         /// Concept paths under `scratch/`, which are all `draft` and never reach a prompt.
         ///
-        /// Separate from [`concepts`] so a caller has to opt in. The index takes both, because
-        /// import's review screen searches exactly what the prompt path must not see.
-        ///
-        /// # Errors
-        /// Fails if the bundle cannot be walked.
-        pub fn scratch_concepts(&self) -> Result<Vec<String>, BundleError> {
-            match markdown_files(self.root, SCRATCH) {
-                Ok(paths) => Ok(paths),
-                // No scratch directory yet is not an error, it is an empty working area.
-                Err(_) => Ok(Vec::new()),
-            }
-        }
-
         /// The bundle root, for callers that need to stat a file rather than read it.
         pub const fn root(&self) -> &Path {
             self.root
@@ -458,7 +455,7 @@ impl Writer<'_> {
     read_ops!();
 
     fn create_layout(&self) -> Result<(), BundleError> {
-        for dir in DIRECTORIES.iter().chain(std::iter::once(&SCRATCH)) {
+        for dir in &DIRECTORIES {
             std::fs::create_dir_all(self.root.join(dir)).map_err(|source| BundleError::Io {
                 path: (*dir).to_string(),
                 source,
@@ -467,7 +464,7 @@ impl Writer<'_> {
         if !self.root.join(INDEX).exists() {
             self.write(INDEX, "---\nokf_version: '0.2'\n---\n\n# Loki memory\n")?;
         }
-        for file in [LOG, WORKING_SET, STANDING] {
+        for file in [LOG, WORKING_SET, STANDING, CURRENT] {
             if !self.root.join(file).exists() {
                 self.write(file, "")?;
             }
@@ -561,5 +558,13 @@ impl Writer<'_> {
     /// Fails if the revision is unknown or the revert conflicts.
     pub fn revert(&self, revision: &RevisionId) -> Result<(), BundleError> {
         history::revert(self.root, revision)
+    }
+
+    /// Throws away everything written since the last commit (§9.8 step 5).
+    ///
+    /// # Errors
+    /// Fails if the repository cannot be reset.
+    pub fn discard_changes(&self) -> Result<(), BundleError> {
+        history::discard_changes(self.root)
     }
 }

@@ -221,6 +221,37 @@ impl Loop {
         Ok(Some(report))
     }
 
+    /// Consolidates whatever a previous session left behind (§18.2).
+    ///
+    /// A session ended by a crash or a force quit never ran its close, so its buffer is still on
+    /// disk and its turns are claims nobody has extracted. B-30: without this they are orphaned,
+    /// because the live corpus that covered them belonged to the process that died.
+    ///
+    /// Separate from `attach_memory` because it needs an extractor, and the caller owns that.
+    /// Silent when there is nothing outstanding, which is the common case.
+    ///
+    /// # Errors
+    /// Fails if the store cannot be read or written.
+    pub async fn catch_up(
+        &mut self,
+        extractor: &dyn crate::memory::consolidate::Extractor,
+        matcher: &dyn crate::memory::resolve::Matcher,
+        budget: &dyn crate::memory::consolidate::Budget,
+    ) -> Result<Option<crate::memory::consolidate::Report>, LoopError> {
+        let Some(memory) = self.memory.clone() else {
+            return Ok(None);
+        };
+        if !memory.has_unconsolidated().await {
+            return Ok(None);
+        }
+        let report = memory
+            .close(extractor, matcher, budget, self.clock.today())
+            .await?;
+        // The working set changed, so the prefix has to catch up before the first turn.
+        self.refresh_working_set().await?;
+        Ok(Some(report))
+    }
+
     /// Runs one turn.
     ///
     /// # Errors
@@ -257,6 +288,9 @@ impl Loop {
                 self.turn.set_recall("");
             } else {
                 memory.mark_used(&recalled)?;
+                // Marked in the buffer so the next pass does not read Loki's own words back as a
+                // fresh statement from the user (§9.8).
+                memory.note_recalled(&recalled).await?;
                 self.turn.set_recall(handle::render(&recalled, today));
             }
         }

@@ -198,7 +198,7 @@ pub unsafe extern "C" fn loki_core_new(
 
     let clock: Arc<dyn loki_core::ports::clock::Clock> = Arc::new(SystemClock);
     let core = Loop::new(
-        provider,
+        Arc::clone(&provider),
         Arc::new(events),
         callbacks as Arc<dyn TokenSink>,
         Arc::clone(&clock),
@@ -213,6 +213,18 @@ pub unsafe extern "C" fn loki_core_new(
     let memory = runtime.block_on(async {
         let memory = open_memory().await?;
         core.attach_memory(Arc::clone(&memory)).await.ok()?;
+        // §18.2: a session that ended without a close left its buffer on disk, and its turns are
+        // claims nobody extracted. Picked up here, before the first turn, so a crash costs a delay
+        // rather than a session. Failing is not fatal: an assistant with stale memory beats none.
+        let extractor = ModelExtractor::new(provider.as_ref(), CancellationToken::new());
+        let matcher = ModelMatcher::new(provider.as_ref(), CancellationToken::new());
+        let _ = core
+            .catch_up(
+                &extractor,
+                &matcher,
+                &loki_core::memory::consolidate::Unbounded,
+            )
+            .await;
         Some(memory)
     });
 
@@ -728,7 +740,7 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
             let mut guard = loop_handle.lock().await;
             let _ = guard.refresh_working_set().await;
         }
-        loki_core::memory::timeline::summary(&rows)
+        loki_core::memory::timeline::summary(&rows, report.rejected.as_deref())
     });
     json_string(&serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_owned()))
 }

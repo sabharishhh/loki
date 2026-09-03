@@ -1228,3 +1228,238 @@ async fn folding_leaves_claims_that_actually_differ_alone() {
         "these are a real question, not a duplicate"
     );
 }
+
+/// §9.8 step 5. Consolidation is the one pass that can retire a lot at once, and §21.2 names
+/// wrongly retiring a true claim as the more damaging error, so the pass checks itself.
+#[tokio::test]
+async fn a_pass_that_would_retire_most_of_the_store_is_refused() {
+    let store = Store::new("bounded-loss", &["episodes/a.md", "episodes/b.md"]).await;
+
+    // Six facts about one person, each about a different property.
+    let settled: Vec<Candidate> = ["name", "city", "employer", "role", "education", "pronouns"]
+        .iter()
+        .map(|attribute| {
+            about(
+                attribute,
+                "Sabharish",
+                &format!("Sabharish's {attribute} is known"),
+                date(2026, 1, 1),
+                Origin::Stated,
+            )
+        })
+        .collect();
+
+    // Then an extraction that contradicts every one of them. A model having a bad day.
+    let wrecking: Vec<Candidate> = ["name", "city", "employer", "role", "education", "pronouns"]
+        .iter()
+        .map(|attribute| {
+            about(
+                attribute,
+                "Sabharish",
+                &format!("Sabharish's {attribute} is something else entirely"),
+                date(2026, 7, 1),
+                Origin::Stated,
+            )
+        })
+        .collect();
+
+    let extractor = Scripted::new(vec![
+        ("episodes/a.md".to_string(), settled),
+        ("episodes/b.md".to_string(), wrecking),
+    ]);
+
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+    let before = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        before.claims().filter(|c| c.validity.is_believed()).count(),
+        6
+    );
+
+    let report = store
+        .go(
+            &[episode("episodes/b.md", date(2026, 7, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert!(
+        report.rejected.is_some(),
+        "the pass should have been refused"
+    );
+    let after = store.concept_at("people/sabharish.md").await;
+    assert_eq!(
+        after
+            .claims()
+            .filter(|c| c.validity.is_believed() && c.text.ends_with("is known"))
+            .count(),
+        6,
+        "every original claim survives: {:?}",
+        after.claims().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        after.claims().any(|c| c.text.contains("something else")),
+        "the fallback appends rather than dropping the new claims on the floor"
+    );
+}
+
+/// A correction pass is the normal case and must not trip the check.
+#[tokio::test]
+async fn an_ordinary_correction_is_not_refused() {
+    let store = Store::new("not-refused", &["episodes/a.md", "episodes/b.md"]).await;
+    let extractor = Scripted::new(vec![
+        (
+            "episodes/a.md".to_string(),
+            ["name", "city", "employer", "role"]
+                .iter()
+                .map(|a| {
+                    about(
+                        a,
+                        "Sabharish",
+                        &format!("Sabharish's {a} is known"),
+                        date(2026, 1, 1),
+                        Origin::Stated,
+                    )
+                })
+                .collect(),
+        ),
+        (
+            "episodes/b.md".to_string(),
+            vec![about(
+                "city",
+                "Sabharish",
+                "Sabharish has moved to Bangalore",
+                date(2026, 7, 1),
+                Origin::Stated,
+            )],
+        ),
+    ]);
+
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+    let report = store
+        .go(
+            &[episode("episodes/b.md", date(2026, 7, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    assert!(report.rejected.is_none(), "{report:?}");
+    let concept = store.concept_at("people/sabharish.md").await;
+    assert!(
+        concept
+            .claims()
+            .any(|c| c.text.contains("Bangalore") && c.validity.is_believed())
+    );
+}
+
+/// §9.3, §10.3. Written by the pass that already rewrites the files, so it cannot drift.
+#[tokio::test]
+async fn a_run_writes_the_concept_catalog() {
+    let store = Store::new("catalog", &["episodes/a.md"]).await;
+    let extractor = Scripted::new(vec![(
+        "episodes/a.md".to_string(),
+        vec![
+            about(
+                "name",
+                "Sabharish",
+                "The user's name is Sabharish",
+                date(2026, 1, 1),
+                Origin::Stated,
+            ),
+            about(
+                "focus",
+                "Loki",
+                "Loki is a local-first assistant",
+                date(2026, 1, 1),
+                Origin::Stated,
+            ),
+        ],
+    )]);
+
+    store
+        .go(
+            &[episode("episodes/a.md", date(2026, 1, 1))],
+            &extractor,
+            &Unbounded,
+        )
+        .await;
+
+    let catalog = {
+        let reader = store.bundle.reader().await;
+        reader.read("index.md").expect("catalog")
+    };
+    assert!(
+        catalog.contains("[Sabharish](people/sabharish.md)"),
+        "{catalog}"
+    );
+    assert!(
+        catalog.contains("The user's name is Sabharish"),
+        "{catalog}"
+    );
+    assert!(catalog.contains("[Loki](people/loki.md)"), "{catalog}");
+}
+
+/// §9.8. A claim pre-fetch injected into a turn is Loki quoting itself, and reading it back as a
+/// fresh statement is how one fact becomes a hundred phrased a hundred ways.
+#[tokio::test]
+async fn recalled_lines_in_the_buffer_are_not_extracted() {
+    let store = Store::new("recalled", &["episodes/a.md"]).await;
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "episodes/a.md",
+                "\n**user**: hello\n**recalled**: Sabharish lives in Chennai\n",
+            )
+            .expect("write");
+        writer
+            .commit("a buffer with a recalled line")
+            .expect("commit");
+    }
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    struct Capture(std::sync::Arc<std::sync::Mutex<String>>);
+    #[async_trait]
+    impl Extractor for Capture {
+        async fn extract(&self, _e: &str, text: &str) -> Result<Vec<Candidate>, ConsolidateError> {
+            *self.0.lock().expect("lock") = text.to_owned();
+            Ok(vec![])
+        }
+    }
+
+    let extractor = Capture(std::sync::Arc::clone(&seen));
+    loki_core::memory::consolidate::run(
+        &[episode("episodes/a.md", date(2026, 1, 1))],
+        &store.bundle,
+        &store.index,
+        &extractor,
+        &FirstMatch,
+        &Unbounded,
+        date(2026, 1, 1),
+    )
+    .await
+    .expect("run");
+
+    let text = seen.lock().expect("lock").clone();
+    assert!(
+        text.contains("hello"),
+        "the user's turn is still extracted: {text}"
+    );
+    assert!(
+        !text.contains("Chennai"),
+        "Loki's own recalled claim must not be read back as a statement: {text}"
+    );
+}

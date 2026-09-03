@@ -83,7 +83,7 @@ okf_version: '0.2'
   privacy: private
 ";
 
-/// What import writes: everything `draft`, in `scratch/`.
+/// What import writes: everything `draft` (§11.4), indexed and filtered at query time.
 const IMPORTED: &str = r"---
 name: Imported Fragment
 status: draft
@@ -121,7 +121,7 @@ impl Store {
             writer.write("projects/loki.md", LOKI).expect("loki");
             writer.write("episodes/notes.md", NOTES).expect("notes");
             writer
-                .write("scratch/imported.md", IMPORTED)
+                .write("people/imported.md", IMPORTED)
                 .expect("imported");
         }
         let index = Index::in_memory().expect("index");
@@ -194,7 +194,7 @@ async fn drafts_are_searchable_but_never_prompt_eligible() {
     assert!(
         everything
             .iter()
-            .any(|h| h.path == "scratch/imported.md" && h.status == Status::Draft),
+            .any(|h| h.path == "people/imported.md" && h.status == Status::Draft),
         "the review screen must be able to find the draft: {everything:?}"
     );
 }

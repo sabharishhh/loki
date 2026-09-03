@@ -426,7 +426,9 @@ async fn a_close_that_runs_out_of_budget_reports_what_is_left() {
         .expect("close")
         .expect("a report");
 
-    assert_eq!(report.remaining, ["episodes/2026-09-01.md"]);
+    // The buffer, not the episode. Consolidation reads what has not been consolidated yet, so a
+    // second close in one session does not re-extract the whole day.
+    assert_eq!(report.remaining, ["current.md"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

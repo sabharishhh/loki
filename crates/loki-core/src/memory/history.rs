@@ -96,6 +96,26 @@ pub(super) fn init(root: &std::path::Path) -> Result<(), BundleError> {
     Ok(())
 }
 
+/// Throws away everything written since the last commit.
+///
+/// §9.8 step 5's rollback. The pre-image is `HEAD`, which is the whole reason the bounded-loss
+/// check is cheap here: no snapshot to take, no content hash to re-check, no atomic rename to
+/// coordinate. A hard reset is the recovery.
+///
+/// Only ever called on a pass the check refused, so there is nothing here a user typed.
+pub(super) fn discard_changes(root: &std::path::Path) -> Result<(), BundleError> {
+    let repo = open(root)?;
+    // No commit yet means nothing to go back to, and an empty store cannot have lost too much.
+    let Ok(head) = repo.head() else {
+        return Ok(());
+    };
+    let object = head
+        .peel(git2::ObjectType::Commit)
+        .map_err(|e| git_err("peel head", &e))?;
+    repo.reset(&object, git2::ResetType::Hard, None)
+        .map_err(|e| git_err("reset", &e))
+}
+
 /// Stages everything and commits, returning whether anything changed.
 ///
 /// Nothing to commit is a normal outcome, not an error.

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use jiff::civil::Date;
 
-use super::bundle::{Bundle, BundleError};
+use super::bundle::{self, Bundle, BundleError};
 use super::claim::{Claim, Confidence, Origin};
 use super::concept::{Attribution, RawConcept, Status};
 use super::consolidate::{self, Budget, ConsolidateError, Episode, Extractor, Report};
@@ -20,6 +20,14 @@ use super::resolve::Matcher;
 use super::timeline;
 use super::working_set::{self, WorkingSetError};
 use crate::core::temporal;
+
+/// Marks a line in the buffer as something Loki said back, not something the user said (§9.8).
+///
+/// Without it a claim injected by pre-fetch is read on the next pass as a fresh statement, so a
+/// fact recalled a hundred times becomes a hundred claims phrased a hundred ways. The event that
+/// says which claims were injected is already emitted and the buffer already records the turn, so
+/// this reads a log we already write.
+pub const RECALLED: &str = "**recalled**:";
 
 /// Claims a single turn may carry. Precision over recall (§10.1): a wrong memory costs more than
 /// a missing one, because a missing memory reads as forgetfulness and a wrong one as not knowing
@@ -62,9 +70,6 @@ pub struct Memory {
     scope: TierScope,
     /// Turns recorded so far. The next ordinal, and the window boundary, are read off this.
     turns: Mutex<u32>,
-    /// Turns recorded when the last close ran. Closing twice with nothing said between is a
-    /// no-op, so putting the window away does not cost a model call each time.
-    consolidated_at: Mutex<u32>,
 }
 
 impl Memory {
@@ -91,7 +96,6 @@ impl Memory {
             episode: format!("episodes/{today}.md"),
             scope,
             turns: Mutex::new(0),
-            consolidated_at: Mutex::new(0),
         })
     }
 
@@ -113,6 +117,17 @@ impl Memory {
         Ok(working_set::read(&self.bundle).await?)
     }
 
+    /// Whether anything is waiting to be consolidated (§18.2).
+    ///
+    /// True after a session that ended without a close, which is what makes the next launch able
+    /// to pick it up rather than orphaning the turns.
+    pub async fn has_unconsolidated(&self) -> bool {
+        let reader = self.bundle.reader().await;
+        reader
+            .read(bundle::CURRENT)
+            .is_ok_and(|text| !text.trim().is_empty())
+    }
+
     /// Records a turn, both to the episode file and to the live corpus.
     ///
     /// The episode is appended as the session runs rather than written at close (D-045), because
@@ -126,9 +141,14 @@ impl Memory {
             *turns += 1;
             *turns
         };
+        let line = format!("\n**{speaker}**: {text}\n");
         {
             let writer = self.bundle.writer().await;
-            writer.append(&self.episode, &format!("\n**{speaker}**: {text}\n"))?;
+            // Two writes, two jobs. The episode is the permanent dated record §11.3 imports from
+            // and lane 2 reaches. The buffer is what has not been consolidated yet, and it is what
+            // consolidation reads, so a second close in one session does not re-extract the first.
+            writer.append(&self.episode, &line)?;
+            writer.append(bundle::CURRENT, &line)?;
         }
         self.index
             .record_turn(&self.session, ordinal, speaker, text)?;
@@ -166,6 +186,19 @@ impl Memory {
     ///
     /// # Errors
     /// Fails if the index cannot be written.
+    pub async fn note_recalled(&self, recalled: &[Recalled]) -> Result<(), MemoryError> {
+        let lines: Vec<String> = recalled
+            .iter()
+            .filter(|r| r.layer == Layer::Consolidated)
+            .map(|r| format!("{RECALLED} {}\n", r.text))
+            .collect();
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let writer = self.bundle.writer().await;
+        Ok(writer.append(bundle::CURRENT, &lines.concat())?)
+    }
+
     pub fn mark_used(&self, recalled: &[Recalled]) -> Result<(), MemoryError> {
         let uses: Vec<Use> = recalled
             .iter()
@@ -453,20 +486,19 @@ impl Memory {
         budget: &dyn Budget,
         today: Date,
     ) -> Result<Report, MemoryError> {
-        // Nothing said since the last close means nothing to consolidate.
-        {
-            let turns = *self.turns.lock().unwrap_or_else(|e| e.into_inner());
-            let done = *self
-                .consolidated_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if turns == done {
-                return Ok(Report::default());
-            }
+        // The buffer is the work. Empty means nothing to consolidate, and it is a better test
+        // than a turn counter because it survives a crash: a session that ended without a close
+        // leaves its buffer on disk and the next launch picks it up (B-30, §18.2).
+        if !self.has_unconsolidated().await {
+            return Ok(Report::default());
         }
 
+        // Read the buffer, not the episode. The episode is the permanent record and grows all day,
+        // so extracting from it made every close re-read the whole day and the extractor, being a
+        // model, worded each fact differently every time. The buffer holds only what has not been
+        // consolidated yet.
         let episodes = [Episode {
-            path: self.episode.clone(),
+            path: bundle::CURRENT.to_owned(),
             reference: Reference::Live(today),
         }];
         let report = consolidate::run(
@@ -493,18 +525,19 @@ impl Memory {
             let writer = self.bundle.writer().await;
             writer.commit("Regenerate the working set")?;
         }
-        // Only once the claims exist. Dropping the turns first would lose the session if
-        // consolidation failed partway.
-        if report.remaining.is_empty() {
-            // The turns stay in the live corpus, because the session may continue: closing the
-            // window is a session boundary, not the end of the conversation. They are dropped
-            // when the process ends.
-            let turns = *self.turns.lock().unwrap_or_else(|e| e.into_inner());
-            *self
-                .consolidated_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = turns;
+        // Only once the claims exist and are committed. Emptying the buffer before that would
+        // lose the session if the pass failed partway, and the buffer is the only copy of what
+        // has not been consolidated.
+        //
+        // A rejected pass keeps its buffer too: the fallback appended rather than superseding, so
+        // the next run gets another chance at doing it properly.
+        if report.remaining.is_empty() && report.rejected.is_none() {
+            consolidate::clear_buffer(&self.bundle).await?;
+            let writer = self.bundle.writer().await;
+            writer.commit("Clear the session buffer")?;
         }
+        // The turns stay in the live corpus, because the session may continue: closing the window
+        // is a session boundary, not the end of the conversation.
         Ok(report)
     }
 }

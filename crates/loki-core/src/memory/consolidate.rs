@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 use jiff::civil::Date;
 
-use super::bundle::{Bundle, BundleError, SCRATCH};
+use super::bundle::{self, Bundle, BundleError};
 use super::claim::{Claim, Origin};
 use super::concept::{Frontmatter, RawConcept, Status};
 use super::index::{Index, IndexError};
@@ -28,6 +28,17 @@ use super::resolve::{self, Kind, Matcher, Resolution, ResolveError};
 
 /// How long a stable, unused concept waits before it is archived (§9.10).
 pub const ARCHIVE_AFTER_DAYS: i64 = 180;
+
+/// The share of live claims one pass may retire before it is rejected (§9.8 step 5).
+///
+/// Open question 19: nobody can pick this before there is a store to observe. A half is loose
+/// enough that a real correction pass never trips it and tight enough that a pass gone wrong is
+/// caught, and it is one named number to change rather than a rule to rewrite.
+///
+/// The check is cheap for us in a way it is not for others: the pre-image is `HEAD`, so there is
+/// no snapshot to take and the recovery path is `git revert`, which §14.3 already designates as
+/// the memory undo.
+pub const BOUNDED_LOSS: f32 = 0.5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidateError {
@@ -119,6 +130,12 @@ impl Budget for Unbounded {
 /// What a run did. Feeds §17.4's session summary and §21.2's scoring.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
+    /// Set when step 5 refused the pass and the store was rolled back (§9.8, §21.2).
+    ///
+    /// Reported, not silent. §21.2 wants the rate because a rejection is a near miss that was
+    /// caught, and §17.4 gives it a line because a pass that declined to retire most of your
+    /// memory is exactly the kind of thing a person should be told about.
+    pub rejected: Option<String>,
     pub episodes: Vec<String>,
     pub extracted: usize,
     pub created: Vec<String>,
@@ -133,6 +150,15 @@ pub struct Report {
 }
 
 impl Report {
+    /// How many claims this pass retired. Step 5's numerator.
+    #[must_use]
+    pub fn superseded(&self) -> usize {
+        self.decisions
+            .iter()
+            .filter(|d| d.outcome == Precedence::Replace)
+            .count()
+    }
+
     /// Whether anything happened that is worth telling the user about (§17.4).
     ///
     /// A confidence bump is not news. Silence when nothing happened, because a card that says
@@ -158,6 +184,95 @@ pub async fn run(
     budget: &dyn Budget,
     today: Date,
 ) -> Result<Report, ConsolidateError> {
+    // Step 5's pre-image. Counted before anything is written, because the check compares against
+    // what the store held rather than against what this pass thinks it held.
+    let before = live_claims(bundle).await;
+
+    let mut report = pass(
+        episodes,
+        bundle,
+        index,
+        extractor,
+        matcher,
+        budget,
+        Settings {
+            today,
+            keep: Keep::No,
+        },
+    )
+    .await?;
+
+    // 5. Verify. A pass that retires too much is refused, the store goes back to what it was, and
+    //    the same episodes run again with nothing allowed to retire. §9.8: reject the rewrite,
+    //    fall back to appending, record the rejection.
+    let retired = report.superseded();
+    if too_much_lost(before, retired) {
+        {
+            let writer = bundle.writer().await;
+            writer.discard_changes()?;
+        }
+        report = pass(
+            episodes,
+            bundle,
+            index,
+            extractor,
+            matcher,
+            budget,
+            Settings {
+                today,
+                keep: Keep::Everything,
+            },
+        )
+        .await?;
+        report.rejected = Some(format!(
+            "a pass would have retired {retired} of {before} claims, so nothing was retired"
+        ));
+    }
+
+    // 6. Regenerate the catalog, then commit. The working set is the caller's, because it needs
+    //    the scope the prompt will be built with.
+    catalog(bundle).await?;
+    {
+        let writer = bundle.writer().await;
+        writer.commit(&summary_line(&report))?;
+    }
+    {
+        let reader = bundle.reader().await;
+        index.sync(&reader)?;
+    }
+    Ok(report)
+}
+
+/// What a pass needs to know that is the same for every claim in it.
+///
+/// One value rather than two parameters threaded through four functions. Both are properties of
+/// the run and not of the claim, so they travel together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Settings {
+    today: Date,
+    keep: Keep,
+}
+
+/// Whether a pass may retire anything (§9.8 step 5's fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// The ordinary pass. Supersession works.
+    No,
+    /// The fallback after a rejection. New claims are appended and nothing is invalidated, so a
+    /// bad extraction costs a duplicate rather than the store.
+    Everything,
+}
+
+/// Steps 1 to 4, plus archival. Everything that writes, with nothing that commits.
+async fn pass(
+    episodes: &[Episode],
+    bundle: &Bundle,
+    index: &Index,
+    extractor: &dyn Extractor,
+    matcher: &dyn Matcher,
+    budget: &dyn Budget,
+    settings: Settings,
+) -> Result<Report, ConsolidateError> {
     let mut report = Report::default();
 
     for (at, episode) in episodes.iter().enumerate() {
@@ -168,7 +283,7 @@ pub async fn run(
 
         let text = {
             let reader = bundle.reader().await;
-            reader.read(&episode.path)?
+            unrecalled(&reader.read(&episode.path)?)
         };
         let candidates = extractor.extract(&episode.path, &text).await?;
         report.episodes.push(episode.path.clone());
@@ -191,23 +306,95 @@ pub async fn run(
                 bundle,
                 index,
                 &mut report,
-                today,
+                settings,
             )
             .await?;
         }
     }
 
-    archive_stale(bundle, &mut report, today).await?;
+    archive_stale(bundle, &mut report, settings.today).await?;
+    Ok(report)
+}
 
-    {
-        let writer = bundle.writer().await;
-        writer.commit(&summary_line(&report))?;
+/// Drops the lines that are Loki quoting itself (§9.8).
+///
+/// **Recalled content is never re-extracted.** A claim pre-fetch injected into a turn is marked in
+/// the buffer, and extraction skips those lines. Without this a fact recalled a hundred times
+/// becomes a hundred claims phrased a hundred ways, which is the duplication the build kept
+/// producing.
+fn unrecalled(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with(super::handle::RECALLED))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Claims that are believed right now, across the whole store. Step 5's denominator.
+async fn live_claims(bundle: &Bundle) -> usize {
+    let reader = bundle.reader().await;
+    let Ok(paths) = reader.concepts() else {
+        return 0;
+    };
+    paths
+        .iter()
+        .filter_map(|path| reader.load_concept(path).ok())
+        .map(|concept| {
+            concept
+                .claims()
+                .filter(|claim| claim.validity.is_believed())
+                .count()
+        })
+        .sum()
+}
+
+/// Whether a pass retired more than §9.8 allows.
+///
+/// **Counts what the pass retired, not the net change.** Net claim count is the obvious measure
+/// and it cannot work here: every supersession adds a replacement as it retires, so the total
+/// never moves and the check would be dead code. What matters is how much of the store one pass
+/// decided was no longer true.
+///
+/// A store that had nothing cannot lose too much, so an empty pre-image always passes.
+fn too_much_lost(before: usize, retired: usize) -> bool {
+    if before == 0 {
+        return false;
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "§10.7 sizes the store in thousands of claims, far below f32's exact range"
+    )]
+    let share = retired as f32 / before as f32;
+    share > BOUNDED_LOSS
+}
+
+/// Rewrites `index.md` as the concept catalog (§9.3, §10.3).
+///
+/// Written by consolidation, which already rewrites the files, so it costs nothing extra and can
+/// never drift from the content it describes. Lane 1 never reads it; it is an entry point for a
+/// lane 2 search and may never answer a query on its own.
+async fn catalog(bundle: &Bundle) -> Result<(), ConsolidateError> {
+    let mut out = String::from("---\nokf_version: '0.2'\n---\n\n# Loki memory\n\n");
     {
         let reader = bundle.reader().await;
-        index.sync(&reader)?;
+        let mut lines: Vec<String> = reader
+            .concepts()?
+            .iter()
+            .filter_map(|path| reader.load_concept(path).ok().map(|c| (path.clone(), c)))
+            .map(|(path, concept)| {
+                let summary = concept
+                    .claims()
+                    .find(|claim| claim.validity.is_believed())
+                    .map_or_else(String::new, |claim| format!(" — {}", claim.text));
+                format!("- [{}]({path}){summary}", concept.front.name)
+            })
+            .collect();
+        lines.sort_unstable();
+        out.push_str(&lines.join("\n"));
+        out.push('\n');
     }
-    Ok(report)
+    let writer = bundle.writer().await;
+    writer.write(bundle::INDEX, &out)?;
+    Ok(())
 }
 
 /// Writes one candidate into the entity it resolved to.
@@ -218,10 +405,10 @@ async fn absorb(
     bundle: &Bundle,
     index: &Index,
     report: &mut Report,
-    today: Date,
+    settings: Settings,
 ) -> Result<(), ConsolidateError> {
     let mut claim =
-        Claim::new(&candidate.text, candidate.origin, today).about(&candidate.attribute);
+        Claim::new(&candidate.text, candidate.origin, settings.today).about(&candidate.attribute);
     if let Some(valid_from) = candidate.world_time(episode.reference) {
         claim = claim.dated(valid_from);
     }
@@ -245,14 +432,14 @@ async fn absorb(
                 reader.load_concept(&path).ok()
             };
             if let Some(mut concept) = existing {
-                merge(&mut concept, &path, candidate, claim, report, today);
+                merge(&mut concept, &path, candidate, claim, report, settings);
                 // Scoped, because `refresh` below takes a reader and the write guard excludes it.
                 {
                     let writer = bundle.writer().await;
                     writer.save_concept(&path, &concept)?;
                 }
             } else {
-                let mut front = Frontmatter::new(&candidate.surface, today);
+                let mut front = Frontmatter::new(&candidate.surface, settings.today);
                 front.aliases = aliases;
                 front.tags.clone_from(&candidate.tags);
                 // What the user stated is usable at once; what was merely inferred waits for a
@@ -280,7 +467,7 @@ async fn absorb(
                 let reader = bundle.reader().await;
                 reader.load_concept(&path)?
             };
-            merge(&mut concept, &path, candidate, claim, report, today);
+            merge(&mut concept, &path, candidate, claim, report, settings);
             {
                 let writer = bundle.writer().await;
                 writer.save_concept(&path, &concept)?;
@@ -310,7 +497,7 @@ fn merge(
     candidate: &Candidate,
     claim: Claim,
     report: &mut Report,
-    today: Date,
+    settings: Settings,
 ) {
     // Saying the same thing again is a second occurrence, not a second claim and not a correction.
     // Exact repeats come from a session closing twice or §11.5 resuming a paused import; reworded
@@ -340,7 +527,12 @@ fn merge(
         return;
     };
 
-    let outcome = reconcile::precedence(&held, &claim, false);
+    // After a rejected pass nothing may retire, so a supersession becomes an append. §9.8's
+    // fallback: a bad extraction costs a duplicate rather than the store.
+    let outcome = match reconcile::precedence(&held, &claim, false) {
+        Precedence::Replace if settings.keep == Keep::Everything => Precedence::Surface,
+        other => other,
+    };
     report.decisions.push(reconcile::Decided {
         concept: path.to_owned(),
         held: held_text.clone(),
@@ -358,7 +550,7 @@ fn merge(
         &held_text,
         claim,
         outcome,
-        today,
+        settings.today,
     );
 }
 
@@ -518,33 +710,30 @@ fn earned_stable(concept: &RawConcept) -> bool {
     })
 }
 
-/// Deletes the scratch files a run promoted, so the directory listing matches what is live.
+/// Empties the session buffer once a pass has been committed (§9.3).
 ///
-/// §9.8: merge, do not append.
+/// Only the buffer, and only after a successful pass. The episode is the permanent record and is
+/// never cleared; clearing the buffer is what makes a second close in one session cheap and
+/// non-duplicating, because it has nothing left to re-extract.
 ///
 /// # Errors
 /// Fails if the bundle cannot be written.
-pub async fn clear_promoted(bundle: &Bundle, sources: &[String]) -> Result<(), BundleError> {
+pub async fn clear_buffer(bundle: &Bundle) -> Result<(), BundleError> {
     let writer = bundle.writer().await;
-    for path in sources {
-        if path.starts_with(SCRATCH) {
-            writer.remove(path)?;
-        }
-    }
+    writer.write(bundle::CURRENT, "")?;
     Ok(())
 }
 
 fn summary_line(report: &Report) -> String {
+    if let Some(why) = &report.rejected {
+        return format!("Consolidation refused: {why}");
+    }
     format!(
         "Consolidate {} episode(s): {} created, {} promoted, {} superseded, {} archived",
         report.episodes.len(),
         report.created.len(),
         report.promoted.len(),
-        report
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == Precedence::Replace)
-            .count(),
+        report.superseded(),
         report.archived.len()
     )
 }
@@ -579,6 +768,12 @@ The attribute is the single most important column. It is a short lower-case key 
 PROPERTY of the entity the fact sets: name, employer, role, city, education, birthday, pronouns,
 reply_style. Two facts sharing an entity and an attribute are treated as competing, and the newer
 one replaces the older. Two facts with different attributes both stand.
+
+Four rules about the writing itself, which matter more than any of the rest:
+- Stay faithful to the source. Reorganize, never invent.
+- Preserve every metadata field exactly: attribute, origin, world time, system time.
+- Resolve duplicates and contradictions by the rules below, never by free-form summarizing.
+- Return parseable output only, with no prose outside the format.
 
 Rules:
 - Only durable facts. A one-off question, a passing joke or a task instruction is not a fact.

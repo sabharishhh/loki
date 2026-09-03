@@ -4,7 +4,7 @@
 //! cannot escape the root, and that git actually commits.
 
 use jiff::civil::date;
-use loki_core::memory::bundle::{Bundle, BundleError, SCRATCH};
+use loki_core::memory::bundle::{Bundle, BundleError, CURRENT};
 use loki_core::memory::claim::Claim;
 use loki_core::memory::concept::{Frontmatter, RawConcept, Status};
 use loki_core::memory::history::ChangeKind;
@@ -39,12 +39,22 @@ impl Drop for Temp {
 #[tokio::test]
 async fn opening_creates_the_layout_from_section_9_3() {
     let temp = Temp::new("layout").await;
-    for dir in ["people", "projects", "preferences", "episodes", SCRATCH] {
+    for dir in ["people", "projects", "preferences", "episodes"] {
         assert!(temp.dir.join(dir).is_dir(), "{dir} was not created");
     }
-    for file in ["index.md", "log.md", "working-set.md", "standing.md"] {
+    for file in [
+        "index.md",
+        "log.md",
+        "working-set.md",
+        "standing.md",
+        CURRENT,
+    ] {
         assert!(temp.dir.join(file).is_file(), "{file} was not created");
     }
+    assert!(
+        !temp.dir.join("scratch").exists(),
+        "v0.9 replaced the scratch directory with one buffer file"
+    );
     assert!(temp.dir.join(".git").exists(), "git was not initialised");
 }
 
@@ -280,17 +290,19 @@ async fn a_concept_round_trips_through_the_bundle() {
 }
 
 #[tokio::test]
-async fn concepts_excludes_scratch_and_generated_files() {
+async fn concepts_excludes_the_buffer_and_generated_files() {
     let temp = Temp::new("listing").await;
     temp.bundle
         .writer()
         .await
         .write("people/meera.md", "---\nx\n---\n")
         .unwrap();
+    // The buffer is a transcript, not a concept. Listing it would hand consolidation its own
+    // input as an entity to reconcile.
     temp.bundle
         .writer()
         .await
-        .write("scratch/draft.md", "---\nx\n---\n")
+        .append(CURRENT, "\n**user**: hello\n")
         .unwrap();
 
     let concepts = temp.bundle.reader().await.concepts().expect("concepts");
