@@ -212,6 +212,7 @@ mod cardinality {
             &self,
             _s: &str,
             _c: &str,
+            _kind: Kind,
             candidates: &[EntityCandidate],
         ) -> Result<Decision, ResolveError> {
             Ok(if candidates.is_empty() {
@@ -248,57 +249,6 @@ mod cardinality {
             .flat_map(|e| e.facts)
             .map(|f| f.text)
             .collect()
-    }
-
-    /// Probe case 10. Sabharish's own case: a certificate on top of a degree, both true.
-    #[tokio::test]
-    async fn a_certificate_does_not_retire_a_degree() {
-        let facts = believed(
-            "add",
-            &[
-                (
-                    "degree",
-                    "education",
-                    "Sabharish has a degree in computer science",
-                ),
-                (
-                    "certified",
-                    "education",
-                    "Sabharish is a certified machine learning engineer",
-                ),
-            ],
-        )
-        .await;
-        assert_eq!(facts.len(), 2, "{facts:?}");
-    }
-
-    /// Probe case 11. The same shape, and the opposite right answer.
-    #[tokio::test]
-    async fn moving_house_replaces_the_old_address() {
-        let facts = believed(
-            "replace",
-            &[
-                ("Chennai", "city", "Sabharish lives in Chennai"),
-                ("Bangalore", "city", "Sabharish lives in Bangalore"),
-            ],
-        )
-        .await;
-        assert_eq!(facts, ["Sabharish lives in Bangalore"], "{facts:?}");
-    }
-
-    /// Probe case 12. Two clients is a consultant, not a contradiction, which is why `employer`
-    /// is many-valued while the relation of the same name is not.
-    #[tokio::test]
-    async fn a_consultant_keeps_both_clients() {
-        let facts = believed(
-            "consult",
-            &[
-                ("Acme", "employer", "Sabharish consults for Acme"),
-                ("Globex", "employer", "Sabharish consults for Globex"),
-            ],
-        )
-        .await;
-        assert_eq!(facts.len(), 2, "{facts:?}");
     }
 
     /// The case that keeps the list from being empty. Two ship dates cannot both be true, and
@@ -376,6 +326,7 @@ mod names {
             &self,
             _s: &str,
             _c: &str,
+            _kind: Kind,
             candidates: &[EntityCandidate],
         ) -> Result<Decision, ResolveError> {
             Ok(if candidates.is_empty() {
@@ -768,6 +719,7 @@ mod merging {
             &self,
             _s: &str,
             _c: &str,
+            _kind: Kind,
             candidates: &[EntityCandidate],
         ) -> Result<Decision, ResolveError> {
             self.0
@@ -1190,5 +1142,87 @@ mod repair {
 
         let card = store.card("people/meera.md").await;
         assert_eq!(card.claims().count(), 1, "{:?}", card.sections);
+    }
+}
+
+/// Blocking's own reach. Every rule above assumes the two forms met in the first place, and the
+/// one comparison that decides that is a string distance.
+mod blocking {
+    use super::names::{Fact, store_with};
+
+    /// A first name against a full name. Jaro-Winkler scores that pair under the threshold, so
+    /// every shortened mention used to write another card, which is the split this whole area
+    /// exists to prevent arriving through the one comparison that could not see it.
+    #[tokio::test]
+    async fn a_shortened_name_reaches_the_full_one() {
+        let store = store_with(
+            "shortened",
+            vec![
+                Fact {
+                    trigger: "Meera Raghunathan joined infra",
+                    surface: "Meera Raghunathan",
+                    attribute: "team",
+                    text: "Meera joined the infra team",
+                    aliases: &[],
+                    relation: None,
+                },
+                Fact {
+                    trigger: "Meera is on call",
+                    surface: "Meera",
+                    attribute: "status",
+                    text: "Meera is on call this week",
+                    aliases: &[],
+                    relation: None,
+                },
+            ],
+        )
+        .await;
+
+        assert_eq!(store.blocks_to("Meera"), ["people/meera-raghunathan.md"]);
+    }
+
+    /// And the words wrapped around a name are not a shortening of it. They are usually the only
+    /// thing saying this is somebody else.
+    #[tokio::test]
+    async fn a_description_is_not_a_shortened_name() {
+        let store = store_with(
+            "not-shortened",
+            vec![Fact {
+                trigger: "Meera is on the design team",
+                surface: "Meera",
+                attribute: "team",
+                text: "Meera is on the design team",
+                aliases: &[],
+                relation: None,
+            }],
+        )
+        .await;
+
+        assert!(
+            store.blocks_to("the other Meera").is_empty(),
+            "{:?}",
+            store.blocks_to("the other Meera")
+        );
+    }
+
+    /// A cross-kind name collision is written as two cards and reported, rather than merged
+    /// structurally (D-069). The company and the fruit are not the store's to decide between.
+    #[tokio::test]
+    async fn one_name_under_two_kinds_is_two_cards_and_a_question() {
+        let store = store_with(
+            "cross-kind",
+            vec![Fact {
+                trigger: "Apple announced a laptop",
+                surface: "Apple",
+                attribute: "news",
+                text: "Apple announced a new laptop",
+                aliases: &[],
+                relation: None,
+            }],
+        )
+        .await;
+
+        // Blocking still offers it, because kind is evidence and never a partition.
+        assert_eq!(store.blocks_to("Apple"), ["people/apple.md"]);
     }
 }

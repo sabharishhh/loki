@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::index::{Blocking, Candidate, Index, IndexError};
+use super::index::{Candidate, Index, IndexError};
 use crate::core::vocab::ModelRole;
 use crate::ports::model::{Message, ModelError, ModelProvider, Request, SystemBlock};
 
@@ -60,6 +60,18 @@ pub enum Decision {
     Tie(Vec<usize>),
 }
 
+/// **An exact name under another kind no longer forces a merge** (D-069).
+///
+/// It used to: a matcher answering `New` was overridden when the same slug already existed
+/// elsewhere, on the reasoning that identity is the entity and not the directory. That was right
+/// when the matcher was shown two bare names, because its "no" was about the claim rather than
+/// about identity. It is shown both kinds and both sets of facts now, so its "no" is an informed
+/// answer and overriding it merged the company Apple with an allergy to apples.
+///
+/// Neither direction decides structurally any more. Two cards are written and reported as
+/// claiming one name, and one tap folds them together if they should be. That is the safe way
+/// round: a split leaves two visible rows, and a merge silently hides a true fact (§21.2).
+///
 /// Where a claim belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -81,6 +93,9 @@ pub enum Resolution {
 pub trait Matcher: Send + Sync {
     /// Picks the entity a claim belongs to from a bounded candidate set.
     ///
+    /// `kind` is what the statement is about, so a matcher can weigh it against each candidate's.
+    /// Without it the rule that a differing kind is evidence has nothing to compare against.
+    ///
     /// # Errors
     /// Fails if the underlying call fails. An unparseable answer is not an error: it is treated
     /// as no match, since inventing a merge is worse than writing a new file.
@@ -88,6 +103,7 @@ pub trait Matcher: Send + Sync {
         &self,
         surface: &str,
         claim: &str,
+        kind: Kind,
         candidates: &[Candidate],
     ) -> Result<Decision, ResolveError>;
 }
@@ -135,7 +151,7 @@ pub async fn resolve(
         return Ok(fresh(trimmed, kind));
     }
 
-    let resolution = match matcher.decide(trimmed, claim, &candidates).await? {
+    let resolution = match matcher.decide(trimmed, claim, kind, &candidates).await? {
         // An out-of-range answer is a malformed answer. A new file is recoverable; merging into
         // the wrong entity is the failure §21.2 exists to measure.
         Decision::Existing(at) => candidates.get(at).map_or_else(
@@ -144,10 +160,7 @@ pub async fn resolve(
                 path: c.path.clone(),
             },
         ),
-        Decision::New => same_entity_elsewhere(trimmed, &candidates).map_or_else(
-            || fresh(trimmed, kind),
-            |path| Resolution::Existing { path },
-        ),
+        Decision::New => fresh(trimmed, kind),
         Decision::Tie(between) => {
             let paths: Vec<String> = between
                 .into_iter()
@@ -243,34 +256,6 @@ fn one_word(label: &str) -> Option<&str> {
     (!label.is_empty() && !label.contains(char::is_whitespace)).then_some(label)
 }
 
-/// An existing concept for this exact surface form, filed under a different kind (§9.4).
-///
-/// Identity is the entity, not the directory it landed in. A path is `<kind>/<slug>.md`, so the
-/// same surface extracted once as a person and once as a preference would otherwise become two
-/// files, and blocking would then see two candidates for one thing.
-///
-/// Only an exact name match counts, and only when the slug agrees. An alias or a near name is
-/// evidence about a claim, which is the matcher's question; an identical name under two kinds is
-/// evidence about identity, which is not. Deciding it structurally rather than by asking again is
-/// the same reasoning §9.4 uses for blocking and principle 9 uses for time.
-fn same_entity_elsewhere(surface: &str, candidates: &[Candidate]) -> Option<String> {
-    let wanted = slug(surface);
-    let mut exact = candidates
-        .iter()
-        .filter(|c| c.why == Blocking::ExactName && path_slug(&c.path) == wanted);
-    let first = exact.next()?;
-    // Two files already claiming this name is §9.4's known failure, not something to pick between.
-    exact.next().is_none().then(|| first.path.clone())
-}
-
-/// The `<slug>` of a `<kind>/<slug>.md` path.
-fn path_slug(path: &str) -> &str {
-    path.rsplit('/')
-        .next()
-        .and_then(|file| file.strip_suffix(".md"))
-        .unwrap_or(path)
-}
-
 /// A new entity, with its alias list seeded from the form that was used (§9.4 step 3).
 fn fresh(surface: &str, kind: Kind) -> Resolution {
     Resolution::New {
@@ -359,7 +344,8 @@ writes a fact onto the wrong person, and nothing ever surfaces it.
 - If a known entity's facts contradict the statement, it is a different entity. Someone on the
   design team is not the person who runs infra, whatever they are both called.
 - A different kind is evidence, not proof. The company Apple and an allergy to apples are
-  different things; a person also filed as a project is one thing filed twice.
+  different things; a person also filed as a project is one thing filed twice. When the kinds
+  differ and nothing in the facts links them, answer NEW.
 - Two entities that both fit and cannot be told apart are a TIE. That is a real answer, and it is
   the right one for two people who share a name.";
 
@@ -369,11 +355,12 @@ impl Matcher for ModelMatcher<'_> {
         &self,
         surface: &str,
         claim: &str,
+        kind: Kind,
         candidates: &[Candidate],
     ) -> Result<Decision, ResolveError> {
         let mut prompt = String::new();
         let _ = writeln!(prompt, "Statement: {claim}");
-        let _ = writeln!(prompt, "Referring to: {surface}\n");
+        let _ = writeln!(prompt, "Referring to: {surface} [{}]\n", kind.directory());
         let _ = writeln!(prompt, "Known entities:");
         for (at, candidate) in candidates.iter().enumerate() {
             let _ = writeln!(

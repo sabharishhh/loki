@@ -1174,7 +1174,8 @@ impl Index {
                 } else {
                     Blocking::Alias
                 }
-            } else if strsim::jaro_winkler(&form, &needle) >= NEAR_NAME {
+            } else if strsim::jaro_winkler(&form, &needle) >= NEAR_NAME || shortened(&form, &needle)
+            {
                 Blocking::NearName
             } else {
                 continue;
@@ -1517,6 +1518,37 @@ fn coverage(query_terms: &[String], text: &str, forms: &str) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let fraction = matched as f32 / query_terms.len() as f32;
     fraction
+}
+
+/// Whether one surface form is the other with words dropped.
+///
+/// "Meera" against "Meera Raghunathan". Jaro-Winkler scores that pair around 0.85, under the
+/// threshold, so a first name and a full name never met and every shortened mention wrote another
+/// card. That is the split this whole area exists to prevent, arriving through the one comparison
+/// that could not see it.
+///
+/// Whole words only, and the shorter form needs a word of three characters or more, so an initial
+/// or a stray particle does not match everything. Blocking is recall: two people who really do
+/// share a first name both reach the matcher, which is exactly where that question belongs.
+///
+/// A descriptor is excluded on both sides, because the words wrapped around a name in "the other
+/// Meera" are the evidence that she is somebody else.
+fn shortened(one: &str, other: &str) -> bool {
+    fn words(text: &str) -> Vec<&str> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+    // A description is never a shortened name. "The other Meera" contains "Meera" and the words
+    // around it are the whole point: they are what says she is somebody else.
+    if super::resolve::looks_described(one) || super::resolve::looks_described(other) {
+        return false;
+    }
+    let (a, b) = (words(one), words(other));
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.len() < long.len()
+        && short.iter().any(|w| w.chars().count() >= 3)
+        && short.iter().all(|w| long.contains(w))
 }
 
 /// Believed claims to pull in from a concept a query named rather than described.

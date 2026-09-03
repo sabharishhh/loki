@@ -68,6 +68,7 @@ impl Matcher for Scripted {
         &self,
         _surface: &str,
         _claim: &str,
+        _kind: Kind,
         candidates: &[Candidate],
     ) -> Result<Decision, ResolveError> {
         self.seen.lock().expect("lock").push(candidates.to_vec());
@@ -384,15 +385,45 @@ async fn a_removed_entity_stops_being_a_candidate() {
     );
 }
 
-/// B-29, and §9.4's "identity is the entity, not the directory". The same surface extracted once
-/// as a project and once as a person must not become two files, because blocking would then see
-/// two candidates for one thing and the store would look like it writes a file per fact.
+/// B-29 revisited (D-069). An exact name under another kind used to override the matcher and
+/// merge. It no longer does, and the reason is that the matcher's answer changed meaning.
+///
+/// When it was shown two bare names, a "no" was about the claim rather than about identity, so
+/// overriding it was defensible. It is shown both kinds and both sets of facts now, so a "no" is
+/// an informed answer, and overriding it merged the company Apple with an allergy to apples.
+///
+/// B-29's failure does not come back, because it is no longer silent: two cards claiming one name
+/// are reported on the trust surface and one tap folds them together. That is the safe way round,
+/// since a split leaves two visible rows and a merge hides a true fact (§21.2).
 #[tokio::test]
-async fn one_surface_under_two_kinds_resolves_to_one_file() {
+async fn an_exact_name_under_another_kind_no_longer_forces_a_merge() {
     let store = Store::new("cross-kind").await;
-    // The matcher declines: `Loki` already exists as a project, and the incoming claim reads like
-    // a person fact, so the question it was asked has a defensible "no".
     let matcher = Scripted::new(Decision::New);
+
+    let resolved = resolve(
+        "Loki",
+        &[],
+        "Loki prefers short replies",
+        Kind::Person,
+        None,
+        &store.index,
+        &matcher,
+    )
+    .await
+    .expect("resolve");
+
+    assert!(
+        matches!(&resolved, Resolution::New { path, .. } if path == "people/loki.md"),
+        "the matcher looked at both and said no: {resolved:?}"
+    );
+}
+
+/// And a matcher that says yes still merges, whatever the directories say. Kind is evidence on
+/// both sides of the question, and never a structural answer to it.
+#[tokio::test]
+async fn a_matcher_that_says_yes_across_kinds_is_believed() {
+    let store = Store::new("cross-kind-yes").await;
+    let matcher = Scripted::new(Decision::Existing(0));
 
     let resolved = resolve(
         "Loki",
@@ -410,36 +441,15 @@ async fn one_surface_under_two_kinds_resolves_to_one_file() {
         resolved,
         Resolution::Existing {
             path: "projects/loki.md".to_string()
-        },
-        "an exact name already on disk is the same entity, whatever directory it landed in"
+        }
     );
 }
 
-/// The override is about identity, not about the claim. A name nothing matches still creates.
+/// A name nothing matches at all creates, with no model call spent on it.
 #[tokio::test]
 async fn a_name_nothing_matches_still_creates_its_own_file() {
     let store = Store::new("cross-kind-distinct").await;
     let matcher = Scripted::new(Decision::New);
-
-    let resolved = resolve(
-        "Meera",
-        &[],
-        "Meera works on infra",
-        Kind::Preference,
-        None,
-        &store.index,
-        &matcher,
-    )
-    .await
-    .expect("resolve");
-
-    // `Meera` is an exact name under `people/`, so identity wins there too.
-    assert_eq!(
-        resolved,
-        Resolution::Existing {
-            path: "people/meera.md".to_string()
-        }
-    );
 
     let novel = resolve(
         "Quarterly review",

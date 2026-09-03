@@ -942,6 +942,10 @@ Rules:
   `the user's sister | person | trait | stated | - | The user's sister is studious` plus
   `relation | the user's sister | sister | the user`.
 - Use the same entity name every time you refer to the same thing, so it resolves to one file.
+- **Keep the words that mark somebody out as a different person of the same name.** If a sentence
+  says `the other Meera`, `a different Priya` or `Meera from accounts`, write that whole phrase as
+  the entity rather than the bare name. Those words are the only evidence that two people sharing
+  a name are two people, and dropping them merges them for good.
 - `stated` means the user said it about themselves or their world. `inferred` means you worked it
   out. Prefer `inferred` when unsure, since a stated fact is trusted immediately.
 - The date is when the fact started being true, not today. Use `-` if the transcript does not say.

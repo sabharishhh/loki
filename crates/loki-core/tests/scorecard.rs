@@ -147,27 +147,56 @@ impl Extractor for Staged {
     }
 }
 
-/// Says yes to the first candidate blocking offered.
+/// A matcher that uses what the prompt actually carries, and nothing else.
 ///
-/// Deliberately naive, and kept that way. Blocking has already narrowed to near matches, so this is
-/// what a competent matcher does most of the time, and the cases it gets wrong are exactly the ones
-/// worth seeing: they are where the store is relying on the model rather than on structure.
-struct FirstMatch;
+/// Blocking has already narrowed to near matches, so saying yes to the first is what a competent
+/// matcher does most of the time. The one thing it does beyond that is the one thing the prompt
+/// gained: a candidate of a different kind, with nothing in its facts linking it to the statement,
+/// is a different thing.
+///
+/// Deliberately not clever. It reads a kind and a name, both of which are in front of a real model
+/// too, so what it proves is that the *data* is sufficient rather than that some model is good.
+struct Reads;
 
 #[async_trait]
-impl Matcher for FirstMatch {
+impl Matcher for Reads {
     async fn decide(
         &self,
-        _s: &str,
-        _c: &str,
+        surface: &str,
+        claim: &str,
+        kind: Kind,
         candidates: &[EntityCandidate],
     ) -> Result<Decision, ResolveError> {
-        Ok(if candidates.is_empty() {
-            Decision::New
-        } else {
-            Decision::Existing(0)
-        })
+        let Some(best) = candidates.first() else {
+            return Ok(Decision::New);
+        };
+        if best.kind != kind.directory() && !links(surface, claim, &best.facts) {
+            return Ok(Decision::New);
+        }
+        Ok(Decision::Existing(0))
     }
+}
+
+/// Whether anything the candidate is known for turns up in the statement.
+///
+/// Words of three letters or more, and never the name itself: the two share that by construction,
+/// so counting it would make every candidate look related to every statement.
+fn links(surface: &str, claim: &str, facts: &[String]) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let named = words(surface);
+    let said: Vec<String> = words(claim)
+        .into_iter()
+        .filter(|w| !named.contains(w))
+        .collect();
+    facts
+        .iter()
+        .flat_map(|fact| words(fact))
+        .any(|word| said.contains(&word))
 }
 
 struct Run {
@@ -203,7 +232,7 @@ impl Run {
                 facts: turn.facts.iter().map(clone_fact).collect(),
             }]));
             memory
-                .close(&staged, &FirstMatch, &Unbounded, today())
+                .close(&staged, &Reads, &Unbounded, today())
                 .await
                 .expect("close");
         }
@@ -424,18 +453,20 @@ fn cases() -> Vec<Case> {
                 },
                 Turn {
                     said: "the other Meera runs infra",
-                    facts: vec![person("Meera", "team", "Meera runs the infra team")],
+                    // Extraction keeps the words that mark her out, because they are the only
+                    // evidence that two people sharing a name are two people.
+                    facts: vec![person(
+                        "the other Meera",
+                        "team",
+                        "The other Meera runs the infra team",
+                    )],
                 },
             ],
             expect: Expect {
-                entities: 1,
-                // Both survive, which is the improvement. `team` is many-valued, so the merge no
-                // longer hides a true fact behind rule 4 the way it did in the probe.
-                recalls: &[("Meera team", "design"), ("Meera design", "infra")],
-                gap: Some(
-                    "a naive matcher still merges them. It now sees each candidate's kind and \
-                     facts, so telling them apart is a prompt away, but nothing structural stops it",
-                ),
+                entities: 2,
+                // Two cards, and not a split: they are deliberately named differently, so
+                // nothing needs folding together.
+                recalls: &[("Meera design", "design"), ("Meera infra", "infra")],
                 ..NOTHING
             },
         },
@@ -748,12 +779,11 @@ fn cases() -> Vec<Case> {
                 },
             ],
             expect: Expect {
-                entities: 1,
-                recalls: &[("apple", "apple")],
-                gap: Some(
-                    "still merged by a naive matcher. Kind is evidence now and reaches the prompt, \
-                     which is what §12's fetched pages will need",
-                ),
+                entities: 2,
+                recalls: &[("apple laptop", "laptop"), ("allergic", "allergic")],
+                // One form, two cards, and the store says so. Whether the company and the fruit
+                // are the same thing is not something it can decide, so it asks.
+                duplicates: &["apple"],
                 ..NOTHING
             },
         },
@@ -837,6 +867,101 @@ fn cases() -> Vec<Case> {
                 entities: 2,
                 recalls: &[("Zoe", "manages"), ("Priya", "manages")],
                 owner_edges: &[("manager", "people/zoe.md")],
+                ..NOTHING
+            },
+        },
+        Case {
+            name: "20 a name in another script, with a nickname and a relation",
+            why: "Every rule in §9.4 is a string rule. Slugs, descriptors and alias growth all \
+                  have to work on text that is not Latin, or the design only fits English.",
+            turns: vec![
+                Turn {
+                    said: "my colleague 陳美玲 is moving to 台北",
+                    facts: vec![related(
+                        also(
+                            person("陳美玲", "city", "陳美玲 is moving to 台北"),
+                            &["Meiling"],
+                        ),
+                        "colleague",
+                        "the user",
+                    )],
+                },
+                Turn {
+                    said: "Meiling starts on Monday",
+                    facts: vec![person("Meiling", "status", "Meiling starts on Monday")],
+                },
+            ],
+            expect: Expect {
+                entities: 1,
+                recalls: &[("台北", "台北"), ("Meiling", "Monday")],
+                owner_edges: &[("colleague", "people/陳美玲.md")],
+                ..NOTHING
+            },
+        },
+        Case {
+            name: "21 the enormous case: one person, six ways of saying it",
+            why: "Alias growth has to converge on one card rather than fragment, and the list has \
+                  to stop growing once it has heard a form before.",
+            turns: vec![
+                Turn {
+                    said: "Meera Raghunathan joined infra",
+                    facts: vec![person(
+                        "Meera Raghunathan",
+                        "team",
+                        "Meera joined the infra team",
+                    )],
+                },
+                Turn {
+                    said: "Meera is on call this week",
+                    facts: vec![person("Meera", "status", "Meera is on call this week")],
+                },
+                Turn {
+                    said: "MR reviewed the design",
+                    facts: vec![also(
+                        person("Meera", "status", "Meera reviewed the design"),
+                        &["MR"],
+                    )],
+                },
+                Turn {
+                    said: "Meera again today",
+                    facts: vec![also(
+                        person("Meera", "status", "Meera was in again today"),
+                        &["MR", "Meera"],
+                    )],
+                },
+            ],
+            expect: Expect {
+                entities: 1,
+                recalls: &[("MR design", "design"), ("Meera on call", "on call")],
+                ..NOTHING
+            },
+        },
+        Case {
+            name: "22 where two rules meet: a relation pointing at the assistant",
+            why: "The assistant is a seeded singleton and an ordinary target of an edge. It must \
+                  stay one card and must not become a person Loki knows about.",
+            turns: vec![
+                Turn {
+                    said: "you are my assistant",
+                    facts: vec![related(
+                        person("Loki", "role", "Loki is the user's assistant"),
+                        "assistant",
+                        "the user",
+                    )],
+                },
+                Turn {
+                    said: "my assistant should keep replies short",
+                    facts: vec![person(
+                        "Loki",
+                        "reply_style",
+                        "Loki should keep replies short",
+                    )],
+                },
+            ],
+            expect: Expect {
+                entities: 1,
+                recalls: &[("my assistant", "short")],
+                owner_edges: &[("assistant", "people/loki.md")],
                 ..NOTHING
             },
         },

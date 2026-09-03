@@ -65,6 +65,7 @@ impl Matcher for FirstMatch {
         &self,
         _surface: &str,
         _claim: &str,
+        _kind: Kind,
         candidates: &[EntityCandidate],
     ) -> Result<Decision, ResolveError> {
         Ok(if candidates.is_empty() {

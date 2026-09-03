@@ -151,6 +151,7 @@ impl Matcher for FirstMatch {
         &self,
         _s: &str,
         _c: &str,
+        _kind: Kind,
         candidates: &[EntityCandidate],
     ) -> Result<Decision, ResolveError> {
         Ok(if candidates.is_empty() {
@@ -170,6 +171,7 @@ impl Matcher for Confused {
         &self,
         _s: &str,
         _c: &str,
+        _kind: Kind,
         candidates: &[EntityCandidate],
     ) -> Result<Decision, ResolveError> {
         Ok(if candidates.len() > 1 {
