@@ -29,6 +29,22 @@ use crate::core::temporal;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Knowledge {
     pub entities: Vec<Entity>,
+    /// Cards that answer to one name, so the screen can offer to fold them together (§9.4).
+    ///
+    /// Derived from the store on every read rather than reported once by the pass that caused it.
+    /// A split can arrive from a hand edit or an import as easily as from consolidation, and a
+    /// one-shot report would only ever catch the third.
+    pub duplicates: Vec<Duplicate>,
+}
+
+/// Two or more cards claiming the same surface form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Duplicate {
+    /// What they all answer to, as the user would recognise it.
+    pub form: String,
+    /// Paths, most-known-about first, so the screen's default target is the fuller card.
+    pub paths: Vec<String>,
+    pub names: Vec<String>,
 }
 
 /// One person, project or preference, and what is known about it.
@@ -106,6 +122,7 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
     };
 
     let mut entities = Vec::with_capacity(paths.len());
+    let mut cards: Vec<(String, RawConcept)> = Vec::with_capacity(paths.len());
     for path in paths {
         let concept = {
             let reader = bundle.reader().await;
@@ -124,6 +141,7 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
             continue;
         }
         entities.push(entity(&path, &concept, today));
+        cards.push((path, concept));
     }
 
     entities.sort_by(|a, b| {
@@ -131,7 +149,54 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
             .cmp(&a.newest())
             .then_with(|| a.name.cmp(&b.name))
     });
-    Ok(Knowledge { entities })
+    let duplicates = duplicates(&cards);
+    Ok(Knowledge {
+        entities,
+        duplicates,
+    })
+}
+
+/// Cards that answer to one name (§9.4).
+///
+/// Everything else in §9.4 stops a split happening at write time. This is what makes one that got
+/// through visible, which has to come first: a split nobody can see is worse than one nobody can
+/// fix, because the second at least gets reported.
+///
+/// A tombstone is skipped, since its forms belong to whatever it merged into.
+fn duplicates(cards: &[(String, RawConcept)]) -> Vec<Duplicate> {
+    use std::collections::BTreeMap;
+
+    let mut by_form: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (at, (_, concept)) in cards.iter().enumerate() {
+        if concept.front.merged_into.is_some() {
+            continue;
+        }
+        let mut forms: Vec<String> = std::iter::once(&concept.front.name)
+            .chain(concept.front.aliases.iter())
+            .map(|form| form.trim().to_lowercase())
+            .filter(|form| !form.is_empty())
+            .collect();
+        forms.sort_unstable();
+        forms.dedup();
+        for form in forms {
+            by_form.entry(form).or_default().push(at);
+        }
+    }
+
+    by_form
+        .into_iter()
+        .filter(|(_, at)| at.len() > 1)
+        .map(|(form, at)| {
+            let mut at = at;
+            // The fuller card first, so the screen's default is to fold the thinner one into it.
+            at.sort_by_key(|i| std::cmp::Reverse(cards[*i].1.claims().count()));
+            Duplicate {
+                form,
+                paths: at.iter().map(|i| cards[*i].0.clone()).collect(),
+                names: at.iter().map(|i| cards[*i].1.front.name.clone()).collect(),
+            }
+        })
+        .collect()
 }
 
 impl Entity {

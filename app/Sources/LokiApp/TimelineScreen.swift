@@ -19,6 +19,7 @@ struct TimelineScreen: View {
     let conversation: Conversation
 
     @State private var entities: [KnownEntity] = []
+    @State private var duplicates: [Duplicate] = []
     @State private var search = ""
     @State private var loading = true
 
@@ -53,6 +54,11 @@ struct TimelineScreen: View {
                 } else if shown.isEmpty {
                     Empty("No match", detail: "Nothing here mentions \"\(search)\".")
                 } else {
+                    // Above the cards, because it is about the shape of the list rather than about
+                    // any one row, and because a split nobody sees is worse than one nobody fixes.
+                    ForEach(duplicates) { split in
+                        SplitCard(split: split, conversation: conversation, reload: reload)
+                    }
                     ForEach(shown) { entity in
                         EntityCard(entity: entity, conversation: conversation, reload: reload)
                     }
@@ -65,13 +71,19 @@ struct TimelineScreen: View {
         }
         .background(Theme.Colors.raised)
         .task {
-            entities = conversation.knowledge()
+            let known = conversation.knowledge()
+            entities = known.entities
+            duplicates = known.duplicates
             withAnimation(Theme.Motion.standard) { loading = false }
         }
     }
 
     private func reload() {
-        withAnimation(Theme.Motion.standard) { entities = conversation.knowledge() }
+        let known = conversation.knowledge()
+        withAnimation(Theme.Motion.standard) {
+            entities = known.entities
+            duplicates = known.duplicates
+        }
     }
 
     private var header: some View {
@@ -103,6 +115,48 @@ struct TimelineScreen: View {
                 + "Every row is a line in a file you can open."
         }
         return "Grouped by what it is about. Every row is a line in a file you can open."
+    }
+}
+
+/// Two cards that answer to one name, and the one tap that folds them together.
+///
+/// Phrased as a question, not as an error. The store cannot know whether they are the same person,
+/// and a wrong merge hides a true fact where a wrong split only leaves two rows, so the default is
+/// to leave them alone.
+private struct SplitCard: View {
+    let split: Duplicate
+    let conversation: Conversation
+    let reload: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            Text("Two entries answer to \"\(split.form)\"")
+                .font(Theme.Text.body)
+                .foregroundStyle(Theme.Colors.ink)
+
+            ForEach(Array(split.paths.enumerated()), id: \.element) { at, path in
+                Text("\(split.names[at])  ·  \(path)")
+                    .font(Theme.Text.micro)
+                    .foregroundStyle(Theme.Colors.muted)
+            }
+
+            HStack(spacing: Theme.Space.m) {
+                Quiet("same thing, join them") {
+                    // Into the fuller card, which the core puts first.
+                    guard let into = split.paths.first, split.paths.count > 1 else { return }
+                    for path in split.paths.dropFirst() {
+                        conversation.merge(from: path, into: into)
+                    }
+                    reload()
+                }
+                Text("or leave them, if they are different")
+                    .font(Theme.Text.micro)
+                    .foregroundStyle(Theme.Colors.muted)
+            }
+        }
+        .padding(Theme.Space.m)
+        .background(Theme.State.holding.tint, in: .rect(cornerRadius: Theme.Radius.panel))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

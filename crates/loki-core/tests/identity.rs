@@ -1000,3 +1000,195 @@ mod finding {
         );
     }
 }
+
+/// The repair. Everything else in §9.4 stops a split at write time; this is what happens when one
+/// gets through anyway.
+mod repair {
+    use super::names::{Fact, store_with};
+    use super::today;
+    use loki_core::memory::bundle::OWNER;
+
+    /// Scorecard case 19. A name used in the third person before the user says it is theirs.
+    /// Two cards, and the store has to say so before anybody can do anything about it.
+    async fn a_split_store() -> super::Store {
+        store_with(
+            "split",
+            vec![
+                Fact {
+                    trigger: "Sabharish will be late",
+                    surface: "Sabharish",
+                    attribute: "status",
+                    text: "Sabharish will be late",
+                    aliases: &[],
+                    relation: None,
+                },
+                Fact {
+                    trigger: "my name is Sabharish",
+                    surface: "the user",
+                    attribute: "name",
+                    text: "The user's name is Sabharish",
+                    aliases: &["Sabharish"],
+                    relation: None,
+                },
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn two_cards_answering_to_one_name_are_reported() {
+        let store = a_split_store().await;
+        let knowledge = store.memory.knowledge(today()).await.expect("knowledge");
+
+        let split = knowledge
+            .duplicates
+            .iter()
+            .find(|d| d.form == "sabharish")
+            .unwrap_or_else(|| panic!("no duplicate reported: {:?}", knowledge.duplicates));
+        assert_eq!(split.paths.len(), 2, "{:?}", split.paths);
+        assert!(split.paths.contains(&OWNER.to_owned()), "{:?}", split.paths);
+    }
+
+    #[tokio::test]
+    async fn merging_folds_one_card_into_the_other() {
+        let store = a_split_store().await;
+        store
+            .memory
+            .merge("people/sabharish.md", OWNER, today())
+            .await
+            .expect("merge");
+
+        let owner = store.card(OWNER).await;
+        assert_eq!(owner.claims().count(), 2, "both facts, one card");
+        assert!(owner.front.answers_to("Sabharish"));
+
+        let knowledge = store.memory.knowledge(today()).await.expect("knowledge");
+        assert!(
+            knowledge.duplicates.is_empty(),
+            "{:?}",
+            knowledge.duplicates
+        );
+        assert_eq!(knowledge.entities.len(), 1, "{:?}", knowledge.entities);
+
+        // Nothing is deleted. The old card is a tombstone that says where its contents went.
+        let husk = store.card("people/sabharish.md").await;
+        assert_eq!(husk.front.merged_into.as_deref(), Some(OWNER));
+        assert!(husk.claims().next().is_none());
+        assert!(
+            husk.front.aliases.is_empty(),
+            "its names moved with its claims: {:?}",
+            husk.front.aliases
+        );
+    }
+
+    /// A merge that leaves an edge pointing at the tombstone breaks every graph lookup that went
+    /// through it, which is a quieter failure than the split it was fixing.
+    #[tokio::test]
+    async fn an_edge_pointing_at_the_merged_card_follows_it() {
+        let store = store_with(
+            "repoint",
+            vec![
+                Fact {
+                    trigger: "my sister is studious",
+                    surface: "the user's sister",
+                    attribute: "trait",
+                    text: "The user's sister is studious",
+                    aliases: &[],
+                    relation: Some(("sister", "the user")),
+                },
+                Fact {
+                    trigger: "Lakshmi lives in Chennai",
+                    surface: "Lakshmi",
+                    attribute: "city",
+                    text: "Lakshmi lives in Chennai",
+                    aliases: &[],
+                    relation: None,
+                },
+            ],
+        )
+        .await;
+
+        store
+            .memory
+            .merge("people/the-user-s-sister.md", "people/lakshmi.md", today())
+            .await
+            .expect("merge");
+
+        let owner = store.card(OWNER).await;
+        assert_eq!(
+            owner.front.related("sister"),
+            Some("people/lakshmi.md"),
+            "{:?}",
+            owner.front.relations
+        );
+        assert!(
+            store
+                .recall("my sister")
+                .iter()
+                .any(|h| h.contains("Chennai")),
+            "and the edge still finds her: {:?}",
+            store.recall("my sister")
+        );
+    }
+
+    /// Merging is the damaging direction (§21.2), so the two ways of doing it by accident are
+    /// refused outright rather than being made to work.
+    #[tokio::test]
+    async fn a_merge_that_makes_no_sense_is_refused() {
+        let store = a_split_store().await;
+        assert!(store.memory.merge(OWNER, OWNER, today()).await.is_err());
+
+        store
+            .memory
+            .merge("people/sabharish.md", OWNER, today())
+            .await
+            .expect("merge");
+        assert!(
+            store
+                .memory
+                .merge("people/sabharish.md", OWNER, today())
+                .await
+                .is_err(),
+            "a tombstone cannot be merged a second time"
+        );
+    }
+
+    /// Two cards about one person say some of the same things. A merge that copied them all would
+    /// turn every duplicate into a pair of near-identical rows on the trust surface.
+    #[tokio::test]
+    async fn a_fact_both_cards_held_arrives_once() {
+        // The shape an import produces: the same sentence filed under two ways of referring to
+        // one person, because the two exports worded the subject differently.
+        let store = store_with(
+            "restated",
+            vec![
+                Fact {
+                    trigger: "Meera is on the infra team",
+                    surface: "Meera",
+                    attribute: "team",
+                    text: "Meera is on the infra team",
+                    aliases: &[],
+                    relation: None,
+                },
+                Fact {
+                    trigger: "the reviewer is on infra",
+                    surface: "the design reviewer",
+                    attribute: "team",
+                    text: "Meera is on the infra team",
+                    aliases: &[],
+                    relation: None,
+                },
+            ],
+        )
+        .await;
+
+        store
+            .memory
+            .merge("people/the-design-reviewer.md", "people/meera.md", today())
+            .await
+            .expect("merge");
+
+        let card = store.card("people/meera.md").await;
+        assert_eq!(card.claims().count(), 1, "{:?}", card.sections);
+    }
+}

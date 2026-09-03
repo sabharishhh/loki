@@ -185,6 +185,17 @@ public final class Core: Sendable {
         decode(loki_knowledge(handle)) ?? Knowledge(entities: [])
     }
 
+    /// Folds one card into another, on the user's word.
+    ///
+    /// Never automatic. A wrong merge hides a true fact where a split only leaves two rows, so
+    /// this runs because somebody looked at both cards and said yes.
+    public func merge(from: String, into: String) throws {
+        let status = from.withCString { from in
+            into.withCString { loki_merge_entities(handle, from, $0) }
+        }
+        if let error = CoreError(status) { throw error }
+    }
+
     /// Confirms which side of a conflict is right, keeping the claim at `ordinal`.
     public func settle(path: String, keep: UInt32) throws {
         let status = path.withCString { loki_resolve_conflict(handle, $0, keep) }
@@ -252,6 +263,22 @@ public struct SessionTokens: Decodable, Sendable, Equatable {
 /// Everything Loki knows, grouped by the thing it is about (§17.3).
 public struct Knowledge: Decodable, Sendable, Equatable {
     public let entities: [KnownEntity]
+    /// Cards that answer to one name. Derived on every read, so a split from any source shows up.
+    public let duplicates: [Duplicate]
+
+    public init(entities: [KnownEntity], duplicates: [Duplicate] = []) {
+        self.entities = entities
+        self.duplicates = duplicates
+    }
+}
+
+/// Two or more cards claiming the same name, with the fuller one first.
+public struct Duplicate: Decodable, Sendable, Equatable, Identifiable {
+    public let form: String
+    public let paths: [String]
+    public let names: [String]
+
+    public var id: String { form }
 }
 
 /// One person, project or preference, and what is known about it.

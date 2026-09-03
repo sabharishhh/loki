@@ -482,6 +482,42 @@ pub unsafe extern "C" fn loki_forget_claim(
     }
 }
 
+/// Folds one entity card into another (§9.4).
+///
+/// Never called by the core itself. A wrong merge silently hides a true fact while a split leaves
+/// two visible rows, so this only ever runs because a person looked at both and said yes.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. `from` and `into` must be valid
+/// C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_merge_entities(
+    core: *mut LokiCore,
+    from: *const c_char,
+    into: *const c_char,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    // SAFETY: contract above.
+    let (Some(from), Some(into)) = (unsafe { as_str(from) }, unsafe { as_str(into) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let (from, into) = (from.to_owned(), into.to_owned());
+    let Some(memory) = core.memory.as_ref() else {
+        return LokiStatus::InvalidArgument;
+    };
+    let memory = Arc::clone(memory);
+    let today = core.clock.today();
+    core.runtime.block_on(async move {
+        match memory.merge(&from, &into, today).await {
+            Ok(()) => LokiStatus::Ok,
+            Err(_) => LokiStatus::NotReady,
+        }
+    })
+}
+
 /// The three hand edits share a shape: check the pointers, run on the runtime, map the error.
 ///
 /// # Safety

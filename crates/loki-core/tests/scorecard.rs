@@ -95,6 +95,8 @@ struct Expect {
     silent: &'static [&'static str],
     /// Current edges on the owner's card, as `(label, target)`.
     owner_edges: &'static [(&'static str, &'static str)],
+    /// Surface forms that should be reported as claimed by more than one card.
+    duplicates: &'static [&'static str],
     /// Set when the expected outcome above is the honest current answer rather than the right one.
     gap: Option<&'static str>,
 }
@@ -104,6 +106,7 @@ const NOTHING: Expect = Expect {
     recalls: &[],
     silent: &[],
     owner_edges: &[],
+    duplicates: &[],
     gap: None,
 };
 
@@ -271,6 +274,25 @@ async fn score(case: &Case) -> Vec<String> {
         if !hits.is_empty() {
             misses.push(format!("{question:?} should have found nothing: {hits:?}"));
         }
+    }
+
+    let reported: Vec<&str> = knowledge
+        .duplicates
+        .iter()
+        .map(|d| d.form.as_str())
+        .collect();
+    for form in case.expect.duplicates {
+        if !reported.contains(form) {
+            misses.push(format!(
+                "{form:?} should be reported as a split: {reported:?}"
+            ));
+        }
+    }
+    if reported.len() != case.expect.duplicates.len() {
+        misses.push(format!(
+            "expected {} splits, got {reported:?}",
+            case.expect.duplicates.len()
+        ));
     }
 
     if !case.expect.owner_edges.is_empty() {
@@ -838,11 +860,10 @@ fn cases() -> Vec<Case> {
             expect: Expect {
                 entities: 2,
                 recalls: &[("Sabharish", "Sabharish")],
-                gap: Some(
-                    "two cards answer to Sabharish: the one the third-person mention created and \
-                     the owner, which adopted the name afterwards. Merging two existing cards is \
-                     not something 2r built, and it is the next thing this area needs",
-                ),
+                // Two cards answer to Sabharish, and nothing at write time can prevent it: the
+                // first mention had no way of knowing whose name it was. What matters is that the
+                // store says so, and that one tap fixes it. See `identity::repair`.
+                duplicates: &["sabharish"],
                 ..NOTHING
             },
         },

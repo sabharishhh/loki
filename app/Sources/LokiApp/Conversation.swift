@@ -149,8 +149,8 @@ final class Conversation {
     }
 
     /// What Loki knows, grouped by the thing it is about (§17.3).
-    func knowledge() -> [KnownEntity] {
-        core?.knowledge().entities ?? []
+    func knowledge() -> Knowledge {
+        core?.knowledge() ?? Knowledge(entities: [])
     }
 
     /// Confirms which side of a conflict is right (§9.7 rule 4).
@@ -159,6 +159,11 @@ final class Conversation {
     /// This makes the choice permanent and pins the concept against decay.
     func settle(path: String, keep: UInt32) {
         try? core?.settle(path: path, keep: keep)
+    }
+
+    /// Folds one card into another, on the user's word. Never automatic.
+    func merge(from: String, into: String) {
+        try? core?.merge(from: from, into: into)
     }
 
     /// Replaces what a claim says. A supersession, not an overwrite.

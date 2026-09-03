@@ -97,15 +97,9 @@ LokiStatus loki_amend_claim(LokiCore *core, const char *concept, uint32_t ordina
 /* Retires a claim with nothing in its place. Retired, never removed. */
 LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordinal);
 
-/* What Loki knows, grouped by entity, as JSON. The trust surface reads this. */
-char *loki_knowledge(LokiCore *core);
-
-/* Replaces what a claim says, on the user's word. A supersession, not an overwrite. */
-LokiStatus loki_amend_claim(LokiCore *core, const char *concept, uint32_t ordinal,
-                            const char *text);
-
-/* Retires a claim with nothing in its place. Retired, never removed. */
-LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordinal);
+/* Folds one entity card into another. Only ever on the user's word: a wrong merge hides a
+   true fact, while a split leaves two visible rows. */
+LokiStatus loki_merge_entities(LokiCore *core, const char *from, const char *into);
 
 /* Past sessions, newest first, as a JSON array of day strings. */
 char *loki_sessions(LokiCore *core, uint32_t limit);

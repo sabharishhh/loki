@@ -113,6 +113,12 @@ pub struct Frontmatter {
     pub label: Label,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<Relation>,
+    /// Where this card's contents went, when a merge folded it into another (§9.4).
+    ///
+    /// A tombstone rather than a deletion: links into it still resolve, git still has what it
+    /// held, and a person reading the file can see what happened to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -135,6 +141,7 @@ impl Frontmatter {
             role: Role::Other,
             label: Label::Named,
             relations: Vec::new(),
+            merged_into: None,
             tags: Vec::new(),
             okf_version: "0.2".to_owned(),
         }

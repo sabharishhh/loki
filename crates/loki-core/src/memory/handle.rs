@@ -10,7 +10,7 @@ use jiff::civil::Date;
 
 use super::bundle::{self, Bundle, BundleError};
 use super::claim::{Claim, Confidence, Origin};
-use super::concept::{Attribution, RawConcept, Status};
+use super::concept::{Attribution, Label, RawConcept, Status};
 use super::consolidate::{self, Budget, ConsolidateError, Episode, Extractor, Report};
 use super::gate::TierScope;
 use super::index::{Index, IndexError, Lane, Layer, Query, Recalled, Session, Use};
@@ -54,6 +54,8 @@ pub enum MemoryError {
     Consolidate(#[from] ConsolidateError),
     #[error("{path} has no claim {ordinal}")]
     NoSuchClaim { path: String, ordinal: u32 },
+    #[error("cannot merge: {why}")]
+    CannotMerge { why: String },
 }
 
 /// The heading a claim sits under, so an edit lands in the same section as what it replaced.
@@ -460,6 +462,131 @@ impl Memory {
         }
         self.write_back(path, &concept, &format!("Forgotten by hand: {path}"))
             .await
+    }
+
+    /// Folds one card into another (§9.4).
+    ///
+    /// The repair for a split. Everything else in §9.4 stops a split happening at write time;
+    /// nothing repaired one afterwards, so a name used before it was known to be the user's own
+    /// left two cards for one person with no way back.
+    ///
+    /// **Never automatic.** A wrong merge silently hides a true fact while a split leaves two
+    /// visible rows, which is §21.2's asymmetry, so this is only ever called because somebody
+    /// looked at both cards and said yes.
+    ///
+    /// `from` becomes a tombstone: deprecated, emptied, and carrying `merged_into`. Links into it
+    /// still resolve and git still holds what it had.
+    ///
+    /// # Errors
+    /// Fails if either card cannot be read or written, if they are the same card, or if `from` has
+    /// already been merged somewhere.
+    pub async fn merge(&self, from: &str, into: &str, today: Date) -> Result<(), MemoryError> {
+        if from == into {
+            return Err(MemoryError::CannotMerge {
+                why: "a card cannot be merged into itself".to_owned(),
+            });
+        }
+        let (mut source, mut target) = {
+            let reader = self.bundle.reader().await;
+            (reader.load_concept(from)?, reader.load_concept(into)?)
+        };
+        if let Some(already) = &source.front.merged_into {
+            return Err(MemoryError::CannotMerge {
+                why: format!("{from} was already merged into {already}"),
+            });
+        }
+
+        // The name first, so the claims arriving below are filed under a card that is already
+        // called the right thing.
+        if target.front.label == Label::Described && source.front.label == Label::Named {
+            target.front.rename(&source.front.name);
+        } else {
+            target.front.learn_alias(&source.front.name);
+        }
+        for alias in &source.front.aliases {
+            target.front.learn_alias(alias);
+        }
+        for relation in &source.front.relations {
+            if relation.is_current() {
+                target.front.relate(&relation.label, &relation.to, today);
+            }
+        }
+
+        let arriving: Vec<(String, Claim)> = source
+            .sections
+            .iter()
+            .flat_map(|section| {
+                section
+                    .claims
+                    .iter()
+                    .map(|claim| (section.heading.clone(), claim.clone()))
+            })
+            .collect();
+        for (heading, claim) in arriving {
+            // Two cards about one person say some of the same things. A restatement is a second
+            // occurrence, not a second claim, which is the same rule consolidation applies.
+            if target.claims().any(|held| held.restates(&claim)) {
+                continue;
+            }
+            target.add(&heading, claim);
+        }
+
+        source.sections.clear();
+        source.front.aliases.clear();
+        source.front.relations.clear();
+        source.front.status = Status::Deprecated;
+        source.front.merged_into = Some(into.to_owned());
+
+        {
+            let writer = self.bundle.writer().await;
+            writer.save_concept(into, &target)?;
+            writer.save_concept(from, &source)?;
+        }
+        self.repoint(from, into).await?;
+        {
+            let writer = self.bundle.writer().await;
+            writer.commit(&format!("Merged {from} into {into}"))?;
+        }
+        {
+            let reader = self.bundle.reader().await;
+            self.index.sync(&reader)?;
+        }
+        Ok(())
+    }
+
+    /// Moves every edge that pointed at the merged card onto the one it merged into.
+    ///
+    /// Without this the owner's `sister` edge would keep pointing at a tombstone, and the graph
+    /// lookups that resolve "my sister" would stop finding anybody.
+    async fn repoint(&self, from: &str, into: &str) -> Result<(), MemoryError> {
+        let paths = {
+            let reader = self.bundle.reader().await;
+            reader.concepts()?
+        };
+        for path in paths {
+            if path == from {
+                continue;
+            }
+            let mut concept = {
+                let reader = self.bundle.reader().await;
+                match reader.load_concept(&path) {
+                    Ok(concept) => concept,
+                    Err(_) => continue,
+                }
+            };
+            let mut touched = false;
+            for relation in &mut concept.front.relations {
+                if relation.to == from {
+                    relation.to = into.to_owned();
+                    touched = true;
+                }
+            }
+            if touched {
+                let writer = self.bundle.writer().await;
+                writer.save_concept(&path, &concept)?;
+            }
+        }
+        Ok(())
     }
 
     /// Saves, commits and re-indexes. The three steps every hand edit needs, in one place.
