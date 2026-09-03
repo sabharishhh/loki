@@ -51,6 +51,22 @@ impl Store {
         reader.load_concept(path).expect("card")
     }
 
+    /// What lane 1 returns for a question.
+    fn recall(&self, question: &str) -> Vec<String> {
+        self.memory
+            .index()
+            .recall(&loki_core::memory::index::Query::prefetch(
+                question,
+                TierScope::normal(Locality::Cloud),
+                today(),
+                5,
+            ))
+            .expect("recall")
+            .into_iter()
+            .map(|hit| hit.text)
+            .collect()
+    }
+
     /// Where blocking would send a claim about this surface form.
     fn blocks_to(&self, surface: &str) -> Vec<String> {
         self.memory
@@ -860,6 +876,127 @@ mod merging {
             seen.iter().any(|c| c.path == "projects/apple.md"),
             "a different kind must still reach the matcher: {:?}",
             seen.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Retrieval over what an entity is called and what points at it, not just what is written about
+/// it (§10.1). Half the store used to be unsearchable: a nickname and an edge are the only place a
+/// word like "father" appears, and lane 1 ranked claim text alone.
+mod finding {
+    use super::names::{Fact, store_with};
+
+    /// The general shape. A card is reachable by the label of any live edge pointing at it,
+    /// whatever the card happens to be called.
+    #[tokio::test]
+    async fn an_edge_label_finds_the_card_it_points_at() {
+        let store = store_with(
+            "by-edge",
+            vec![Fact {
+                trigger: "my father is Vaidyanathan",
+                surface: "Vaidyanathan",
+                attribute: "status",
+                text: "Vaidyanathan is retired",
+                aliases: &[],
+                relation: Some(("father", "the user")),
+            }],
+        )
+        .await;
+
+        let hits = store.recall("what does my father do");
+        assert!(
+            hits.iter().any(|h| h.contains("retired")),
+            "nothing in the claim says father: {hits:?}"
+        );
+    }
+
+    /// And by any name it answers to, which is what makes a nickname worth storing.
+    #[tokio::test]
+    async fn a_nickname_finds_the_claims_under_the_formal_name() {
+        let store = store_with(
+            "by-alias",
+            vec![
+                Fact {
+                    trigger: "called Ashok",
+                    surface: "Vaidyanathan",
+                    attribute: "preferred_name",
+                    text: "Vaidyanathan prefers to be called Ashok",
+                    aliases: &["Ashok"],
+                    relation: None,
+                },
+                Fact {
+                    trigger: "he is retired",
+                    surface: "Vaidyanathan",
+                    attribute: "status",
+                    text: "Vaidyanathan is retired",
+                    aliases: &[],
+                    relation: None,
+                },
+            ],
+        )
+        .await;
+
+        let hits = store.recall("is Ashok retired");
+        assert!(
+            hits.iter().any(|h| h.contains("retired")),
+            "the retirement claim never says Ashok: {hits:?}"
+        );
+    }
+
+    /// One-sided, and it has to stay that way. A form match adds candidates and never removes
+    /// them, so an ordinary question is ranked exactly as it was before any of this existed.
+    #[tokio::test]
+    async fn a_word_that_names_nobody_changes_nothing() {
+        let store = store_with(
+            "unnamed",
+            vec![Fact {
+                trigger: "Meera is on the infra team",
+                surface: "Meera",
+                attribute: "team",
+                text: "Meera is on the infra team",
+                aliases: &[],
+                relation: None,
+            }],
+        )
+        .await;
+
+        assert!(store.recall("who runs the bakery").is_empty());
+        let hits = store.recall("Meera team");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// A closed edge stops being a way of finding anything. Otherwise "my manager" would keep
+    /// returning the person who used to be, which is the failure bi-temporal edges exist to stop.
+    #[tokio::test]
+    async fn a_closed_edge_no_longer_finds_its_target() {
+        let store = store_with(
+            "closed",
+            vec![
+                Fact {
+                    trigger: "my manager is Zoe",
+                    surface: "Zoe",
+                    attribute: "job",
+                    text: "Zoe took over the platform group",
+                    aliases: &[],
+                    relation: Some(("manager", "the user")),
+                },
+                Fact {
+                    trigger: "Priya is my manager now",
+                    surface: "Priya",
+                    attribute: "job",
+                    text: "Priya joined last spring",
+                    aliases: &[],
+                    relation: Some(("manager", "the user")),
+                },
+            ],
+        )
+        .await;
+
+        let hits = store.recall("who is my manager");
+        assert!(hits.iter().any(|h| h.contains("Priya")), "{hits:?}");
+        assert!(
+            !hits.iter().any(|h| h.contains("Zoe")),
+            "the old manager must not answer the question: {hits:?}"
         );
     }
 }

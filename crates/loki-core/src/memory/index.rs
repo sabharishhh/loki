@@ -703,12 +703,27 @@ impl Index {
         let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
         // Over-fetch, because the visibility and privacy filters below reject candidates and a
         // capped result set must still be full when it can be.
-        let candidates = CLAIMS_FTS
+        let mut candidates = CLAIMS_FTS
             .search(&db, query.text, query.limit.saturating_mul(8).max(64))
             .map_err(IndexError::Read)?;
 
         let distances = link_distances(&db, query.context)?;
         let query_terms = terms(query.text);
+
+        // Half the store was unsearchable. An entity's names and the edges pointing at it are the
+        // only place a word like "father" or a nickname appears, and lane 1 ranked claim text
+        // alone, so "my father" found nothing about a card that knew perfectly well whose father
+        // it was. These join the candidate set with no bm25 of their own: a form match is a real
+        // signal but a weaker one than the words of the claim itself.
+        let forms = matched_forms(&db, &query_terms)?;
+        if !forms.is_empty() {
+            let seen: HashSet<i64> = candidates.iter().map(|(id, _)| *id).collect();
+            for id in claims_of(&db, forms.keys())? {
+                if !seen.contains(&id) {
+                    candidates.push((id, 0.0));
+                }
+            }
+        }
         let today = to_days(query.today);
         let mut out = Vec::with_capacity(query.limit);
 
@@ -759,7 +774,8 @@ impl Index {
             }
 
             let hops = distances.get(&row.path).copied();
-            let covered = coverage(&query_terms, &row.text, &row.name);
+            let form = forms.get(&row.path).map_or("", String::as_str);
+            let covered = coverage(&query_terms, &row.text, &format!("{} {form}", row.name));
             let score = combine(bm25, covered, today - row.learned, row.uses, hops);
             out.push(Recalled {
                 layer: Layer::Consolidated,
@@ -1489,11 +1505,11 @@ fn terms(text: &str) -> Vec<String> {
 ///
 /// The concept name counts, because "which team is Meera on" is answered by a claim in Meera's
 /// file whether or not the claim text repeats her name.
-fn coverage(query_terms: &[String], text: &str, name: &str) -> f32 {
+fn coverage(query_terms: &[String], text: &str, forms: &str) -> f32 {
     if query_terms.is_empty() {
         return 0.0;
     }
-    let haystack = format!("{} {}", text.to_lowercase(), name.to_lowercase());
+    let haystack = format!("{} {}", text.to_lowercase(), forms.to_lowercase());
     let matched = query_terms
         .iter()
         .filter(|t| haystack.contains(t.as_str()))
@@ -1501,6 +1517,74 @@ fn coverage(query_terms: &[String], text: &str, name: &str) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let fraction = matched as f32 / query_terms.len() as f32;
     fraction
+}
+
+/// Believed claims to pull in from a concept a query named rather than described.
+///
+/// A handful, because this is a second door into the same ranking and not a way around the cap.
+const CLAIMS_PER_FORM: usize = 4;
+
+/// Concepts a query term names outright, and the form it named them by.
+///
+/// Two sources, one rule: a concept answers to its aliases, and to the label of any live edge
+/// pointing at it. "My father" names the card the owner's `father` edge points at, whatever that
+/// card happens to be called, which is the whole reason relations are in the index.
+///
+/// Exact term equality, deliberately. Blocking is where fuzziness belongs; here a loose match
+/// would put another person's facts in front of the model.
+fn matched_forms(
+    db: &Connection,
+    query_terms: &[String],
+) -> Result<HashMap<String, String>, IndexError> {
+    let mut found: HashMap<String, String> = HashMap::new();
+    if query_terms.is_empty() {
+        return Ok(found);
+    }
+
+    let mut by_alias = db
+        .prepare("SELECT c.path FROM alias a JOIN concept c ON c.id = a.concept WHERE a.text = ?1")
+        .map_err(IndexError::Read)?;
+    let mut by_edge = db
+        .prepare("SELECT dst FROM relation WHERE label = ?1 AND until IS NULL")
+        .map_err(IndexError::Read)?;
+
+    for term in query_terms {
+        for stmt in [&mut by_alias, &mut by_edge] {
+            let rows = stmt
+                .query_map(params![term], |r| r.get::<_, String>(0))
+                .map_err(IndexError::Read)?;
+            for path in rows {
+                found
+                    .entry(path.map_err(IndexError::Read)?)
+                    .or_insert_with(|| term.clone());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Claim rowids for the given concepts, live ones only.
+fn claims_of<'a>(
+    db: &Connection,
+    paths: impl Iterator<Item = &'a String>,
+) -> Result<Vec<i64>, IndexError> {
+    let mut stmt = db
+        .prepare(
+            "SELECT m.id FROM claim m JOIN concept c ON c.id = m.concept
+             WHERE c.path = ?1 AND m.unlearned IS NULL AND m.shadowed = 0
+             ORDER BY m.ordinal LIMIT ?2",
+        )
+        .map_err(IndexError::Read)?;
+    let mut out = Vec::new();
+    for path in paths {
+        let rows = stmt
+            .query_map(params![path, CLAIMS_PER_FORM], |r| r.get::<_, i64>(0))
+            .map_err(IndexError::Read)?;
+        for id in rows {
+            out.push(id.map_err(IndexError::Read)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Turns user text into an FTS5 MATCH expression.
@@ -1704,6 +1788,15 @@ mod tests {
         let partial = coverage(&asked, "Works on the infra team", "Old Notes");
         assert!((full - 1.0).abs() < f32::EPSILON, "{full}");
         assert!((partial - 0.5).abs() < f32::EPSILON, "{partial}");
+    }
+
+    /// A question phrased entirely in function words produces no query at all, which is why no
+    /// amount of indexing answers "who am I". Worth pinning: it looks like a retrieval bug and is
+    /// not one, and the fix is §10.5's semantic fallback rather than a longer alias list.
+    #[test]
+    fn a_question_of_only_function_words_has_no_terms() {
+        assert!(terms("who am I").is_empty());
+        assert_eq!(fts_query("who am I"), None);
     }
 
     #[test]

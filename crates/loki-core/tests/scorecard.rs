@@ -464,13 +464,8 @@ fn cases() -> Vec<Case> {
             }],
             expect: Expect {
                 entities: 1,
-                recalls: &[("Ashok", "Ashok")],
+                recalls: &[("Ashok", "Ashok"), ("my father", "Ashok")],
                 owner_edges: &[("father", "people/the-user-s-father.md")],
-                gap: Some(
-                    "one card and the nickname is findable, but asking \"my father\" finds \
-                     nothing: lane 1 ranks claim text, and neither the alias list nor the edge is \
-                     in that corpus. The edge is there for lane 2 to walk",
-                ),
                 ..NOTHING
             },
         },
@@ -491,11 +486,13 @@ fn cases() -> Vec<Case> {
             expect: Expect {
                 entities: 2,
                 recalls: &[("Sabharish name", "Sabharish")],
-                // The keyword gap, not an identity gap: nothing in the store contains the words
-                // "who am I". It is what lane 2 and the semantic fallback are for (§10.5).
                 silent: &["who am I"],
                 gap: Some(
-                    "\"who am I\" is §10.5's keyword gap and would fail with a perfect ontology",
+                    "not an ontology gap and not fixable by indexing: who, am and I are all \
+                     stopwords, so the question produces no query at all. The owner's card is in \
+                     the working set, so the prompt has the answer even where recall does not. A \
+                     question made entirely of function words is what the semantic fallback and \
+                     lane 2 are for (§10.5)",
                 ),
                 ..NOTHING
             },
