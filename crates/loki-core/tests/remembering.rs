@@ -114,6 +114,8 @@ impl Extractor for OneFact {
             origin: loki_core::memory::claim::Origin::Stated,
             tags: vec![],
             aliases: vec![],
+            value: None,
+
             relation: None,
         }])
     }

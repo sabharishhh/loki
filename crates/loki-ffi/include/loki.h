@@ -97,6 +97,13 @@ LokiStatus loki_amend_claim(LokiCore *core, const char *concept, uint32_t ordina
 /* Retires a claim with nothing in its place. Retired, never removed. */
 LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordinal);
 
+/* Drops one of the other names an entity answers to. */
+LokiStatus loki_forget_alias(LokiCore *core, const char *concept, const char *form);
+
+/* Closes an edge on the user's word. Closed, never deleted: it was true until now. */
+LokiStatus loki_forget_relation(LokiCore *core, const char *concept, const char *label,
+                                const char *to);
+
 /* Folds one entity card into another. Only ever on the user's word: a wrong merge hides a
    true fact, while a split leaves two visible rows. */
 LokiStatus loki_merge_entities(LokiCore *core, const char *from, const char *into);

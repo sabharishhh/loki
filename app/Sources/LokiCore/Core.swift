@@ -185,6 +185,24 @@ public final class Core: Sendable {
         decode(loki_knowledge(handle)) ?? Knowledge(entities: [])
     }
 
+    /// Drops one of the other names an entity answers to.
+    public func forgetAlias(path: String, form: String) throws {
+        let status = path.withCString { path in
+            form.withCString { loki_forget_alias(handle, path, $0) }
+        }
+        if let error = CoreError(status) { throw error }
+    }
+
+    /// Closes an edge. Closed rather than deleted: it was true until now.
+    public func forgetRelation(path: String, label: String, to: String) throws {
+        let status = path.withCString { path in
+            label.withCString { label in
+                to.withCString { loki_forget_relation(handle, path, label, $0) }
+            }
+        }
+        if let error = CoreError(status) { throw error }
+    }
+
     /// Folds one card into another, on the user's word.
     ///
     /// Never automatic. A wrong merge hides a true fact where a split only leaves two rows, so
@@ -291,14 +309,28 @@ public struct KnownEntity: Decodable, Sendable, Equatable, Identifiable {
     /// Confirmed by a person, so nothing decays it by heuristic.
     public let confirmed: Bool
     public let facts: [KnownFact]
+    /// Other names this answers to. Knowledge, so it is shown rather than kept in a file.
+    public let alsoKnownAs: [String]
+    /// Live edges out of this entity.
+    public let relations: [Related]
 
     public var id: String { path }
 
     private enum CodingKeys: String, CodingKey {
-        case path, name, kind, facts
+        case path, name, kind, facts, relations
         case inUse = "in_use"
+        case alsoKnownAs = "also_known_as"
         case confirmed
     }
+}
+
+/// One current edge, as a row reads it.
+public struct Related: Decodable, Sendable, Equatable, Identifiable {
+    public let label: String
+    public let name: String
+    public let path: String
+
+    public var id: String { "\(label)/\(path)" }
 }
 
 /// One thing Loki knows, with its own history folded in.

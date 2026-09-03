@@ -518,6 +518,53 @@ pub unsafe extern "C" fn loki_merge_entities(
     })
 }
 
+/// Drops one of the other names an entity answers to (§17.3).
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Both strings must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_forget_alias(
+    core: *mut LokiCore,
+    concept: *const c_char,
+    form: *const c_char,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    let Some(form) = (unsafe { as_str(form) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let form = form.to_owned();
+    // SAFETY: contract above.
+    unsafe {
+        edit_claim(core, concept, |memory, path, _| async move {
+            memory.forget_alias(&path, &form).await
+        })
+    }
+}
+
+/// Closes an edge, on the user's word. Closed rather than deleted: it was true until now.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Every string must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_forget_relation(
+    core: *mut LokiCore,
+    concept: *const c_char,
+    label: *const c_char,
+    to: *const c_char,
+) -> LokiStatus {
+    // SAFETY: contract above.
+    let (Some(label), Some(to)) = (unsafe { as_str(label) }, unsafe { as_str(to) }) else {
+        return LokiStatus::InvalidArgument;
+    };
+    let (label, to) = (label.to_owned(), to.to_owned());
+    // SAFETY: contract above.
+    unsafe {
+        edit_claim(core, concept, |memory, path, today| async move {
+            memory.forget_relation(&path, &label, &to, today).await
+        })
+    }
+}
+
 /// The three hand edits share a shape: check the pointers, run on the runtime, map the error.
 ///
 /// # Safety

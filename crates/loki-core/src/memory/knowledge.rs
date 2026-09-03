@@ -17,6 +17,8 @@
 //! `stable`. A concept that is not prompt-eligible is one Loki is not using yet, and that is what
 //! the field says.
 
+use std::collections::HashMap;
+
 use jiff::civil::Date;
 use serde::Serialize;
 
@@ -63,6 +65,23 @@ pub struct Entity {
     /// Confirmed by a person, so nothing decays it by heuristic (§9.9).
     pub confirmed: bool,
     pub facts: Vec<Fact>,
+    /// Other names this entity answers to (§9.4).
+    ///
+    /// Shown, because it is knowledge. It used to live only in frontmatter, so "people call my dad
+    /// Ashok" was learned and stored and the user had no way to see that it had been: three
+    /// sessions of telling Loki something that already worked, because nothing said so (S-26).
+    pub also_known_as: Vec<String>,
+    /// Live edges out of this entity, in the same spirit.
+    pub relations: Vec<Related>,
+}
+
+/// One current edge, as the trust surface shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Related {
+    pub label: String,
+    /// The target's display name, so a row reads as a sentence rather than as a path.
+    pub name: String,
+    pub path: String,
 }
 
 /// One thing Loki knows, with its own history folded in.
@@ -121,16 +140,22 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
         reader.concepts()?
     };
 
-    let mut entities = Vec::with_capacity(paths.len());
     let mut cards: Vec<(String, RawConcept)> = Vec::with_capacity(paths.len());
     for path in paths {
-        let concept = {
-            let reader = bundle.reader().await;
-            match reader.load_concept(&path) {
-                Ok(concept) => concept,
-                Err(_) => continue,
-            }
-        };
+        let reader = bundle.reader().await;
+        if let Ok(concept) = reader.load_concept(&path) {
+            cards.push((path, concept));
+        }
+    }
+    // Every card's display name, so a relation row can read "sister  Lakshmi" rather than showing
+    // a path at somebody who has never opened the store.
+    let names: HashMap<String, String> = cards
+        .iter()
+        .map(|(path, concept)| (path.clone(), concept.front.name.clone()))
+        .collect();
+
+    let mut entities = Vec::with_capacity(cards.len());
+    for (path, concept) in &cards {
         // A card with no claims at all is not knowledge. The owner and assistant cards are seeded
         // before the first turn (§9.4), and until something is learned about them the honest
         // answer to "what do you know" is still nothing.
@@ -140,8 +165,7 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
         if concept.claims().next().is_none() {
             continue;
         }
-        entities.push(entity(&path, &concept, today));
-        cards.push((path, concept));
+        entities.push(entity(path, concept, today, &names));
     }
 
     entities.sort_by(|a, b| {
@@ -206,7 +230,12 @@ impl Entity {
     }
 }
 
-fn entity(path: &str, concept: &RawConcept, today: Date) -> Entity {
+fn entity(
+    path: &str,
+    concept: &RawConcept,
+    today: Date,
+    names: &HashMap<String, String>,
+) -> Entity {
     let numbered: Vec<(u32, &Claim)> = concept
         .claims()
         .enumerate()
@@ -256,6 +285,28 @@ fn entity(path: &str, concept: &RawConcept, today: Date) -> Entity {
         in_use: concept.front.status == Status::Stable && !concept.is_stale_on(today),
         confirmed: concept.front.is_human_verified(),
         facts,
+        // The name itself is not an alias of the entity: it is already the heading of the card.
+        also_known_as: concept
+            .front
+            .aliases
+            .iter()
+            .filter(|form| !form.eq_ignore_ascii_case(&concept.front.name))
+            .cloned()
+            .collect(),
+        relations: concept
+            .front
+            .relations
+            .iter()
+            .filter(|edge| edge.is_current())
+            .map(|edge| Related {
+                label: edge.label.clone(),
+                name: names
+                    .get(&edge.to)
+                    .cloned()
+                    .unwrap_or_else(|| edge.to.clone()),
+                path: edge.to.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -361,7 +412,7 @@ mod tests {
                 .about("education"),
         );
 
-        let out = entity("people/sabharish.md", &concept, today());
+        let out = entity("people/sabharish.md", &concept, today(), &HashMap::new());
         assert_eq!(out.kind, "person");
         assert!(out.in_use);
         assert_eq!(out.facts.len(), 1);
@@ -393,7 +444,7 @@ mod tests {
                 .dated(date(2026, 7, 15)),
         );
 
-        let out = entity("people/sabharish.md", &concept, today());
+        let out = entity("people/sabharish.md", &concept, today(), &HashMap::new());
         assert_eq!(out.facts.len(), 1, "one row, not two: {:?}", out.facts);
 
         let fact = &out.facts[0];
@@ -427,7 +478,7 @@ mod tests {
             Claim::stated("Sabharish lives in Bangalore", date(2026, 1, 1)).about("city"),
         );
 
-        let out = entity("people/sabharish.md", &concept, today());
+        let out = entity("people/sabharish.md", &concept, today(), &HashMap::new());
         assert_eq!(out.facts.len(), 1, "{:?}", out.facts);
         assert_eq!(out.facts[0].text, "Sabharish lives in Bangalore");
         assert_eq!(out.facts[0].also_said.len(), 1);
@@ -449,7 +500,7 @@ mod tests {
             Claim::stated("Sabharish lives in Chennai", date(2026, 1, 1)).about("city"),
         );
 
-        let out = entity("people/sabharish.md", &concept, today());
+        let out = entity("people/sabharish.md", &concept, today(), &HashMap::new());
         assert_eq!(out.facts.len(), 2);
         assert!(out.facts.iter().all(|f| f.also_said.is_empty()));
     }
@@ -462,7 +513,7 @@ mod tests {
             Claim::new("Acme raised a Series B", Origin::Web, date(2026, 1, 1)).about("funding"),
         );
 
-        let out = entity("projects/acme.md", &concept, today());
+        let out = entity("projects/acme.md", &concept, today(), &HashMap::new());
         assert!(out.facts[0].from_elsewhere);
         assert_eq!(source_note(Origin::Web), "I read this on a page");
     }
@@ -474,7 +525,7 @@ mod tests {
         concept.add("Notes", Claim::stated("something", date(2026, 1, 1)));
         concept.add("Notes", Claim::stated("something else", date(2026, 1, 1)));
 
-        let out = entity("people/sabharish.md", &concept, today());
+        let out = entity("people/sabharish.md", &concept, today(), &HashMap::new());
         assert_eq!(out.facts.len(), 2);
         assert!(out.facts.iter().all(|f| f.also_said.is_empty()));
     }

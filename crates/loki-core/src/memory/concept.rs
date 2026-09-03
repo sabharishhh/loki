@@ -390,6 +390,7 @@ fn blank_claim(text: &str) -> Claim {
     Claim {
         text: text.to_owned(),
         attribute: String::new(),
+        value: None,
         validity: Validity::undated(Date::constant(1970, 1, 1)),
         confidence: Confidence::Medium,
         origin: Origin::Inferred,
@@ -452,6 +453,7 @@ fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), 
             }
             // `about` is what v0.8-era files were written with, before §9.13 named the field.
             "attribute" | "about" => claim.attribute = super::claim::normalize_attribute(value),
+            "value" => claim.value = (!value.is_empty()).then(|| value.to_owned()),
             // Likewise `source`, which §9.12 renamed and widened.
             "origin" | "source" => {
                 claim.origin = match value {
@@ -578,6 +580,9 @@ pub fn render(concept: &RawConcept) -> String {
             // scanning the file should see that before its validity window.
             if !claim.attribute.is_empty() {
                 out.push_str(&format!("  attribute: {}\n", claim.attribute));
+            }
+            if let Some(value) = &claim.value {
+                out.push_str(&format!("  value: {value}\n"));
             }
 
             let v = &claim.validity;

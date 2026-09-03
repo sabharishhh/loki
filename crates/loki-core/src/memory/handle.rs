@@ -589,6 +589,58 @@ impl Memory {
         Ok(())
     }
 
+    /// Drops one of the other names an entity answers to, on the user's word (§17.3).
+    ///
+    /// An alias is knowledge, so it needs the same one tap a claim has. Removed rather than
+    /// retired: unlike a claim it carries no window, and a name the user says is wrong was never
+    /// true rather than true until now.
+    ///
+    /// # Errors
+    /// Fails if the card cannot be read or written.
+    pub async fn forget_alias(&self, path: &str, form: &str) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+        concept
+            .front
+            .aliases
+            .retain(|held| !held.eq_ignore_ascii_case(form.trim()));
+        self.write_back(
+            path,
+            &concept,
+            &format!("Dropped the name {form} from {path}"),
+        )
+        .await
+    }
+
+    /// Closes an edge on the user's word, on `today` (§9.4).
+    ///
+    /// Closed, not deleted, because unlike a name an edge has a window: a manager who changed is a
+    /// different thing from a manager who was never yours, and the file keeps both.
+    ///
+    /// # Errors
+    /// Fails if the card cannot be read or written.
+    pub async fn forget_relation(
+        &self,
+        path: &str,
+        label: &str,
+        to: &str,
+        today: Date,
+    ) -> Result<(), MemoryError> {
+        let mut concept = {
+            let reader = self.bundle.reader().await;
+            reader.load_concept(path)?
+        };
+        for edge in &mut concept.front.relations {
+            if edge.is_current() && edge.label.eq_ignore_ascii_case(label) && edge.to == to {
+                edge.until = Some(today);
+            }
+        }
+        self.write_back(path, &concept, &format!("Closed {label} on {path}"))
+            .await
+    }
+
     /// Saves, commits and re-indexes. The three steps every hand edit needs, in one place.
     async fn write_back(
         &self,

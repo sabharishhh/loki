@@ -84,6 +84,8 @@ impl Extractor for Reader {
                 origin,
                 tags: vec![],
                 aliases: vec![],
+                value: None,
+
                 relation: None,
             }
         }

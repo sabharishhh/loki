@@ -90,6 +90,8 @@ pub struct Candidate {
     /// Vaidyanathan prefers to be called Ashok" refers to him one way and names him two others,
     /// and without this the third form is unfindable.
     pub aliases: Vec<String>,
+    /// What a single-valued attribute is set to, when the sentence made it plain (S-26).
+    pub value: Option<String>,
     /// An edge this sentence asserts: this entity is the `label` of `of` (§9.4, S-21).
     ///
     /// The coreference mechanism as well as the graph. "My sister Lakshmi" says Lakshmi is the
@@ -437,6 +439,7 @@ async fn absorb(
 ) -> Result<(), ConsolidateError> {
     let mut claim =
         Claim::new(&candidate.text, candidate.origin, settings.today).about(&candidate.attribute);
+    claim.value = candidate.value.clone();
     if let Some(valid_from) = candidate.world_time(episode.reference) {
         claim = claim.dated(valid_from);
     }
@@ -587,6 +590,16 @@ fn adopt(front: &mut Frontmatter, candidate: &Candidate) {
     for alias in &candidate.aliases {
         front.learn_alias(alias);
     }
+    // A `name` claim's value is a name of the entity, which is the same thing an alias line says
+    // and a more direct way of saying it. Reading it here means a card can learn its name from the
+    // fact itself rather than needing extraction to also spell it out twice.
+    if let Some(name) = candidate
+        .value
+        .as_ref()
+        .filter(|_| is_a_name(&candidate.attribute))
+    {
+        front.learn_alias(name);
+    }
     // A named form absorbing a placeholder is the one case where the displayed name changes. The
     // path never moves: it is the identity (§9.4), and moving the file would break every link into
     // it and lose the history that makes a correction reviewable.
@@ -596,11 +609,22 @@ fn adopt(front: &mut Frontmatter, candidate: &Candidate) {
     // of that sentence is still `the user`.
     if front.label == Label::Described
         && let Some(name) = std::iter::once(&candidate.surface)
+            .chain(
+                candidate
+                    .value
+                    .iter()
+                    .filter(|_| is_a_name(&candidate.attribute)),
+            )
             .chain(candidate.aliases.iter())
             .find(|form| !resolve::looks_described(form))
     {
         front.rename(name);
     }
+}
+
+/// Attributes whose value is a name for the entity rather than a fact about it.
+fn is_a_name(attribute: &str) -> bool {
+    matches!(attribute, "name" | "preferred_name" | "nickname" | "alias")
 }
 
 /// Re-syncs the index mid-run.
@@ -915,10 +939,11 @@ PROPERTY of the entity the fact sets: name, employer, role, city, education, bir
 reply_style. Two facts sharing an entity and an attribute are treated as competing, and the newer
 one replaces the older. Two facts with different attributes both stand.
 
-Two more line shapes, for what a sentence says about the entity rather than about the world:
+Three more line shapes, for what a sentence says about the entity rather than about the world:
 
   relation | <entity> | <label> | <whose>
   alias | <entity> | <another name for the same entity>
+  value | <entity> | <attribute> | <what that attribute is set to>
 
 Four rules about the writing itself, which matter more than any of the rest:
 - Stay faithful to the source. Reorganize, never invent.
@@ -950,7 +975,16 @@ Rules:
   next mention of it becoming a second person.
 - Write an `alias` line whenever a sentence gives another name for someone already named: a
   nickname, a preferred name, a surname, a maiden name. `Vaidyanathan prefers to be called Ashok`
-  is `alias | Vaidyanathan | Ashok`.
+  is `alias | Vaidyanathan | Ashok`. **Write the fact line too.** A name people use is something
+  the user told you, and it belongs on the page where they can see it, not only in an index.
+- Write a `value` line for a fact that sets one of these properties: name, birthday, city,
+  timezone, pronouns, age, preferred_name, deadline. Give the bare value and nothing else:
+  `value | the user | city | Bangalore`. Two sentences setting one of these to the same value are
+  the same fact however differently they are worded, and without the value they read as a
+  contradiction.
+- Never write a fact whose value is the entity's own name and nothing more.
+  `Vaidyanathan's official name is Vaidyanathan` says nothing. Write
+  `The user's father's name is Vaidyanathan`, which says whose name it is.
 - If a sentence refers to someone only by their connection to somebody else, use that description
   as the entity and write the relation line too: `my sister is studious` is
   `the user's sister | person | trait | stated | - | The user's sister is studious` plus
@@ -976,12 +1010,16 @@ everyone calls Lucky, has just finished her exams:
 
   the user | person | name | stated | - | The user's name is Sabharish
   alias | the user | Sabharish
+  value | the user | name | Sabharish
   the user | person | education | stated | - | Sabharish is a computer science graduate
   the user | person | city | stated | - | Sabharish lives in Bangalore
+  value | the user | city | Bangalore
   reply length | preference | reply_style | stated | - | Sabharish prefers short replies
   Lakshmi | person | status | stated | - | Lakshmi has finished her exams
+  Lakshmi | person | preferred_name | stated | - | Lakshmi is called Lucky by everyone
   relation | Lakshmi | sister | the user
   alias | Lakshmi | Lucky
+  value | Lakshmi | preferred_name | Lucky
 - If the transcript states nothing durable, output nothing at all.";
 
 #[async_trait]
@@ -1027,6 +1065,7 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
     let mut facts: Vec<Candidate> = Vec::new();
     let mut relations: Vec<(String, RelationTo)> = Vec::new();
     let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut values: Vec<(String, String, String)> = Vec::new();
 
     for line in answer.lines() {
         let parts: Vec<&str> = line.split('|').map(str::trim).collect();
@@ -1047,6 +1086,15 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
             [tag, subject, other] if tag.eq_ignore_ascii_case("alias") => {
                 if !subject.is_empty() && !other.is_empty() {
                     aliases.push(((*subject).to_owned(), (*other).to_owned()));
+                }
+            }
+            [tag, subject, attribute, value] if tag.eq_ignore_ascii_case("value") => {
+                if !subject.is_empty() && !attribute.is_empty() && !value.is_empty() {
+                    values.push((
+                        (*subject).to_owned(),
+                        super::claim::normalize_attribute(attribute),
+                        (*value).to_owned(),
+                    ));
                 }
             }
             [surface, kind, attribute, source, when, fact] => {
@@ -1082,6 +1130,7 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
                     },
                     tags: Vec::new(),
                     aliases: Vec::new(),
+                    value: None,
                     relation: None,
                 });
             }
@@ -1110,6 +1159,14 @@ fn parse_candidates(answer: &str) -> Vec<Candidate> {
                 .any(|a| a.eq_ignore_ascii_case(&other))
         {
             candidate.aliases.push(other);
+        }
+    }
+    for (subject, attribute, value) in values {
+        if let Some(candidate) = facts
+            .iter_mut()
+            .find(|c| c.surface.eq_ignore_ascii_case(&subject) && c.attribute == attribute)
+        {
+            candidate.value = Some(value);
         }
     }
     facts

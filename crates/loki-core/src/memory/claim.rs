@@ -161,6 +161,17 @@ pub struct Claim {
     /// is about has no standing to displace one that can.
     #[serde(default)]
     pub attribute: String,
+    /// What a single-valued attribute is set *to*, when the source made it plain (S-26).
+    ///
+    /// Cardinality decides that two `name` claims compete. Without knowing the value, competing
+    /// means "differently worded", so "the user's father's name is Vaidyanathan" and
+    /// "Vaidyanathan's official name is Vaidyanathan" were a contradiction rather than the same
+    /// fact said twice, and the store surfaced a conflict a person could only read as nonsense.
+    ///
+    /// Optional, and absent means unknown. A claim with no value falls back to comparing text,
+    /// which is what every file written before this does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     pub validity: Validity,
     pub confidence: Confidence,
     /// Where this came from, and so whether it may ever become durable (§9.12).
@@ -232,6 +243,7 @@ impl Claim {
         Self {
             text: text.into(),
             attribute: String::new(),
+            value: None,
             validity: Validity::undated(learned),
             confidence: if origin.is_stated() {
                 Confidence::High
@@ -301,9 +313,16 @@ impl Claim {
     /// claims, because merging a real change into an old one loses it silently.
     #[must_use]
     pub fn restates(&self, other: &Self) -> bool {
-        self.attribute == other.attribute
-            && asserted_words(&self.text, &self.attribute)
-                == asserted_words(&other.text, &other.attribute)
+        if self.attribute != other.attribute {
+            return false;
+        }
+        // The value settles it when both carry one. Two sentences setting one property to one
+        // value are one fact however differently they are worded, and comparing the words instead
+        // is what turned a name said twice into a contradiction (S-26).
+        if let (Some(mine), Some(theirs)) = (&self.value, &other.value) {
+            return mine.eq_ignore_ascii_case(theirs);
+        }
+        asserted_words(&self.text, &self.attribute) == asserted_words(&other.text, &other.attribute)
     }
 
     /// Folds in a restatement of this claim: the same fact, said again.
@@ -421,6 +440,7 @@ mod tests {
         let mut old = Claim {
             text: "Works on the platform team".into(),
             attribute: String::new(),
+            value: None,
             validity: Validity::open(date(2026, 3, 12), date(2026, 3, 12)),
             confidence: Confidence::High,
             origin: Origin::Stated,
@@ -441,6 +461,7 @@ mod tests {
         let new = Claim {
             text: "Works on the infra team".into(),
             attribute: String::new(),
+            value: None,
             validity: Validity::open(date(2026, 7, 15), date(2026, 8, 29)),
             confidence: Confidence::High,
             origin: Origin::Stated,

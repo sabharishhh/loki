@@ -43,6 +43,8 @@ struct Fact {
     text: &'static str,
     /// Other names for the subject the same sentence gave.
     aliases: &'static [&'static str],
+    /// What a single-valued attribute is set to, when the sentence made it plain.
+    value: Option<&'static str>,
     /// `(label, whose)`. The subject is the `label` of `whose`.
     relation: Option<(&'static str, &'static str)>,
 }
@@ -54,6 +56,7 @@ const fn person(subject: &'static str, attribute: &'static str, text: &'static s
         attribute,
         text,
         aliases: &[],
+        value: None,
         relation: None,
     }
 }
@@ -65,6 +68,7 @@ const fn thing(subject: &'static str, attribute: &'static str, text: &'static st
         attribute,
         text,
         aliases: &[],
+        value: None,
         relation: None,
     }
 }
@@ -138,6 +142,7 @@ impl Extractor for Staged {
                 origin: Origin::Stated,
                 tags: vec![],
                 aliases: fact.aliases.iter().map(|a| (*a).to_owned()).collect(),
+                value: fact.value.map(str::to_owned),
                 relation: fact.relation.map(|(label, of)| RelationTo {
                     label: label.to_owned(),
                     of: of.to_owned(),
@@ -268,6 +273,7 @@ fn clone_fact(f: &Fact) -> Fact {
         attribute: f.attribute,
         text: f.text,
         aliases: f.aliases,
+        value: f.value,
         relation: f.relation,
     }
 }

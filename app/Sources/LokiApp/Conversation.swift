@@ -161,6 +161,16 @@ final class Conversation {
         try? core?.settle(path: path, keep: keep)
     }
 
+    /// Drops one of the other names an entity answers to.
+    func forgetAlias(path: String, form: String) {
+        try? core?.forgetAlias(path: path, form: form)
+    }
+
+    /// Closes an edge. It was true until now, so it is closed rather than deleted.
+    func forgetRelation(path: String, label: String, to: String) {
+        try? core?.forgetRelation(path: path, label: label, to: to)
+    }
+
     /// Folds one card into another, on the user's word. Never automatic.
     func merge(from: String, into: String) {
         try? core?.merge(from: from, into: into)

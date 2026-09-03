@@ -175,6 +175,12 @@ private struct EntityCard: View {
             ForEach(entity.facts) { fact in
                 FactRow(entity: entity, fact: fact, conversation: conversation, reload: reload)
             }
+
+            // Names and edges are knowledge and belong on the page. They lived only in the file
+            // until now, so being told a nickname three times looked exactly like being ignored.
+            if !entity.alsoKnownAs.isEmpty || !entity.relations.isEmpty {
+                Names(entity: entity, conversation: conversation, reload: reload)
+            }
         }
         .padding(Theme.Space.l)
         .background(Theme.Colors.canvas, in: .rect(cornerRadius: Theme.Radius.panel))
@@ -231,6 +237,58 @@ private struct EntityCard: View {
 ///
 /// §5's rule that colour means machine state holds here, so the emotional centre of the product
 /// gets no hue at all and is carried by typography.
+/// What an entity is called, and who it is connected to.
+///
+/// Quieter than a fact row, because these are how Loki finds things rather than things it believes.
+/// Still removable: an alias goes, and an edge closes, because a manager who changed is a different
+/// thing from a manager who was never yours.
+private struct Names: View {
+    let entity: KnownEntity
+    let conversation: Conversation
+    let reload: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if !entity.alsoKnownAs.isEmpty {
+                row("also called", entity.alsoKnownAs.map { form in
+                    (form, { conversation.forgetAlias(path: entity.path, form: form) })
+                })
+            }
+            if !entity.relations.isEmpty {
+                row("connected to", entity.relations.map { edge in
+                    ("\(edge.name), \(edge.label)", {
+                        conversation.forgetRelation(
+                            path: entity.path, label: edge.label, to: edge.path
+                        )
+                    })
+                })
+            }
+        }
+        .padding(.top, Theme.Space.xs)
+    }
+
+    private func row(_ label: String, _ items: [(String, () -> Void)]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(Theme.Text.micro)
+                .kerning(Theme.Text.microTracking)
+                .foregroundStyle(Theme.Colors.faint)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(spacing: Theme.Space.s) {
+                    Text(item.0)
+                        .font(Theme.Text.body)
+                        .foregroundStyle(Theme.Colors.muted)
+                    Spacer(minLength: Theme.Space.m)
+                    Quiet("not true") {
+                        item.1()
+                        reload()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct FactRow: View {
     let entity: KnownEntity
     let fact: KnownFact

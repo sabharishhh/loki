@@ -168,6 +168,8 @@ impl Extractor for OneFact {
             origin: Origin::Stated,
             tags: vec![],
             aliases: vec![],
+            value: None,
+
             relation: None,
         }])
     }

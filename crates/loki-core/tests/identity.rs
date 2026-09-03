@@ -198,6 +198,8 @@ mod cardinality {
                     origin: Origin::Stated,
                     tags: vec![],
                     aliases: vec![],
+                    value: None,
+
                     relation: None,
                 })
                 .collect())
@@ -309,6 +311,7 @@ mod names {
                     origin: Origin::Stated,
                     tags: vec![],
                     aliases: f.aliases.iter().map(|a| (*a).to_owned()).collect(),
+                    value: None,
                     relation: f.relation.map(|(label, of)| RelationTo {
                         label: label.to_owned(),
                         of: of.to_owned(),
@@ -705,6 +708,8 @@ mod merging {
                 origin: Origin::Stated,
                 tags: vec![],
                 aliases: vec![],
+                value: None,
+
                 relation: None,
             }])
         }
