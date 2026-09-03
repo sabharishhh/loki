@@ -497,8 +497,13 @@ impl Loop {
         let navigator = runtime::ModelNavigator::new(provider.as_ref(), cancel);
         let found = memory.search_deeply(question, &navigator, today).await;
         // Charged whether or not the search worked. Tokens spent on a failed search are still
-        // spent, and a ledger that only counts successes is not a ledger.
-        self.record_spend(task, &navigator.usage(), ModelRole::Utility);
+        // spent, and a ledger that only counts successes is not a ledger. A navigator that never
+        // ran is a different thing from one that ran and found nothing, and only the second is a
+        // call worth recording.
+        let spent = navigator.usage();
+        if spent != Usage::default() {
+            self.record_spend(task, &spent, ModelRole::Utility);
+        }
 
         match found {
             Ok(found) => {
@@ -616,9 +621,9 @@ impl Loop {
     }
 
     fn record_spend(&mut self, task: TaskId, usage: &Usage, role: ModelRole) {
-        if *usage == Usage::default() {
-            return;
-        }
+        // Recorded even when the provider reported nothing. Principle 7: a call that happened is
+        // an act, and suppressing the event because the numbers were zero is how B-45 stayed
+        // invisible for a phase, with no `cost` line in the transcript to notice was missing.
         let caps = self.provider.caps();
         self.budget.record_micros(
             caps.cost
@@ -1012,6 +1017,35 @@ mod tests {
         assert_eq!(summarize("short one"), "short one");
         assert_eq!(summarize("first\nsecond"), "first");
         assert!(summarize(&"x".repeat(200)).ends_with("..."));
+    }
+
+    /// A call that happened is an act, whatever the provider said it cost (principle 7).
+    ///
+    /// The event used to be suppressed when usage came back all zeros, which is exactly the state
+    /// B-45 left every OpenAI turn in. So the transcript had no `cost` line to notice was missing
+    /// and the ledger had no row, and the one symptom anybody could see was a meter reading zero.
+    #[tokio::test]
+    async fn a_call_the_provider_priced_at_nothing_is_still_recorded() {
+        let silent = Fake {
+            script: vec![
+                Ok(Chunk::Text("Hello.".to_owned())),
+                Ok(Chunk::Done(StopReason::EndTurn)),
+            ],
+            reject: false,
+            seen: Mutex::new(Vec::new()),
+        };
+        let (mut core, events, _) = harness(Arc::new(silent));
+        core.turn_with("hello", CancellationToken::new())
+            .await
+            .expect("turn");
+
+        assert!(
+            events
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::ModelCall { .. })),
+            "a turn with no reported usage still made a call"
+        );
     }
 
     /// The marker opens the reply or it is not a request. Two rules meet here: a model that

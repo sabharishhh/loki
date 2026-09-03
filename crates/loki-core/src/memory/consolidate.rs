@@ -502,8 +502,8 @@ async fn absorb(
                 }
                 report.created.push(path);
             }
+            record_edge(candidate, landed.as_deref(), bundle, settings).await?;
             refresh(bundle, index).await?;
-            record_edge(candidate, landed.as_deref(), bundle, index, settings).await?;
             Ok(())
         }
         Resolution::Existing { path } => {
@@ -517,8 +517,8 @@ async fn absorb(
                 let writer = bundle.writer().await;
                 writer.save_concept(&path, &concept)?;
             }
+            record_edge(candidate, landed.as_deref(), bundle, settings).await?;
             refresh(bundle, index).await?;
-            record_edge(candidate, landed.as_deref(), bundle, index, settings).await?;
             Ok(())
         }
     }
@@ -536,13 +536,15 @@ async fn record_edge(
     candidate: &Candidate,
     landed: Option<&str>,
     bundle: &Bundle,
-    index: &Index,
     settings: Settings,
 ) -> Result<(), ConsolidateError> {
     let (Some(relation), Some(to)) = (candidate.relation.as_ref(), landed) else {
         return Ok(());
     };
-    let Some(from) = index.path_answering_to(&relation.of)? else {
+    // Read from the files rather than the index, so this can run before the sync rather than
+    // forcing a second one. Consolidation walks every claim, and an index rebuild per claim is
+    // the kind of cost that only shows up as an app that will not quit.
+    let Some(from) = whoever_answers_to(&relation.of, bundle).await else {
         return Ok(());
     };
     if from == to {
@@ -556,11 +558,23 @@ async fn record_edge(
         }
     };
     owner.front.relate(&relation.label, to, settings.today);
-    {
-        let writer = bundle.writer().await;
-        writer.save_concept(&from, &owner)?;
-    }
-    refresh(bundle, index).await
+    let writer = bundle.writer().await;
+    Ok(writer.save_concept(&from, &owner)?)
+}
+
+/// The one concept answering to this exact surface form, by name or alias.
+///
+/// Two entities answering to one form is §9.4's known ambiguity, and an edge is not the place to
+/// pick between them.
+async fn whoever_answers_to(surface: &str, bundle: &Bundle) -> Option<String> {
+    let reader = bundle.reader().await;
+    let mut found = reader.concepts().ok()?.into_iter().filter(|path| {
+        reader
+            .load_concept(path)
+            .is_ok_and(|concept| concept.front.answers_to(surface))
+    });
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 /// Records everything this candidate says about what the entity is called (change C, S-21).

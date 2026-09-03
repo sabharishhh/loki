@@ -799,12 +799,43 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
     // summary of what the session cost rather than with the last thing it learned.
     core.journal.totals();
     let lines = core.runtime.block_on(async move {
+        let cancel = CancellationToken::new();
+        // Bounded here rather than by the caller (B-48).
+        //
+        // This is a blocking call across the bridge, so a `Task.cancel()` on the Swift side cannot
+        // reach it: the app looked like it gave consolidation twenty seconds and in fact waited
+        // for ever, which is why quitting stopped working as the pass got heavier. A timeout
+        // around the await points is a bound that actually holds, and the cancellation token
+        // stops the model call it was waiting on rather than leaving it running.
+        //
+        // Losing one session's consolidation costs a re-derivation. The episode is still on disk
+        // and §18.2 picks it up on the next launch.
+        let work = consolidate_now(&memory, &loop_handle, cancel.clone());
+        let Ok(lines) = tokio::time::timeout(CLOSE_BUDGET, work).await else {
+            cancel.cancel();
+            return Vec::new();
+        };
+        lines
+    });
+    json_string(&serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// How long quitting will wait for consolidation before giving up on it.
+///
+/// A person pressing cmd-Q has said what they want. Consolidation is worth a pause and is not
+/// worth an app that will not close.
+const CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn consolidate_now(
+    memory: &Arc<Memory>,
+    loop_handle: &Arc<AsyncMutex<Loop>>,
+    cancel: CancellationToken,
+) -> Vec<String> {
+    {
         let guard = loop_handle.lock().await;
         let provider = guard.provider();
-        let extractor = ModelExtractor::new(provider.as_ref(), CancellationToken::new());
-        let matcher = ModelMatcher::new(provider.as_ref(), CancellationToken::new());
-        drop(guard);
-
+        let extractor = ModelExtractor::new(provider.as_ref(), cancel.clone());
+        let matcher = ModelMatcher::new(provider.as_ref(), cancel);
         let today = jiff::Zoned::now().date();
         let Ok(report) = memory
             .close(
@@ -817,6 +848,7 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
         else {
             return Vec::new();
         };
+        drop(guard);
         let rows = memory.timeline_rows(&report, today).await;
 
         // §8.1's one accepted cache miss: what was just learned has to be usable on the very next
@@ -826,8 +858,7 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
             let _ = guard.refresh_working_set().await;
         }
         loki_core::memory::timeline::summary(&rows, report.rejected.as_deref())
-    });
-    json_string(&serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_owned()))
+    }
 }
 
 /// Hands a string to Swift. Null on an interior nul byte, which the caller treats as empty.

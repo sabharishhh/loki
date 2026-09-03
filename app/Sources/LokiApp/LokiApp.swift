@@ -51,21 +51,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Consolidation runs at session close, because the app is already awake (§9.8).
     ///
     /// `applicationShouldTerminate` rather than `willTerminate`, since the pass makes model calls
-    /// and a delegate that has already returned cannot hold the process open for them. Bounded, so
-    /// a slow provider cannot make quitting feel broken: losing one session's consolidation costs
-    /// a re-derivation, and the episode file is still on disk either way.
+    /// and a delegate that has already returned cannot hold the process open for them.
+    ///
+    /// **The bound is in the core, not here** (B-48). This used to start a second task that called
+    /// `done.cancel()` after twenty seconds, which looked like a timeout and was not: the work is
+    /// one blocking call across the FFI, and cancelling a Swift task cannot interrupt a blocking
+    /// call. So cmd-Q waited for however long consolidation took, and stopped working altogether
+    /// as the pass grew. `loki_end_session` now bounds itself around its own await points, which
+    /// is the only place the bound can actually hold.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !closing else { return .terminateNow }
         closing = true
 
         Task { @MainActor in
-            let done = Task { await conversation.endSession() }
-            let bound = Task {
-                try? await Task.sleep(for: .seconds(20))
-                done.cancel()
-            }
-            _ = await done.value
-            bound.cancel()
+            await conversation.endSession()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
