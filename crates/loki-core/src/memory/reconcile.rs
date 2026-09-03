@@ -103,7 +103,7 @@ pub enum Promotion {
 /// `inferred` still waits, which is what the draft tier is actually for: stopping a guess becoming
 /// a fact about you. Import is unaffected, because §11.4 makes everything it writes inferred.
 #[must_use]
-pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion {
+pub fn promotion(claim: &Claim, conflicted: bool) -> Promotion {
     use super::claim::Privacy;
 
     if conflicted || claim.privacy == Privacy::Private {
@@ -116,10 +116,39 @@ pub fn promotion(claim: &Claim, occurrences: u32, conflicted: bool) -> Promotion
     if !claim.origin.durable_eligible() {
         return Promotion::Ask;
     }
-    if claim.origin.is_stated() || occurrences >= 2 || claim.usage_count >= 1 {
+    if claim.origin.is_stated() || earned_by_recall(claim) {
         return Promotion::Auto;
     }
     Promotion::Hold
+}
+
+/// Distinct questions a claim must have answered before it is trusted (§9.8, §26 question 16).
+///
+/// Breadth, not volume. A claim that answers one question repeatedly is narrower than one that
+/// answers several, and thirty hits on a single query is one fact being useful once.
+pub const PROMOTE_AT_QUERIES: u32 = 3;
+
+/// Distinct days it must have answered them across.
+///
+/// Multi-day recurrence separates a fact that mattered from one that mattered for an afternoon.
+/// Two is the smallest number that can tell those apart at all.
+pub const PROMOTE_AT_DAYS: u32 = 2;
+
+/// Whether recall behaviour has earned an inferred claim its place (§9.8, §10.6).
+///
+/// **Counted, never judged.** §22.4 rejects putting a model in the promotion path, because this is
+/// the one decision that shapes the store and it has to stay auditable.
+///
+/// v0.8 promoted on a second occurrence. That rewards an extractor that repeats itself and says
+/// nothing about whether the fact matters. A claim that answered three different questions on
+/// three different days is evidence of usefulness; a claim written twice in one session is
+/// evidence of nothing.
+///
+/// The numbers are open question 16 and cannot be picked properly before §21.3 reports a promotion
+/// rate. Two named constants, so this stays a number to change rather than a rule to rewrite.
+#[must_use]
+pub fn earned_by_recall(claim: &Claim) -> bool {
+    claim.recall_queries >= PROMOTE_AT_QUERIES && claim.recall_days >= PROMOTE_AT_DAYS
 }
 
 /// Whether a later claim about the same attribute overrides this one (§9.7 rule 4).
@@ -334,38 +363,59 @@ mod tests {
     #[test]
     fn what_the_user_says_is_usable_at_once() {
         let claim = stated("prefers short replies", date(2026, 8, 1));
-        assert_eq!(promotion(&claim, 1, false), Promotion::Auto);
+        assert_eq!(promotion(&claim, false), Promotion::Auto);
     }
 
     #[test]
     fn an_inferred_first_mention_still_waits() {
         let claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
-        assert_eq!(promotion(&claim, 1, false), Promotion::Hold);
-        assert_eq!(promotion(&claim, 2, false), Promotion::Auto);
+        assert_eq!(promotion(&claim, false), Promotion::Hold);
     }
 
+    /// §9.8: an inferred claim earns its place on recall behaviour, not on being written twice.
     #[test]
-    fn use_without_correction_promotes_an_inferred_first_mention() {
+    fn a_guess_that_answered_several_questions_across_days_is_promoted() {
         let mut claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
-        claim.used_without_correction();
-        assert_eq!(promotion(&claim, 1, false), Promotion::Auto);
+        claim.recall_queries = PROMOTE_AT_QUERIES;
+        claim.recall_days = PROMOTE_AT_DAYS;
+        assert_eq!(promotion(&claim, false), Promotion::Auto);
+    }
+
+    /// Volume is not breadth. Thirty hits on one question in one afternoon is one fact being
+    /// useful once, which is precisely what "seen twice" used to reward.
+    #[test]
+    fn a_guess_recalled_often_for_one_question_is_not_promoted() {
+        let mut claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
+        claim.recalls = 30;
+        claim.recall_queries = 1;
+        claim.recall_days = 1;
+        assert_eq!(promotion(&claim, false), Promotion::Hold);
+    }
+
+    /// Several questions, but all on one day. Still a busy afternoon, not a fact that matters.
+    #[test]
+    fn breadth_without_recurrence_is_not_enough() {
+        let mut claim = inferred("prefers short replies", date(2026, 8, 1), date(2026, 8, 1));
+        claim.recall_queries = PROMOTE_AT_QUERIES + 2;
+        claim.recall_days = 1;
+        assert_eq!(promotion(&claim, false), Promotion::Hold);
     }
 
     /// Saying it does not override the two cases that need a person.
     #[test]
     fn a_stated_claim_that_conflicts_still_asks() {
         let claim = stated("earns x", date(2026, 8, 1));
-        assert_eq!(promotion(&claim, 1, true), Promotion::Ask);
+        assert_eq!(promotion(&claim, true), Promotion::Ask);
     }
 
     #[test]
     fn a_conflict_or_a_private_claim_asks() {
         let claim = stated("earns x", date(2026, 8, 1));
-        assert_eq!(promotion(&claim, 5, true), Promotion::Ask);
+        assert_eq!(promotion(&claim, true), Promotion::Ask);
 
         let mut private = stated("earns x", date(2026, 8, 1));
         private.privacy = super::super::claim::Privacy::Private;
-        assert_eq!(promotion(&private, 5, false), Promotion::Ask);
+        assert_eq!(promotion(&private, false), Promotion::Ask);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -206,6 +206,25 @@ impl Recalled {
     }
 }
 
+/// Which lane returned a claim (§10.6). Counted separately because they are different evidence:
+/// lane 1 chose it, and on lane 2 the agent went looking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Automatic recall, on every turn (§10.1).
+    Automatic,
+    /// The agent searching memory directly (§10.8).
+    Deliberate,
+}
+
+impl Lane {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Deliberate => "deliberate",
+        }
+    }
+}
+
 /// Names one claim inside one concept.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Use {
@@ -323,6 +342,12 @@ pub struct PendingUse {
     pub path: String,
     pub ordinal: u32,
     pub uses: u32,
+    /// How often retrieval returned this claim, on either lane (§10.6).
+    pub recalls: u32,
+    /// How many distinct queries returned it. Breadth, not volume.
+    pub recall_queries: u32,
+    /// How many distinct days it was returned on. Recurrence, not a busy afternoon.
+    pub recall_days: u32,
 }
 
 /// FTS5 over one named table of documents, ranked by bm25.
@@ -464,6 +489,17 @@ CREATE TABLE IF NOT EXISTS tag (
     text    TEXT    NOT NULL,
     PRIMARY KEY (concept, text)
 );
+CREATE TABLE IF NOT EXISTS recall_event (
+    concept    TEXT    NOT NULL,
+    ordinal    INTEGER NOT NULL,
+    query_hash TEXT    NOT NULL,
+    day        INTEGER NOT NULL,
+    lane       TEXT    NOT NULL,
+    rank       INTEGER NOT NULL,
+    at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recall_by_claim ON recall_event(concept, ordinal);
+CREATE INDEX IF NOT EXISTS recall_by_day ON recall_event(day);
 CREATE INDEX IF NOT EXISTS claim_by_concept ON claim(concept);
 CREATE INDEX IF NOT EXISTS link_by_src ON link(src);
 CREATE INDEX IF NOT EXISTS link_by_dst ON link(dst);
@@ -527,6 +563,7 @@ impl Index {
                  DROP TABLE IF EXISTS alias;
                  DROP TABLE IF EXISTS tag;
                  DROP TABLE IF EXISTS turn;
+                 DROP TABLE IF EXISTS recall_event;
                  DROP TABLE IF EXISTS claim_fts;
                  DROP TABLE IF EXISTS turn_fts;
                  DROP TABLE IF EXISTS meta;",
@@ -819,6 +856,69 @@ impl Index {
     ///
     /// # Errors
     /// Fails if the index cannot be written.
+    /// Records that retrieval returned these claims (§10.6).
+    ///
+    /// One row per claim per turn. The three counts §9.8 promotes on are derived from these rows
+    /// rather than incremented, because "how many distinct queries" and "how many distinct days"
+    /// cannot be answered by a counter.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be written.
+    pub fn record_recall(
+        &self,
+        returned: &[Recalled],
+        query: &str,
+        day: Date,
+        lane: Lane,
+    ) -> Result<(), IndexError> {
+        let hash = query_hash(query);
+        let day = to_days(day);
+        let at = now_seconds();
+        let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        let tx = db.transaction().map_err(IndexError::Write)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO recall_event(concept, ordinal, query_hash, day, lane, rank, at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(IndexError::Write)?;
+            for (rank, line) in returned.iter().enumerate() {
+                // A live turn has no file to count against, and counting it would inflate the very
+                // corpus that is about to be consolidated away.
+                if line.layer != Layer::Consolidated {
+                    continue;
+                }
+                stmt.execute(params![
+                    line.path,
+                    line.ordinal,
+                    hash,
+                    day,
+                    lane.name(),
+                    i64::try_from(rank).unwrap_or(i64::MAX),
+                    at
+                ])
+                .map_err(IndexError::Write)?;
+            }
+        }
+        tx.commit().map_err(IndexError::Write)?;
+        Ok(())
+    }
+
+    /// Drops recall rows older than the promotion window (§10.6, §26 question 17).
+    ///
+    /// The rows are disposable working data; the counts folded into the files are the record. A
+    /// claim heavily used last year and untouched since should not still be promoting things.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be written.
+    pub fn prune_recalls(&self, today: Date, keep_days: i64) -> Result<usize, IndexError> {
+        let cutoff = to_days(today) - keep_days;
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        db.execute("DELETE FROM recall_event WHERE day < ?1", params![cutoff])
+            .map_err(IndexError::Write)
+    }
+
     pub fn record_use(&self, uses: &[Use]) -> Result<(), IndexError> {
         let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
         let tx = db.transaction().map_err(IndexError::Write)?;
@@ -850,11 +950,22 @@ impl Index {
         let mut db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
         let tx = db.transaction().map_err(IndexError::Write)?;
         let pending: Vec<PendingUse> = {
+            // The recall aggregates ride along with the uses, because both are folded into the
+            // same file on the same pass. §9.13: the counts live in the record, so an index
+            // rebuild loses the rows and keeps the signal.
             let mut stmt = tx
                 .prepare(
-                    "SELECT c.path, m.ordinal, m.uses_pending
+                    "SELECT c.path, m.ordinal, m.uses_pending,
+                            (SELECT COUNT(*) FROM recall_event r
+                              WHERE r.concept = c.path AND r.ordinal = m.ordinal),
+                            (SELECT COUNT(DISTINCT r.query_hash) FROM recall_event r
+                              WHERE r.concept = c.path AND r.ordinal = m.ordinal),
+                            (SELECT COUNT(DISTINCT r.day) FROM recall_event r
+                              WHERE r.concept = c.path AND r.ordinal = m.ordinal)
                      FROM claim m JOIN concept c ON c.id = m.concept
                      WHERE m.uses_pending > 0
+                        OR EXISTS (SELECT 1 FROM recall_event r
+                                    WHERE r.concept = c.path AND r.ordinal = m.ordinal)
                      ORDER BY c.path, m.ordinal",
                 )
                 .map_err(IndexError::Read)?;
@@ -864,6 +975,9 @@ impl Index {
                         path: r.get(0)?,
                         ordinal: r.get(1)?,
                         uses: r.get(2)?,
+                        recalls: r.get(3)?,
+                        recall_queries: r.get(4)?,
+                        recall_days: r.get(5)?,
                     })
                 })
                 .map_err(IndexError::Read)?;
@@ -1345,6 +1459,23 @@ fn file_stamp(root: &Path, path: &str) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
         .unwrap_or(0)
+}
+
+/// A stable, short digest of a query, so §10.6 can count distinct questions without storing them.
+///
+/// Not a cryptographic hash and not meant to be: it groups repeats of one question, and the raw
+/// text is not kept because a query log is a record of what someone asked.
+fn query_hash(query: &str) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    query.trim().to_lowercase().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn to_days(day: Date) -> i64 {

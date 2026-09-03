@@ -13,7 +13,7 @@ use super::claim::{Claim, Confidence, Origin};
 use super::concept::{Attribution, RawConcept, Status};
 use super::consolidate::{self, Budget, ConsolidateError, Episode, Extractor, Report};
 use super::gate::TierScope;
-use super::index::{Index, IndexError, Layer, Query, Recalled, Session, Use};
+use super::index::{Index, IndexError, Lane, Layer, Query, Recalled, Session, Use};
 use super::knowledge;
 use super::reconcile::Reference;
 use super::resolve::Matcher;
@@ -28,6 +28,13 @@ use crate::core::temporal;
 /// says which claims were injected is already emitted and the buffer already records the turn, so
 /// this reads a log we already write.
 pub const RECALLED: &str = "**recalled**:";
+
+/// How long a recall row counts towards promotion (§10.6, §26 question 17).
+///
+/// A claim heavily used last year and untouched since should not still be promoting things. Ninety
+/// days is long enough that a fact used monthly still accumulates and short enough that last
+/// year's habits stop voting. Open question 17, so it is one named number to change.
+pub const RECALL_WINDOW_DAYS: i64 = 90;
 
 /// Claims a single turn may carry. Precision over recall (§10.1): a wrong memory costs more than
 /// a missing one, because a missing memory reads as forgetfulness and a wrong one as not knowing
@@ -117,6 +124,52 @@ impl Memory {
         Ok(working_set::read(&self.bundle).await?)
     }
 
+    /// Writes the index's recall counts into the concept files (§9.13, §10.6).
+    ///
+    /// The rows in `index.sqlite` are disposable working data. These counts are the record, and
+    /// they are what §9.8 promotes an inferred claim on, so losing them to a rebuild would lose
+    /// the promotion signal with them.
+    async fn fold_recalls(&self) -> Result<(), MemoryError> {
+        let pending = self.index.drain_pending_uses()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_path: std::collections::BTreeMap<String, Vec<&super::index::PendingUse>> =
+            std::collections::BTreeMap::new();
+        for entry in &pending {
+            by_path.entry(entry.path.clone()).or_default().push(entry);
+        }
+
+        for (path, entries) in by_path {
+            let mut concept = {
+                let reader = self.bundle.reader().await;
+                // A file that will not parse is not a reason to lose the whole fold.
+                match reader.load_concept(&path) {
+                    Ok(concept) => concept,
+                    Err(_) => continue,
+                }
+            };
+            for (at, claim) in concept.claims_mut().enumerate() {
+                let Ok(ordinal) = u32::try_from(at) else {
+                    continue;
+                };
+                let Some(entry) = entries.iter().find(|e| e.ordinal == ordinal) else {
+                    continue;
+                };
+                for _ in 0..entry.uses {
+                    claim.used_without_correction();
+                }
+                claim.recalls = entry.recalls;
+                claim.recall_queries = entry.recall_queries;
+                claim.recall_days = entry.recall_days;
+            }
+            let writer = self.bundle.writer().await;
+            writer.save_concept(&path, &concept)?;
+        }
+        Ok(())
+    }
+
     /// Whether anything is waiting to be consolidated (§18.2).
     ///
     /// True after a session that ended without a close, which is what makes the next launch able
@@ -197,6 +250,23 @@ impl Memory {
         }
         let writer = self.bundle.writer().await;
         Ok(writer.append(bundle::CURRENT, &lines.concat())?)
+    }
+
+    /// Records what retrieval returned, for §10.6's three counted signals.
+    ///
+    /// Separate from `mark_used`, which is §9.9's confidence meter. A claim can be recalled without
+    /// being used well, and the two questions want different answers.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be written.
+    pub fn note_recall(
+        &self,
+        recalled: &[Recalled],
+        query: &str,
+        today: Date,
+        lane: Lane,
+    ) -> Result<(), MemoryError> {
+        Ok(self.index.record_recall(recalled, query, today, lane)?)
     }
 
     pub fn mark_used(&self, recalled: &[Recalled]) -> Result<(), MemoryError> {
@@ -493,6 +563,18 @@ impl Memory {
             return Ok(Report::default());
         }
 
+        // §9.13: the recall counts live in the record, so an index rebuild loses the rows and
+        // keeps the signal. Folded *before* the pass, not after, because promotion reads them: a
+        // claim that has earned its place should be promoted by this pass rather than the next.
+        self.fold_recalls().await?;
+        // §10.6: the rows are disposable working data, pruned past the promotion window. The
+        // counts folded above are the record, so pruning costs nothing that matters.
+        self.index.prune_recalls(today, RECALL_WINDOW_DAYS)?;
+        {
+            let reader = self.bundle.reader().await;
+            self.index.sync(&reader)?;
+        }
+
         // Read the buffer, not the episode. The episode is the permanent record and grows all day,
         // so extracting from it made every close re-read the whole day and the extractor, being a
         // model, worded each fact differently every time. The buffer holds only what has not been
@@ -512,6 +594,9 @@ impl Memory {
         )
         .await?;
 
+        // §9.13: the recall counts live in the record, so an index rebuild loses the rows and
+        // keeps the signal. Folded before the working set is generated, because a claim that just
+        // earned promotion should reach the prefix on this pass rather than the next.
         // The timeline is written before the working set, so a crash between the two leaves the
         // user able to see what changed rather than only its effect.
         let concepts = self.load_touched(&report).await;

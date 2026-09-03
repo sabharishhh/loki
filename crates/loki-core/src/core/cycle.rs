@@ -288,6 +288,14 @@ impl Loop {
                 self.turn.set_recall("");
             } else {
                 memory.mark_used(&recalled)?;
+                // One row per returned claim, for §10.6's three counted signals. Lane 1, because
+                // this is automatic recall; lane 2 will record its own.
+                memory.note_recall(
+                    &recalled,
+                    &message,
+                    today,
+                    crate::memory::index::Lane::Automatic,
+                )?;
                 // Marked in the buffer so the next pass does not read Loki's own words back as a
                 // fresh statement from the user (§9.8).
                 memory.note_recalled(&recalled).await?;

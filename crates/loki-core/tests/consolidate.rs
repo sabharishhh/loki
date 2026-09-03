@@ -409,7 +409,7 @@ async fn relative_time_resolves_against_the_episode_not_today() {
 
 /// An inferred first mention stays draft, so a guess does not become a fact about you.
 #[tokio::test]
-async fn an_inferred_first_mention_stays_draft_and_a_second_promotes() {
+async fn an_inferred_claim_waits_for_recall_behaviour_not_for_a_second_occurrence() {
     let store = Store::new("promote", &["episodes/a.md", "episodes/b.md"]).await;
     let extractor = Scripted::new(vec![
         (
@@ -454,8 +454,35 @@ async fn an_inferred_first_mention_stays_draft_and_a_second_promotes() {
         .await;
     assert_eq!(
         store.concept_at("people/dan.md").await.front.status,
+        Status::Draft,
+        "a second occurrence is evidence about the extractor, not about the fact (§9.8)"
+    );
+
+    // What does earn it: the claim having answered several questions across several days.
+    {
+        let mut concept = store.concept_at("people/dan.md").await;
+        for claim in concept.claims_mut() {
+            claim.recall_queries = loki_core::memory::reconcile::PROMOTE_AT_QUERIES;
+            claim.recall_days = loki_core::memory::reconcile::PROMOTE_AT_DAYS;
+        }
+        let writer = store.bundle.writer().await;
+        writer
+            .save_concept("people/dan.md", &concept)
+            .expect("save");
+        writer.commit("recall aggregates").expect("commit");
+    }
+    let empty = Scripted::new(vec![]);
+    store
+        .go(
+            &[episode("episodes/b.md", date(2026, 3, 1))],
+            &empty,
+            &Unbounded,
+        )
+        .await;
+    assert_eq!(
+        store.concept_at("people/dan.md").await.front.status,
         Status::Stable,
-        "a second occurrence earns it"
+        "three distinct questions across two days is what earns it"
     );
 }
 

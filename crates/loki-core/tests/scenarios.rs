@@ -66,9 +66,14 @@ impl Extractor for Reader {
             *runs
         };
 
-        let mut out = Vec::new();
-        let mut fact = |attribute: &str, kind: Kind, surface: &str, text: &str| {
-            out.push(Candidate {
+        fn candidate(
+            attribute: &str,
+            kind: Kind,
+            surface: &str,
+            text: &str,
+            origin: Origin,
+        ) -> Candidate {
+            Candidate {
                 surface: surface.to_owned(),
                 kind,
                 heading: attribute.to_owned(),
@@ -76,9 +81,14 @@ impl Extractor for Reader {
                 text: text.to_owned(),
                 days_ago: None,
                 valid_from: None,
-                origin: Origin::Stated,
+                origin,
                 tags: vec![],
-            });
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut fact = |attribute: &str, kind: Kind, surface: &str, text: &str| {
+            out.push(candidate(attribute, kind, surface, text, Origin::Stated));
         };
 
         if text.contains("name is Sabharish") || text.contains("I'm Sabharish") {
@@ -122,6 +132,8 @@ impl Extractor for Reader {
                 "Sabharish lives in Bangalore",
             );
         }
+        // Something Loki worked out rather than something the user said, which is the case
+        // §9.8 makes wait for recall behaviour.
         if text.contains("short replies") {
             // Plural one run, singular the next. Open question 18's drift, deliberately.
             fact(
@@ -134,6 +146,17 @@ impl Extractor for Reader {
                 "reply length",
                 "Sabharish prefers short replies",
             );
+        }
+        // Something Loki worked out rather than something the user said, which is the case §9.8
+        // makes wait for recall behaviour.
+        if text.contains("keep it brief") {
+            out.push(candidate(
+                "reply_style",
+                Kind::Preference,
+                "reply length",
+                "Sabharish seems to want short replies",
+                Origin::Inferred,
+            ));
         }
         Ok(out)
     }
@@ -515,4 +538,120 @@ async fn clearing_the_buffer_is_explicit_and_survives_a_reopen() {
 
     clear_buffer(app.memory.bundle()).await.expect("clear");
     assert!(!app.memory.has_unconsolidated().await);
+}
+
+/// §9.8 and §10.6, end to end. A guess earns its place by answering different questions on
+/// different days, not by the extractor writing it twice.
+#[tokio::test]
+async fn a_guess_is_promoted_by_being_useful_across_days() {
+    let app = App::open("recall-promotion").await;
+    app.say("keep it brief").await;
+    app.close().await;
+
+    // Written as a guess, so it waits.
+    let held = app.memory.knowledge(today()).await.expect("knowledge");
+    let preference = held
+        .entities
+        .iter()
+        .find(|e| e.name == "reply length")
+        .expect("the preference exists");
+    assert!(
+        !preference.in_use,
+        "a guess is not used on its first mention"
+    );
+
+    // Three different questions, on three different days, all answered by it.
+    let path = preference.path.clone();
+    let ordinal = preference.facts.first().map_or(0, |f| f.ordinal);
+    for (day, question) in [
+        (date(2026, 9, 2), "how long should replies be"),
+        (date(2026, 9, 3), "reply length preference"),
+        (date(2026, 9, 4), "does Sabharish want short answers"),
+    ] {
+        let hits = app
+            .memory
+            .index()
+            .recall(&Query {
+                visibility: loki_core::memory::index::Visibility::Everything,
+                ..Query::prefetch(question, TierScope::normal(Locality::Cloud), day, 5)
+            })
+            .expect("recall");
+        assert!(
+            hits.iter().any(|h| h.path == path && h.ordinal == ordinal),
+            "the claim has to be reachable to earn anything: {hits:?}"
+        );
+        app.memory
+            .note_recall(
+                &hits,
+                question,
+                day,
+                loki_core::memory::index::Lane::Automatic,
+            )
+            .expect("note");
+    }
+
+    app.say("anything else").await;
+    app.close().await;
+
+    let after = app.memory.knowledge(today()).await.expect("knowledge");
+    let preference = after
+        .entities
+        .iter()
+        .find(|e| e.name == "reply length")
+        .expect("still there");
+    assert!(
+        preference.in_use,
+        "three questions across three days is what earns it: {preference:?}"
+    );
+}
+
+/// The counts live in the file, so wiping the index does not wipe the promotion signal (§9.13).
+#[tokio::test]
+async fn the_recall_counts_survive_in_the_file() {
+    let app = App::open("counts-in-file").await;
+    app.say("keep it brief").await;
+    app.close().await;
+
+    let entity = app
+        .memory
+        .knowledge(today())
+        .await
+        .expect("knowledge")
+        .entities
+        .into_iter()
+        .find(|e| e.name == "reply length")
+        .expect("preference");
+    let hits = app
+        .memory
+        .index()
+        .recall(&Query {
+            visibility: loki_core::memory::index::Visibility::Everything,
+            ..Query::prefetch(
+                "short replies",
+                TierScope::normal(Locality::Cloud),
+                today(),
+                5,
+            )
+        })
+        .expect("recall");
+    app.memory
+        .note_recall(
+            &hits,
+            "short replies",
+            today(),
+            loki_core::memory::index::Lane::Automatic,
+        )
+        .expect("note");
+
+    app.say("more").await;
+    app.close().await;
+
+    let text = {
+        let reader = app.memory.bundle().reader().await;
+        reader.read(&entity.path).expect("read")
+    };
+    assert!(
+        text.contains("recalls: 1"),
+        "the count is written into the record, not only the index: {text}"
+    );
 }

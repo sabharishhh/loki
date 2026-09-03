@@ -445,7 +445,7 @@ async fn absorb(
                 // What the user stated is usable at once; what was merely inferred waits for a
                 // second occurrence. See `reconcile::promotion` for why the old rule could never
                 // let a first mention through at all.
-                front.status = if reconcile::promotion(&claim, 1, false) == Promotion::Auto {
+                front.status = if reconcile::promotion(&claim, false) == Promotion::Auto {
                     Status::Stable
                 } else {
                     Status::Draft
@@ -504,15 +504,14 @@ fn merge(
     // repeats come from the extractor being a model, which never phrases a fact the same way
     // twice. Both used to land as new claims, and the reworded ones then read as corrections to
     // something that had not changed.
-    let repeats = held_restatements(concept, &claim);
-    if repeats > 0 {
+    if held_restatements(concept, &claim) > 0 {
         if let Some(held) = concept
             .claims_mut()
             .find(|held| held.validity.is_believed() && held.restates(&claim))
         {
             held.reinforced_by(&claim);
         }
-        promote(concept, path, &claim, repeats.saturating_add(1), report);
+        promote(concept, path, &claim, report);
         return;
     }
 
@@ -522,7 +521,7 @@ fn merge(
         .map(|held| (held.text.clone(), held.clone()));
 
     let Some((held_text, held)) = conflict else {
-        promote(concept, path, &claim, 1, report);
+        promote(concept, path, &claim, report);
         concept.add(&candidate.heading, claim);
         return;
     };
@@ -558,12 +557,14 @@ fn merge(
 ///
 /// Only believed ones count: a claim that was retired and is now stated again is a reversion, and
 /// has to come back rather than be swallowed as a repeat of itself.
-fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
-    let count = concept
+///
+/// The count no longer feeds promotion, which reads recall behaviour instead (§9.8). It answers
+/// one question now: is this a fact Loki already holds.
+fn held_restatements(concept: &RawConcept, claim: &Claim) -> usize {
+    concept
         .claims()
         .filter(|held| held.validity.is_believed() && held.restates(claim))
-        .count();
-    u32::try_from(count).unwrap_or(u32::MAX)
+        .count()
 }
 
 /// Lifts a draft concept to stable once a claim has earned it (§9.8).
@@ -573,14 +574,8 @@ fn held_restatements(concept: &RawConcept, claim: &Claim) -> u32 {
 /// whole entity out of use over one argument. The rule belongs at the gate, per claim, where
 /// `reconcile::is_shadowed` keeps the older side of a conflict out of a prompt whatever the
 /// concept's status is.
-fn promote(
-    concept: &mut RawConcept,
-    path: &str,
-    claim: &Claim,
-    occurrences: u32,
-    report: &mut Report,
-) {
-    if reconcile::promotion(claim, occurrences, false) == Promotion::Auto
+fn promote(concept: &mut RawConcept, path: &str, claim: &Claim, report: &mut Report) {
+    if reconcile::promotion(claim, false) == Promotion::Auto
         && concept.front.status == Status::Draft
     {
         concept.front.status = Status::Stable;
@@ -706,7 +701,7 @@ fn earned_stable(concept: &RawConcept) -> bool {
     concept.claims().enumerate().any(|(at, claim)| {
         claim.validity.is_believed()
             && !reconcile::is_shadowed(concept, u32::try_from(at).unwrap_or(u32::MAX))
-            && reconcile::promotion(claim, 1, false) == Promotion::Auto
+            && reconcile::promotion(claim, false) == Promotion::Auto
     })
 }
 
