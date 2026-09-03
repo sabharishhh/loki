@@ -972,3 +972,93 @@ async fn the_journal_records_a_whole_turn() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// The meters, end to end: a turn through a `Loop` whose events reach a `Journal`.
+///
+/// The other journal test emits `ModelCall` by hand, so it proves the counter and not the wiring,
+/// and the adapter's own test fed usage and stop on one chunk, which is a shape OpenAI does not
+/// send. Between them B-45 hid for a whole phase: every OpenAI turn recorded zero tokens and zero
+/// cost. This runs the path the app runs, with the ordering the provider uses.
+#[tokio::test]
+async fn a_turn_moves_the_session_token_counters() {
+    use async_trait::async_trait;
+    use loki_core::adapters::clock::SystemClock;
+    use loki_core::adapters::journal::{Journal, Journalled};
+    use loki_core::core::budget::Budget as Spend;
+    use loki_core::core::cycle::{Loop, NullTokens};
+    use loki_core::core::prompt::Prefix;
+    use loki_core::core::sink::EventSink;
+    use loki_core::core::vocab::{Cents, CostModel};
+    use loki_core::ports::model::{
+        Caps, Chunk, ChunkStream, ModelError, ModelProvider, Request, StopReason, ToolSupport,
+        Usage,
+    };
+    use std::sync::Arc;
+
+    struct Reports;
+
+    #[async_trait]
+    impl ModelProvider for Reports {
+        fn id(&self) -> &str {
+            "reports"
+        }
+        fn caps(&self) -> Caps {
+            Caps {
+                locality: Locality::Cloud,
+                prompt_cache: true,
+                max_context: 200_000,
+                tools: ToolSupport::None,
+                cost: CostModel::Free,
+            }
+        }
+        async fn complete(
+            &self,
+            _req: Request,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ChunkStream, ModelError> {
+            // The shape OpenAI streams, which is the one B-45 was about: the call is declared
+            // over, and only then is what it cost reported.
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(Chunk::Text("Hello.".to_owned())),
+                Ok(Chunk::Done(StopReason::EndTurn)),
+                Ok(Chunk::Usage(Usage {
+                    input_tokens: 1_200,
+                    output_tokens: 40,
+                    ..Usage::default()
+                })),
+            ])))
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "loki-meters-{}-{:?}.log",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let journal = Arc::new(Journal::open(&path, "test"));
+    let provider: Arc<dyn ModelProvider> = Arc::new(Journalled::new(
+        Arc::new(Reports) as Arc<dyn ModelProvider>,
+        Arc::clone(&journal),
+    ));
+    let mut core = Loop::new(
+        provider,
+        Arc::clone(&journal) as Arc<dyn EventSink>,
+        Arc::new(NullTokens),
+        Arc::new(SystemClock),
+        Prefix::new("You are Loki."),
+        Spend::new(Cents::new(10_000)),
+    );
+    core.turn_with("hello", tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("turn");
+
+    let spent = journal.tokens();
+    assert_eq!(spent.calls, 1, "{spent:?}");
+    assert_eq!(spent.input, 1_200, "{spent:?}");
+    assert_eq!(spent.output, 40, "{spent:?}");
+    assert_eq!(spent.context, 1_200, "{spent:?}");
+
+    let _ = std::fs::remove_file(&path);
+}

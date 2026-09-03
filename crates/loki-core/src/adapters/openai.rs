@@ -219,8 +219,12 @@ impl WireChunk {
         }
 
         if let Some(usage) = self.usage {
-            // Usage arrives on a trailing chunk after finish_reason, so it goes first to keep
-            // Done last. A Done chunk ends the stream.
+            // First, so a chunk carrying both keeps `Done` last.
+            //
+            // In practice OpenAI never sends both: with `include_usage` the chunk with
+            // `finish_reason` has no usage, and a final chunk with an empty `choices` array
+            // carries it. The loop reads past `Done` for exactly that reason (B-45), and this
+            // ordering only matters for a provider that batches them.
             chunks.insert(0, Chunk::Usage(usage.into()));
         }
 
@@ -339,6 +343,34 @@ mod tests {
         assert_eq!(
             chunk.into_chunks(),
             vec![Chunk::Done(StopReason::MaxTokens)]
+        );
+    }
+
+    /// The shape OpenAI actually streams: usage on its own trailing chunk, after the one that
+    /// said the call was over. The test below covers a chunk carrying both, which OpenAI does not
+    /// send, and passing it is what hid B-45 for a whole phase.
+    #[test]
+    fn usage_arrives_on_its_own_chunk_after_the_stop() {
+        let stopping: WireChunk = serde_json::from_str(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stopping.into_chunks(),
+            vec![Chunk::Done(StopReason::EndTurn)]
+        );
+
+        let trailing: WireChunk = serde_json::from_str(
+            r#"{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":40}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            trailing.into_chunks(),
+            vec![Chunk::Usage(Usage {
+                input_tokens: 1_200,
+                output_tokens: 40,
+                ..Usage::default()
+            })]
         );
     }
 

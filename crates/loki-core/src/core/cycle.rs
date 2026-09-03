@@ -526,8 +526,20 @@ impl Loop {
         let mut held = String::new();
         let mut deciding = armed;
         let mut suppress = false;
+        // Set by `Done`, and the stream keeps being read afterwards.
+        //
+        // **A provider may report what a call cost after it has said the call is over.** OpenAI
+        // does exactly that: the chunk carrying `finish_reason` has no usage on it, and a final
+        // chunk with an empty `choices` array carries it. Breaking on `Done` meant every OpenAI
+        // turn was recorded as zero tokens and zero cost, in the ledger and in the meters. B-45.
+        let mut finished = false;
 
         while let Some(chunk) = stream.next().await {
+            // Nothing but the trailing usage report is expected once a provider has stopped. Any
+            // other chunk means the stream is not behaving, and reading on would be unbounded.
+            if finished && !matches!(chunk, Ok(Chunk::Usage(_))) {
+                break;
+            }
             match chunk {
                 Ok(Chunk::Text(piece)) => {
                     text.push_str(&piece);
@@ -557,7 +569,7 @@ impl Loop {
                         StopReason::Refusal => TaskStatus::Failed,
                         _ => TaskStatus::Completed,
                     };
-                    break;
+                    finished = true;
                 }
                 Err(e) => {
                     // A failure partway through the stream needs a reason as much as one before
