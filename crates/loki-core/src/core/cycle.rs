@@ -353,11 +353,15 @@ impl Loop {
                 self.turn.set_recall(handle::render(&recalled, today));
             }
 
-            // The floor, and the subject check beside it. Both deterministic, both free, and both
-            // before the model call so the answer is written with the search already in hand.
-            let floor = runtime::should_escalate(&message, best)
-                || (runtime::asks_about_the_past(&message)
-                    && runtime::missed_the_subject(&message, &texts));
+            // The floor is for a turn where the model has nothing to read. When lane 1 came back
+            // with claims, the model judges them itself, and judging them from the text beats
+            // judging them from a score: a low score on a vague question means the question was
+            // vague, not that the five claims it returned are useless. Without this, "my dad is a
+            // civil contractor" recalled five facts and then spent five navigator calls and nine
+            // seconds finding nothing (B-47).
+            let nothing_to_read =
+                recalled.is_empty() || runtime::missed_the_subject(&message, &texts);
+            let floor = nothing_to_read && runtime::should_escalate(&message, best);
             if floor {
                 self.escalate(task, &memory, &message, today, cancel.clone())
                     .await;

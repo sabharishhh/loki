@@ -256,6 +256,43 @@ mod tests {
         }
     }
 
+    /// The bridge is a JSON contract and the app reads it by key. A rename on this side is
+    /// invisible to the compiler on the other, and B-46 is what that costs: the recall row read
+    /// `concept_ids`, which has never existed, so every turn reported recalling nothing.
+    ///
+    /// Only the keys `app/Sources/LokiApp/Conversation.swift` actually reaches for. This is a
+    /// contract test, not a schema dump: pinning every field would make it a chore that gets
+    /// updated without being read.
+    #[test]
+    fn the_keys_the_app_reads_are_the_keys_that_are_written() {
+        let read_by_the_app = [
+            ("task_started", vec!["id", "summary"]),
+            ("task_finished", vec!["id", "status"]),
+            ("scope_opened", vec!["id", "parent", "kind"]),
+            ("scope_closed", vec!["id", "ms"]),
+            ("memory_recalled", vec!["claim_ids", "lane"]),
+            ("tool_called", vec!["tool", "tier", "args"]),
+            ("tool_returned", vec!["tool"]),
+            ("blocked", vec!["reason"]),
+            ("budget_warning", vec![]),
+            ("interrupted", vec!["id"]),
+        ];
+
+        for event in sample() {
+            let json: serde_json::Value = serde_json::to_value(&event).expect("serialize");
+            let kind = json["event"].as_str().expect("every event is tagged");
+            let Some((_, wanted)) = read_by_the_app.iter().find(|(name, _)| *name == kind) else {
+                continue;
+            };
+            for key in wanted {
+                assert!(
+                    json.get(key).is_some(),
+                    "the app reads {kind}.{key} and nothing writes it: {json}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn serializes_with_a_kind_tag() {
         let event = Event::ScopeClosed {

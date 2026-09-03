@@ -431,3 +431,53 @@ async fn a_miss_reaches_the_model_as_a_miss() {
         "a miss must not read as an absence: {prompt}"
     );
 }
+
+/// B-47, from Sabharish's session. Three ways a turn spent up to eight navigator calls and nine
+/// seconds on a search nothing had asked for.
+mod not_every_turn {
+    use super::{Fixture, ModelRole};
+
+    /// A statement is not a question about the past. "my " was a marker, so nearly every personal
+    /// sentence armed a search on the way to being stored.
+    #[tokio::test]
+    async fn telling_loki_something_does_not_search() {
+        let mut app = Fixture::open("statement", &["Got it."], &["DONE"]).await;
+        app.ask("my dad is a civil contractor and he studied electronics")
+            .await;
+
+        assert!(
+            app.provider.requests(ModelRole::Utility).is_empty(),
+            "nothing was asked, so nothing should have been searched"
+        );
+        assert_eq!(app.provider.requests(ModelRole::Primary).len(), 1);
+    }
+
+    /// The floor is for a turn with nothing to read. Lane 1 answering a vague question with real
+    /// facts scores low, because the question was vague, and that is not a reason to go looking.
+    #[tokio::test]
+    async fn a_vague_question_lane_one_answered_does_not_search() {
+        let mut app = Fixture::open("vague", &["Here is what I know."], &["DONE"]).await;
+        app.ask("what all do you know about my computer science degree")
+            .await;
+
+        assert!(
+            app.provider.requests(ModelRole::Utility).is_empty(),
+            "five recalled facts is material to read, not a reason to search"
+        );
+        // The model still gets the offer, so a good score cannot silence it (D-062).
+        let prompt = super::prompt_text(&app.provider.requests(ModelRole::Primary)[0]);
+        assert!(prompt.contains("SEARCH: <what to look for>"), "{prompt}");
+    }
+
+    /// And the floor still fires when there really is nothing.
+    #[tokio::test]
+    async fn a_question_with_no_recall_at_all_still_searches() {
+        let mut app = Fixture::open("empty", &["I could not find it."], &["DONE"]).await;
+        app.ask("what did I tell you about Meera earlier").await;
+
+        assert!(
+            !app.provider.requests(ModelRole::Utility).is_empty(),
+            "lane 1 has nothing, so the model would only ask for a search anyway"
+        );
+    }
+}

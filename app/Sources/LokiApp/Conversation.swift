@@ -375,8 +375,16 @@ final class Conversation {
             attachOutput(summary)
 
         case "memory_recalled":
-            let count = (fields["concept_ids"] as? [String])?.count ?? 0
-            appendStep(Step(verb: "recall", detail: "\(count) concepts"))
+            // `claim_ids`, and each one is an object rather than a string. Reading the wrong key
+            // made every turn say it recalled nothing, whatever it had actually found (B-46).
+            let count = (fields["claim_ids"] as? [Any])?.count ?? 0
+            // Lane 2 returns file lines rather than addressed claims, so it never has ids to
+            // count. Saying "0 facts" for a search that found plenty would be worse than silence.
+            if fields["lane"] as? String == "deliberate" {
+                appendStep(Step(verb: "search", detail: "memory"))
+            } else {
+                appendStep(Step(verb: "recall", detail: count == 1 ? "1 fact" : "\(count) facts"))
+            }
 
         case "budget_warning":
             refreshSpend()

@@ -273,14 +273,18 @@ impl<'a> Runtime<'a> {
 ///
 /// Keyword matching, deliberately. A model deciding whether to search is a step it will sometimes
 /// skip, and this is the cheap half of a test whose expensive half is already computed.
+///
+/// **Questions only.** `my ` was on this list and matched nearly every personal statement, so
+/// telling Loki something armed a search on the way to storing it (B-47). A marker earns its place
+/// by appearing in questions about what was said before, and in little else.
 #[must_use]
 pub fn asks_about_the_past(message: &str) -> bool {
-    const MARKERS: [&str; 14] = [
+    const MARKERS: [&str; 13] = [
         "remember",
         "did i",
         "did we",
         "what did",
-        "what do you know",
+        "do you know",
         "you said",
         "i said",
         "i told you",
@@ -289,7 +293,6 @@ pub fn asks_about_the_past(message: &str) -> bool {
         "before",
         "previously",
         "we discussed",
-        "my ",
     ];
     let lower = message.to_lowercase();
     MARKERS.iter().any(|marker| lower.contains(marker))
@@ -309,10 +312,57 @@ pub fn should_escalate(message: &str, best: Option<f32>) -> bool {
 }
 
 /// Words too common to say anything about what a question is about.
-const NOISE: [&str; 34] = [
-    "what", "when", "where", "which", "who", "whom", "whose", "why", "how", "did", "does", "do",
-    "the", "a", "an", "is", "are", "was", "were", "my", "me", "i", "you", "your", "we", "us",
-    "about", "tell", "know", "remember", "again", "said", "told", "that",
+///
+/// The quantifiers matter as much as the interrogatives. "What all do you know about me" reduces
+/// to `all`, which appears in nothing, so the question read as being about a subject the store had
+/// never heard of and escalated a search over five perfectly good recalled facts (B-47).
+const NOISE: [&str; 46] = [
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "how",
+    "did",
+    "does",
+    "do",
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "my",
+    "me",
+    "i",
+    "you",
+    "your",
+    "we",
+    "us",
+    "about",
+    "tell",
+    "know",
+    "remember",
+    "again",
+    "said",
+    "told",
+    "that",
+    "all",
+    "any",
+    "some",
+    "anything",
+    "everything",
+    "something",
+    "else",
+    "more",
+    "much",
+    "many",
+    "and",
+    "but",
 ];
 
 /// Whether lane 1 came back about something else entirely (D-062).
@@ -605,6 +655,16 @@ mod tests {
 
         // A poor score on a question that is not about memory is a question about something else.
         assert!(!should_escalate("write me a haiku about rain", Some(0.0)));
+
+        // A statement is not a question about the past. `my ` used to be a marker, so nearly every
+        // personal sentence armed a search: "my dad is a civil contractor" spent five navigator
+        // calls and nine seconds on a turn that was telling Loki something (B-47).
+        assert!(!asks_about_the_past(
+            "my dad is a civil contractor, he studied electronics"
+        ));
+        assert!(asks_about_the_past("did I tell you about my dad"));
+        // The user's own phrasing, which a narrower marker missed.
+        assert!(asks_about_the_past("what all do you know about my degree"));
     }
 
     #[test]
@@ -703,8 +763,11 @@ mod tests {
         ));
 
         // A question with nothing but common words says nothing about its subject, so overlap
-        // has no opinion and must not manufacture one.
+        // has no opinion and must not manufacture one. Quantifiers count as common words: a
+        // vague question is vague, not about something the store has never heard of.
         assert!(!missed_the_subject("what did you know", &wrong));
+        assert!(!missed_the_subject("what all do you know about me", &wrong));
+        assert!(!missed_the_subject("tell me everything", &wrong));
         assert!(!missed_the_subject("", &wrong));
     }
 
