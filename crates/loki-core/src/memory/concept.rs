@@ -665,6 +665,18 @@ okf_version: '0.2'
   confidence: high   source: stated
 ";
         let concept = parse(OLD).expect("a v0.8 file parses");
+        // Everything 2r added is absent from a file written before it, and every one of them has
+        // to read as the conservative default rather than as a claim about the entity.
+        assert_eq!(concept.front.role, Role::Other, "not the owner by accident");
+        assert_eq!(concept.front.label, Label::Named);
+        assert!(concept.front.relations.is_empty());
+        assert_eq!(concept.front.merged_into, None);
+        // And it renders back without inventing any of them.
+        let written = render(&concept);
+        assert!(!written.contains("role:"), "{written}");
+        assert!(!written.contains("label:"), "{written}");
+        assert!(!written.contains("merged_into:"), "{written}");
+
         let claim = concept.claims().next().expect("claim");
         assert_eq!(claim.attribute, "name", "`about` is the old spelling");
         assert_eq!(claim.origin, Origin::Stated, "`source` is the old spelling");

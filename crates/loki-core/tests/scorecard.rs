@@ -543,9 +543,9 @@ fn cases() -> Vec<Case> {
                 gap: Some(
                     "not an ontology gap and not fixable by indexing: who, am and I are all \
                      stopwords, so the question produces no query at all. The owner's card is in \
-                     the working set, so the prompt has the answer even where recall does not. A \
-                     question made entirely of function words is what the semantic fallback and \
-                     lane 2 are for (§10.5)",
+                     the working set, so the prompt has the answer even where recall does not, \
+                     which `identity::prefix` pins. A question made entirely of function words is \
+                     what the semantic fallback and lane 2 are for (§10.5)",
                 ),
                 ..NOTHING
             },

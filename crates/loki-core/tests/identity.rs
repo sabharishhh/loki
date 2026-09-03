@@ -1226,3 +1226,32 @@ mod blocking {
         assert_eq!(store.blocks_to("Apple"), ["people/apple.md"]);
     }
 }
+
+/// The half of "who am I" that does work. Recall cannot answer a question made entirely of
+/// function words, and nothing about identity changes that. The prompt still has the answer,
+/// because the owner's card is in the frozen prefix.
+mod prefix {
+    use super::names::{Fact, store_with};
+
+    #[tokio::test]
+    async fn the_owner_is_in_the_working_set_once_it_knows_a_name() {
+        let store = store_with(
+            "working-set",
+            vec![Fact {
+                trigger: "my name is Sabharish",
+                surface: "the user",
+                attribute: "name",
+                text: "The user's name is Sabharish",
+                aliases: &["Sabharish"],
+                relation: None,
+            }],
+        )
+        .await;
+
+        let prefix = store.memory.working_set().await.expect("working set");
+        assert!(
+            prefix.contains("Sabharish"),
+            "the prompt has to know whose store this is: {prefix:?}"
+        );
+    }
+}
