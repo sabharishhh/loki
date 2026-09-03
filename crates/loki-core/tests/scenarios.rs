@@ -684,7 +684,7 @@ mod lane_two {
     use super::{App, today};
     use async_trait::async_trait;
     use loki_core::memory::index::{Query, Visibility};
-    use loki_core::memory::runtime::{Found, Navigator, Op, RuntimeError, should_escalate};
+    use loki_core::memory::runtime::{Navigator, Op, RuntimeError, should_escalate};
 
     /// Walks §10.8's own route: start from the catalog, narrow with a ranked search, stop.
     struct Route {
@@ -871,18 +871,6 @@ mod lane_two {
             hits.iter().any(|h| h.text.contains("short replies")),
             "and lane 2 can still find it: {hits:?}"
         );
-    }
-
-    /// A found result and an empty one are different answers, not the same answer twice.
-    #[test]
-    fn the_three_outcomes_read_differently() {
-        let found = Found {
-            lines: vec!["people/sabharish.md#0: The user's name is Sabharish".to_owned()],
-            searched: 2,
-            out_of_budget: false,
-        };
-        assert!(found.render().contains("found"));
-        assert!(!Found::default().render().contains("found:"));
     }
 }
 

@@ -4,7 +4,7 @@
 //! Neither can skip a variant, because the compiler checks the match.
 
 use super::event::Event;
-use super::vocab::{ActionKind, BlockReason, CallPath, ScopeKind, Tier, WriteOp};
+use super::vocab::{ActionKind, BlockReason, CallPath, Lane, ScopeKind, Tier, WriteOp};
 
 /// One line of plain language, or nothing when an event is not worth showing.
 ///
@@ -19,10 +19,15 @@ pub fn plain(event: &Event) -> Option<String> {
         },
         Event::Searched { query, .. } => format!("Searching for {query}."),
         Event::Fetched { url, .. } => format!("Reading {url}."),
-        Event::MemoryRecalled { claim_ids, .. } => match claim_ids.len() {
-            0 => return None,
-            1 => "Recalling one thing I know.".into(),
-            n => format!("Recalling {n} things I know."),
+        // Lane 2 carries no claim ids: it returns file lines, not addressed claims. It still has
+        // to say something, because it is the one retrieval the user waits on.
+        Event::MemoryRecalled {
+            claim_ids, lane, ..
+        } => match (lane, claim_ids.len()) {
+            (Lane::Deliberate, _) => "Searching my memory.".into(),
+            (_, 0) => return None,
+            (_, 1) => "Recalling one thing I know.".into(),
+            (_, n) => format!("Recalling {n} things I know."),
         },
         Event::MemoryWritten { op, concept_id } => {
             let what = concept_id.as_str();

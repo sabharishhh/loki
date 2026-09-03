@@ -134,6 +134,13 @@ impl Prefix {
 pub struct Turn {
     recalled: Vec<ConceptId>,
     recall: String,
+    /// What lane 2 came back with, when it ran (§10.8). Separate from `recall` because it answers
+    /// the message rather than preceding it, and because it is set on a different trigger.
+    search: String,
+    /// The standing offer of a deeper search, on a turn where the model may ask for one (D-062).
+    /// Its own field rather than a suffix on `recall`, so it can be withdrawn for the retry
+    /// without rebuilding what recall found.
+    offer: String,
     /// §8.3's three lines, host-computed. Turn content, never the prefix: putting the current time
     /// in the system prompt is the obvious placement and it breaks the cache on every single turn.
     frame: String,
@@ -146,6 +153,8 @@ impl Turn {
         Self {
             recalled: Vec::new(),
             recall: String::new(),
+            search: String::new(),
+            offer: String::new(),
             frame: String::new(),
             history: Vec::new(),
         }
@@ -186,6 +195,28 @@ impl Turn {
     #[must_use]
     pub fn recall(&self) -> &str {
         &self.recall
+    }
+
+    /// Offers the model a deeper search. Withdrawn before the retry, because a model that can ask
+    /// again never has to answer.
+    pub fn set_offer(&mut self, text: impl Into<String>) {
+        self.offer = text.into();
+    }
+
+    #[must_use]
+    pub fn offer(&self) -> &str {
+        &self.offer
+    }
+
+    /// What lane 2 found, or why it found nothing (§10.8). Cleared at the start of every turn,
+    /// like recall, because a search answers one message and not the conversation.
+    pub fn set_search(&mut self, text: impl Into<String>) {
+        self.search = text.into();
+    }
+
+    #[must_use]
+    pub fn search(&self) -> &str {
+        &self.search
     }
 
     #[must_use]
@@ -234,7 +265,17 @@ pub fn build(prefix: &Prefix, turn: &Turn, role: ModelRole, max_tokens: u32) -> 
             turn.recall()
         )));
     }
+    // After recall, because it is about recall, and before the message, because the model has to
+    // read both before deciding whether one answers the other.
+    if !turn.offer().is_empty() {
+        messages.push(Message::user(turn.offer().to_owned()));
+    }
     messages.extend_from_slice(turn.history());
+    // After the message, because it answers it. Before the message it would read as something
+    // known in advance, which is the one thing a deliberate search is not.
+    if !turn.search().is_empty() {
+        messages.push(Message::user(turn.search().to_owned()));
+    }
     Request {
         role,
         system: prefix.blocks(),

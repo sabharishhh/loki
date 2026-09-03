@@ -21,6 +21,7 @@ use super::sink::EventSink;
 use super::temporal;
 use super::vocab::{BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory};
+use crate::memory::runtime;
 use crate::ports::clock::Clock;
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
 
@@ -58,6 +59,42 @@ pub enum LoopError {
 
 /// How many recent messages stay verbatim in the prompt before recall may reach for them.
 const DEFAULT_WINDOW_KEEPS: u32 = 20;
+
+/// What the model writes to ask for a deeper search of memory (§10.8, D-062).
+const SEARCH_MARKER: &str = "SEARCH:";
+
+/// The line added to the recall block on a turn where the model may ask.
+///
+/// Deliberately not "search if you are unsure". A model told to judge its own confidence will
+/// answer from a wrong recall as readily as from a right one, because it cannot tell them apart
+/// either. Told to check whether the lines in front of it are *about the thing asked*, it can.
+const ASK_TO_SEARCH: &str = "\
+If the above does not answer what was asked, or is about someone or something else, reply with \
+exactly one line and nothing else:
+
+SEARCH: <what to look for>
+
+You will be given the results and asked again. Do not explain, do not apologise, and do not answer \
+partially first. If the above does answer it, ignore this and reply normally.";
+
+/// Reads a search request out of a reply, or `None` if it is an ordinary answer.
+///
+/// The marker has to open the reply. A model that answers and then mentions searching has already
+/// answered, and re-asking would throw away a reply the user is entitled to.
+fn search_request(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    let opening: String = text.chars().take(SEARCH_MARKER.len()).collect();
+    if !opening.eq_ignore_ascii_case(SEARCH_MARKER) {
+        return None;
+    }
+    let want = text[opening.len()..]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    (!want.is_empty()).then_some(want)
+}
 
 /// Everything one conversation needs.
 pub struct Loop {
@@ -280,10 +317,18 @@ impl Loop {
         let today = now.date();
         self.turn
             .set_frame(temporal::Frame::new(now, self.session_started, self.last_spoke).render());
+        // Derived, and it answers one message. Left standing it would answer the next one too.
+        self.turn.set_search("");
+
+        // Whether the model may ask for a deeper search on this turn. Set below, once lane 1 has
+        // run and the floor has had its chance.
+        let mut armed = false;
 
         if let Some(memory) = self.memory.clone() {
             memory.record("user", &message).await?;
             let recalled = memory.recall(&message, self.window_keeps, today)?;
+            let best = recalled.first().map(|hit| hit.score.value());
+            let texts: Vec<String> = recalled.iter().map(|hit| hit.text.clone()).collect();
             if recalled.is_empty() {
                 self.turn.set_recall("");
             } else {
@@ -307,9 +352,26 @@ impl Loop {
                 memory.note_recalled(&recalled).await?;
                 self.turn.set_recall(handle::render(&recalled, today));
             }
+
+            // The floor, and the subject check beside it. Both deterministic, both free, and both
+            // before the model call so the answer is written with the search already in hand.
+            let floor = runtime::should_escalate(&message, best)
+                || (runtime::asks_about_the_past(&message)
+                    && runtime::missed_the_subject(&message, &texts));
+            if floor {
+                self.escalate(task, &memory, &message, today, cancel.clone())
+                    .await;
+            } else {
+                // Armed on the question alone. Tying this to the score as well would hand the
+                // decision back to the number that cannot tell a confident hit from a right one,
+                // which is the whole reason the model gets a voice (D-062).
+                armed = runtime::asks_about_the_past(&message);
+            }
         }
 
-        self.turn.push(Message::user(message));
+        self.turn.set_offer(if armed { ASK_TO_SEARCH } else { "" });
+
+        self.turn.push(Message::user(message.clone()));
 
         match self.budget.check() {
             Verdict::Proceed => {}
@@ -331,44 +393,18 @@ impl Loop {
             }
         }
 
-        let request = super::prompt::build(
-            &self.prefix,
-            &self.turn,
-            ModelRole::Primary,
-            self.max_tokens,
-        );
+        let mut outcome = self.call(task, cancel.clone(), armed).await?;
 
-        let scope = self.ids.scope();
-        self.events.emit(&Event::ScopeOpened {
-            id: scope,
-            parent: None,
-            kind: ScopeKind::Model,
-        });
-        self.checkpoint.open_scope(scope);
-
-        let started = std::time::Instant::now();
-        let stream = self.provider.complete(request, cancel.clone()).await;
-        let outcome = match stream {
-            Ok(stream) => self.drain(stream, cancel).await,
-            Err(e) => {
-                self.close_scope(scope, started);
-                // Say why. A bare "failed" leaves the user with nothing to act on.
-                self.events.emit(&Event::Blocked {
-                    reason: BlockReason::ProviderFailed {
-                        provider: self.provider.id().to_owned(),
-                        detail: explain(&e),
-                    },
-                });
-                self.events.emit(&Event::TaskFinished {
-                    id: task,
-                    status: TaskStatus::Failed,
-                });
-                return Err(e.into());
-            }
-        };
-
-        self.close_scope(scope, started);
-        self.record_spend(task, &outcome.usage);
+        // The model read its recall and said it was not enough. One retry, ever: the second call
+        // is never armed, so a model that keeps asking gets one search and then has to answer.
+        if let Some(want) = armed.then(|| search_request(&outcome.text)).flatten()
+            && let Some(memory) = self.memory.clone()
+        {
+            self.escalate(task, &memory, &want, today, cancel.clone())
+                .await;
+            self.turn.set_offer("");
+            outcome = self.call(task, cancel.clone(), false).await?;
+        }
 
         if !outcome.text.is_empty() {
             self.turn.push(Message::assistant(&outcome.text));
@@ -390,20 +426,128 @@ impl Loop {
         Ok(outcome)
     }
 
+    /// One model call: the scope, the stream, the spend.
+    ///
+    /// `armed` holds the opening characters back until they are known not to be a search request,
+    /// so a request the user was never meant to see is never streamed.
+    async fn call(
+        &mut self,
+        task: TaskId,
+        cancel: CancellationToken,
+        armed: bool,
+    ) -> Result<Outcome, LoopError> {
+        let request = super::prompt::build(
+            &self.prefix,
+            &self.turn,
+            ModelRole::Primary,
+            self.max_tokens,
+        );
+
+        let scope = self.ids.scope();
+        self.events.emit(&Event::ScopeOpened {
+            id: scope,
+            parent: None,
+            kind: ScopeKind::Model,
+        });
+        self.checkpoint.open_scope(scope);
+
+        let started = std::time::Instant::now();
+        let stream = self.provider.complete(request, cancel.clone()).await;
+        let outcome = match stream {
+            Ok(stream) => self.drain(stream, cancel, armed).await,
+            Err(e) => {
+                self.close_scope(scope, started);
+                // Say why. A bare "failed" leaves the user with nothing to act on.
+                self.events.emit(&Event::Blocked {
+                    reason: BlockReason::ProviderFailed {
+                        provider: self.provider.id().to_owned(),
+                        detail: explain(&e),
+                    },
+                });
+                self.events.emit(&Event::TaskFinished {
+                    id: task,
+                    status: TaskStatus::Failed,
+                });
+                return Err(e.into());
+            }
+        };
+
+        self.close_scope(scope, started);
+        self.record_spend(task, &outcome.usage, ModelRole::Primary);
+        Ok(outcome)
+    }
+
+    /// Runs lane 2 and puts what it found into the turn (§10.8).
+    ///
+    /// Never fails the turn. A search that cannot run leaves the answer where it would have been
+    /// without one, and losing the answer as well would make the failure twice as expensive.
+    async fn escalate(
+        &mut self,
+        task: TaskId,
+        memory: &Arc<Memory>,
+        question: &str,
+        today: Date,
+        cancel: CancellationToken,
+    ) {
+        let provider = Arc::clone(&self.provider);
+        let navigator = runtime::ModelNavigator::new(provider.as_ref(), cancel);
+        let found = memory.search_deeply(question, &navigator, today).await;
+        // Charged whether or not the search worked. Tokens spent on a failed search are still
+        // spent, and a ledger that only counts successes is not a ledger.
+        self.record_spend(task, &navigator.usage(), ModelRole::Utility);
+
+        match found {
+            Ok(found) => {
+                self.events.emit(&Event::MemoryRecalled {
+                    claim_ids: Vec::new(),
+                    lane: Lane::Deliberate,
+                    query_hash: QueryHash::new(crate::memory::index::query_hash(question)),
+                });
+                self.turn.set_search(found.brief());
+            }
+            Err(why) => self.events.emit(&Event::Blocked {
+                reason: BlockReason::ProviderFailed {
+                    provider: self.provider.id().to_owned(),
+                    detail: why.to_string(),
+                },
+            }),
+        }
+    }
+
     async fn drain(
         &self,
         mut stream: crate::ports::model::ChunkStream,
         cancel: CancellationToken,
+        armed: bool,
     ) -> Outcome {
         let mut text = String::new();
         let mut usage = Usage::default();
         let mut status = TaskStatus::Completed;
+        let mut held = String::new();
+        let mut deciding = armed;
+        let mut suppress = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(Chunk::Text(piece)) => {
-                    self.tokens.token(&piece);
                     text.push_str(&piece);
+                    if suppress {
+                    } else if deciding {
+                        held.push_str(&piece);
+                        let probe = held.trim_start();
+                        if probe.chars().count() >= SEARCH_MARKER.len() {
+                            deciding = false;
+                            let opening: String = probe.chars().take(SEARCH_MARKER.len()).collect();
+                            if opening.eq_ignore_ascii_case(SEARCH_MARKER) {
+                                suppress = true;
+                            } else {
+                                self.tokens.token(&held);
+                            }
+                            held.clear();
+                        }
+                    } else {
+                        self.tokens.token(&piece);
+                    }
                 }
                 Ok(Chunk::Thinking(_)) => {}
                 Ok(Chunk::Usage(reported)) => merge(&mut usage, reported),
@@ -435,6 +579,11 @@ impl Loop {
             }
         }
 
+        // A reply shorter than the marker never got its verdict. It is not a search request.
+        if deciding && !held.is_empty() {
+            self.tokens.token(&held);
+        }
+
         Outcome {
             text,
             status,
@@ -450,7 +599,10 @@ impl Loop {
         });
     }
 
-    fn record_spend(&mut self, task: TaskId, usage: &Usage) {
+    fn record_spend(&mut self, task: TaskId, usage: &Usage, role: ModelRole) {
+        if *usage == Usage::default() {
+            return;
+        }
         let caps = self.provider.caps();
         self.budget.record_micros(
             caps.cost
@@ -460,7 +612,7 @@ impl Loop {
         self.events.emit(&Event::ModelCall {
             task,
             provider: self.provider.id().to_owned(),
-            role: ModelRole::Primary,
+            role,
             locality: caps.locality,
             tokens_in: usage.input_tokens,
             tokens_out: usage.output_tokens,
@@ -844,5 +996,32 @@ mod tests {
         assert_eq!(summarize("short one"), "short one");
         assert_eq!(summarize("first\nsecond"), "first");
         assert!(summarize(&"x".repeat(200)).ends_with("..."));
+    }
+
+    /// The marker opens the reply or it is not a request. Two rules meet here: a model that
+    /// answers and then talks about searching has already answered, and taking that away to run a
+    /// search would cost the user a reply they were owed.
+    #[test]
+    fn a_search_request_has_to_be_the_whole_opening() {
+        assert_eq!(
+            search_request("SEARCH: my degree"),
+            Some("my degree".to_owned())
+        );
+        assert_eq!(
+            search_request("  search: what Meera said\nand then some"),
+            Some("what Meera said".to_owned())
+        );
+
+        // Answered first. Not a request.
+        assert_eq!(
+            search_request("You studied computer science. I could SEARCH: for more."),
+            None
+        );
+        // The marker with nothing after it asks for nothing.
+        assert_eq!(search_request("SEARCH:"), None);
+        assert_eq!(search_request("SEARCH:   "), None);
+        assert_eq!(search_request(""), None);
+        // A word that merely starts the same way.
+        assert_eq!(search_request("Searching my memory now."), None);
     }
 }
