@@ -885,3 +885,99 @@ mod lane_two {
         assert!(!Found::default().render().contains("found:"));
     }
 }
+
+/// The session transcript, end to end: a real prompt through a real provider decorator, and the
+/// file readable afterwards. §20.1's audit trail, as a thing a person opens.
+#[tokio::test]
+async fn the_journal_records_a_whole_turn() {
+    use async_trait::async_trait;
+    use loki_core::adapters::journal::{Journal, Journalled};
+    use loki_core::core::sink::EventSink;
+    use loki_core::core::vocab::{CostModel, ModelRole};
+    use loki_core::ports::model::{
+        Caps, Chunk, ChunkStream, Message, ModelError, ModelProvider, Request, SystemBlock,
+        ToolSupport,
+    };
+    use std::sync::Arc;
+
+    struct Says(&'static str);
+
+    #[async_trait]
+    impl ModelProvider for Says {
+        fn id(&self) -> &str {
+            "says"
+        }
+        fn caps(&self) -> Caps {
+            Caps {
+                locality: Locality::Cloud,
+                prompt_cache: false,
+                max_context: 1_000,
+                tools: ToolSupport::None,
+                cost: CostModel::Free,
+            }
+        }
+        async fn complete(
+            &self,
+            _req: Request,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ChunkStream, ModelError> {
+            let text = self.0.to_owned();
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(Chunk::Text(
+                text,
+            ))])))
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "loki-journal-turn-{}-{:?}.log",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let journal = Arc::new(Journal::open(&path, "test"));
+    let provider: Arc<dyn ModelProvider> = Arc::new(Says("Hello Sabharish."));
+    let wrapped = Journalled::new(provider, Arc::clone(&journal));
+
+    let request = Request {
+        role: ModelRole::Primary,
+        system: vec![SystemBlock::new(
+            "You are Loki.\n## Sabharish\n- name is Sabharish",
+        )],
+        messages: vec![Message::user("what is my name")],
+        max_tokens: 100,
+    };
+    let mut stream = wrapped
+        .complete(request, tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("complete");
+    while futures_util::StreamExt::next(&mut stream).await.is_some() {}
+
+    journal.emit(&loki_core::core::event::Event::ModelCall {
+        task: loki_core::core::ids::TaskId::new(0),
+        provider: "says".to_owned(),
+        role: ModelRole::Primary,
+        locality: Locality::Cloud,
+        tokens_in: 1_200,
+        tokens_out: 40,
+        cost: CostModel::Free,
+    });
+    journal.totals();
+
+    let log = std::fs::read_to_string(&path).expect("the log exists");
+
+    // The whole prompt, including what memory contributed, because a transcript that summarises
+    // the prompt cannot answer why it said that.
+    assert!(log.contains("- name is Sabharish"), "{log}");
+    assert!(log.contains("what is my name"), "{log}");
+    assert!(log.contains("Hello Sabharish."), "{log}");
+    // And what it cost, per session.
+    assert!(
+        log.contains("1 calls, 1200 in, 40 out, 1200 in context"),
+        "{log}"
+    );
+    // Timestamped throughout, so two runs can be told apart by eye.
+    assert!(log.contains("session "), "{log}");
+
+    let _ = std::fs::remove_file(&path);
+}

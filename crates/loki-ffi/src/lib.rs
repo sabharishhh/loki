@@ -105,6 +105,8 @@ pub struct LokiCore {
     recalled: std::sync::Mutex<Vec<Recalled>>,
     /// The same clock the loop reads, so a screen and a turn never disagree about today.
     clock: Arc<dyn loki_core::ports::clock::Clock>,
+    /// The session transcript, and the session's token counters behind it.
+    journal: Arc<loki_core::adapters::journal::Journal>,
 }
 
 const SYSTEM: &str = "You are Loki, a personal assistant that runs on the user's Mac. \
@@ -196,6 +198,19 @@ pub unsafe extern "C" fn loki_core_new(
         events = events.with(Arc::clone(ledger) as Arc<dyn EventSink>);
     }
 
+    // Every prompt, reply and memory event, appended to one file per install. Opened before the
+    // loop so the banner lands before anything else, and silent if it cannot write: a diagnostic
+    // that stops the app it is diagnosing is worse than no diagnostic.
+    let journal = Arc::new(loki_core::paths::journal().map_or_else(
+        |_| loki_core::adapters::journal::Journal::silent(),
+        |path| loki_core::adapters::journal::Journal::open(&path, loki_core::VERSION),
+    ));
+    events = events.with(Arc::clone(&journal) as Arc<dyn EventSink>);
+    let provider: Arc<dyn ModelProvider> = Arc::new(loki_core::adapters::journal::Journalled::new(
+        provider,
+        Arc::clone(&journal),
+    ));
+
     let clock: Arc<dyn loki_core::ports::clock::Clock> = Arc::new(SystemClock);
     let core = Loop::new(
         Arc::clone(&provider),
@@ -236,6 +251,7 @@ pub unsafe extern "C" fn loki_core_new(
         memory,
         recalled: std::sync::Mutex::new(Vec::new()),
         clock,
+        journal,
     }))
 }
 
@@ -673,6 +689,36 @@ pub unsafe extern "C" fn loki_knowledge(core: *mut LokiCore) -> *mut c_char {
     )
 }
 
+/// What this session has spent in tokens, as JSON (§21.3).
+///
+/// Per session, not per day: the ledger already answers the day and the month, and the number that
+/// matters for consolidation health is how big the prompt has grown while you have been talking.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_session_tokens(core: *mut LokiCore) -> *mut c_char {
+    const EMPTY: &str = r#"{"input":0,"output":0,"context":0,"calls":0}"#;
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string(EMPTY);
+    };
+    json_string(&serde_json::to_string(&core.journal.tokens()).unwrap_or_else(|_| EMPTY.to_owned()))
+}
+
+/// Where the session transcript is written, so the interface can point at it.
+///
+/// # Safety
+/// Free the result with [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn loki_journal_path() -> *mut c_char {
+    let path = loki_core::paths::journal()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    CString::new(path).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
 /// Past sessions, newest first, as JSON, for the sidebar (§9.1 of the design system).
 ///
 /// # Safety
@@ -713,6 +759,9 @@ pub unsafe extern "C" fn loki_end_session(core: *mut LokiCore) -> *mut c_char {
     };
     let memory = Arc::clone(memory);
     let loop_handle = Arc::clone(&core.core);
+    // The session's totals go in before the consolidation lines, so the transcript ends with a
+    // summary of what the session cost rather than with the last thing it learned.
+    core.journal.totals();
     let lines = core.runtime.block_on(async move {
         let guard = loop_handle.lock().await;
         let provider = guard.provider();

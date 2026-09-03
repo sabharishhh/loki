@@ -70,6 +70,17 @@ pub fn ledger() -> Result<PathBuf, Error> {
     Ok(root()?.join("ledger.sqlite"))
 }
 
+/// The session journal: every prompt, reply and memory event, in the order they happened.
+///
+/// Outside `memory/` on purpose. It is a diagnostic, not part of the OKF bundle, and a transcript
+/// inside the bundle would be committed to the memory repo and read as a concept.
+///
+/// # Errors
+/// Fails if the root cannot be found.
+pub fn journal() -> Result<PathBuf, Error> {
+    Ok(root()?.join("loki.log"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

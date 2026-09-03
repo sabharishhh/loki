@@ -77,6 +77,8 @@ final class Conversation {
     private(set) var composer: ComposerState = .idle
     /// Spend today, in millionths of a cent. Refreshed when a turn ends.
     private(set) var spentToday: UInt64 = 0
+    /// What this session has spent in tokens (§21.3). Read off the same events as the cost.
+    private(set) var tokens = SessionTokens.zero
     private(set) var lastError: String?
     /// What memory put in play for the last turn, for the rail.
     private(set) var recalled: [RecalledClaim] = []
@@ -411,6 +413,7 @@ final class Conversation {
 
     private func refreshSpend() {
         spentToday = core?.spentToday ?? 0
+        if let tokens = core?.sessionTokens() { self.tokens = tokens }
     }
 
     /// Reads what pre-fetch used on the turn that just finished.

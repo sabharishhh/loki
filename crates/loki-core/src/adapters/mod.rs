@@ -8,6 +8,7 @@
 
 pub mod anthropic;
 pub mod clock;
+pub mod journal;
 pub mod openai;
 pub mod pricing;
 pub mod sse;

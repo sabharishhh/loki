@@ -110,6 +110,12 @@ LokiStatus loki_forget_claim(LokiCore *core, const char *concept, uint32_t ordin
 /* Past sessions, newest first, as a JSON array of day strings. */
 char *loki_sessions(LokiCore *core, uint32_t limit);
 
+/* This session's token spend as JSON: input, output, context, calls. */
+char *loki_session_tokens(LokiCore *core);
+
+/* Where the session transcript is written. */
+char *loki_journal_path(void);
+
 /* Consolidates the session and returns up to three summary lines as a JSON array. */
 char *loki_end_session(LokiCore *core);
 

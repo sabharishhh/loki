@@ -118,14 +118,7 @@ private struct TopBar: View {
 
             Spacer()
 
-            Text(Money.short(conversation.spentToday) + " today")
-                .font(Theme.Text.meta)
-                .kerning(Theme.Text.metaTracking)
-                .monospacedDigit()
-                .foregroundStyle(Theme.Colors.faint)
-                .help("Spend today. core \(Core.version)")
-                // Without this the whole bar shifts a pixel as digits change width.
-                .contentTransition(.numericText())
+            Meters(conversation: conversation)
 
             if roomy {
                 Toggle(isOn: $rail) {
@@ -146,6 +139,60 @@ private struct TopBar: View {
 }
 
 /// A bar control. Square, quiet, and it holds its tint while on.
+/// Cost and token spend, as one horizontal row of small readings.
+///
+/// A row rather than a single number because they answer different questions and a person scans
+/// them together: what today cost, what this session sent and received, and how big the prompt has
+/// grown. That last one is §21.3's measure. If it climbs across sessions, consolidation is letting
+/// noise in, and every other symptom of that shows up months later as Loki getting vaguer.
+///
+/// Deliberately quiet. §5's rule is that colour means machine state, so these carry none: they are
+/// a reading, not a warning, and the moment they compete with the conversation they are wrong.
+private struct Meters: View {
+    let conversation: Conversation
+
+    var body: some View {
+        HStack(spacing: Theme.Space.m) {
+            reading(Money.short(conversation.spentToday), "today")
+            Divider().frame(height: 10).overlay(Theme.Colors.line)
+            reading(count(conversation.tokens.input), "in")
+            reading(count(conversation.tokens.output), "out")
+            reading(count(conversation.tokens.context), "ctx")
+        }
+        .help(
+            """
+            Spend today, and this session: \(conversation.tokens.calls) calls,             \(conversation.tokens.input) tokens in, \(conversation.tokens.output) out,             \(conversation.tokens.context) in the current prompt.
+            core \(Core.version)
+            """
+        )
+    }
+
+    private func reading(_ value: String, _ label: String) -> some View {
+        HStack(spacing: 3) {
+            Text(value)
+                .font(Theme.Text.meta)
+                .kerning(Theme.Text.metaTracking)
+                .monospacedDigit()
+                .foregroundStyle(Theme.Colors.muted)
+                // Without this the whole bar shifts a pixel as digits change width.
+                .contentTransition(.numericText())
+            Text(label)
+                .font(Theme.Text.micro)
+                .kerning(Theme.Text.microTracking)
+                .foregroundStyle(Theme.Colors.faint)
+        }
+    }
+
+    /// Thousands as `12.4k`. A six-digit token count in a title bar is noise, not information.
+    private func count(_ n: UInt64) -> String {
+        if n < 1_000 { return String(n) }
+        let thousands = Double(n) / 1_000
+        return thousands < 100
+            ? String(format: "%.1fk", thousands)
+            : String(format: "%.0fk", thousands)
+    }
+}
+
 private struct BarToggle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button {

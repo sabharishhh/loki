@@ -165,6 +165,18 @@ public final class Core: Sendable {
         decode(loki_sessions(handle, UInt32(limit))) ?? []
     }
 
+    /// What this session has spent in tokens.
+    public func sessionTokens() -> SessionTokens {
+        decode(loki_session_tokens(handle)) ?? .zero
+    }
+
+    /// Where the session transcript is written, for the interface to point at.
+    public static var journalPath: String {
+        guard let pointer = loki_journal_path() else { return "" }
+        defer { loki_string_free(pointer) }
+        return String(cString: pointer)
+    }
+
     /// What Loki knows, grouped by the thing it is about.
     ///
     /// The trust surface reads this rather than the timeline sentences: a log answers what
@@ -212,6 +224,28 @@ public final class Core: Sendable {
         defer { loki_string_free(pointer) }
         guard let data = String(cString: pointer).data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+/// What one session has spent in tokens (§21.3).
+///
+/// `context` is the last call's input rather than a sum: it says how big the prompt has grown,
+/// which is the number worth watching. If it climbs across sessions, consolidation is letting
+/// noise in.
+public struct SessionTokens: Decodable, Sendable, Equatable {
+    public let input: UInt64
+    public let output: UInt64
+    public let context: UInt64
+    public let calls: UInt64
+
+    /// Before the first call, and whenever the core is not there to ask.
+    public static let zero = Self(input: 0, output: 0, context: 0, calls: 0)
+
+    public init(input: UInt64, output: UInt64, context: UInt64, calls: UInt64) {
+        self.input = input
+        self.output = output
+        self.context = context
+        self.calls = calls
     }
 }
 

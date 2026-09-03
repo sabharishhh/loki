@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use loki_core::adapters::clock::SystemClock;
+use loki_core::adapters::journal::{Journal, Journalled};
 use loki_core::adapters::{anthropic::Anthropic, openai::Openai};
 use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, TokenSink};
@@ -136,6 +137,15 @@ async fn main() {
         events = events.with(ledger);
     }
 
+    // The same transcript the app writes, so a session driven from here is readable the same way.
+    let journal = Arc::new(loki_core::paths::journal().map_or_else(
+        |_| Journal::silent(),
+        |path| Journal::open(&path, loki_core::VERSION),
+    ));
+    events = events.with(Arc::clone(&journal) as Arc<dyn EventSink>);
+    let provider: Arc<dyn ModelProvider> =
+        Arc::new(Journalled::new(provider, Arc::clone(&journal)));
+
     let mut core = Loop::new(
         Arc::clone(&provider),
         Arc::new(events),
@@ -183,4 +193,7 @@ async fn main() {
             Err(e) => eprintln!("\n  {e}"),
         }
     }
+
+    // Closing the transcript with what the session cost, the same as the app does.
+    journal.totals();
 }
