@@ -254,8 +254,14 @@ async fn recall_lands_in_the_turn_and_never_in_the_prefix() {
     let mut session = a_loop(provider.clone());
     session.attach_memory(memory).await.expect("memory");
 
+    // A phrase no other part of a prompt can produce. The first version of this test asserted on
+    // the word "Thursday", which the prefix's own session-start line contains once a week, so it
+    // passed six days out of seven and failed on the seventh.
     session
-        .turn_with("the deploy window is Thursday", CancellationToken::new())
+        .turn_with(
+            "the deploy window is on marmalade day",
+            CancellationToken::new(),
+        )
         .await
         .expect("first");
     // Far enough back that it has left the window.
@@ -266,14 +272,17 @@ async fn recall_lands_in_the_turn_and_never_in_the_prefix() {
             .expect("filler");
     }
     session
-        .turn_with("when is the deploy window?", CancellationToken::new())
+        .turn_with(
+            "when is the marmalade deploy window?",
+            CancellationToken::new(),
+        )
         .await
         .expect("ask");
 
     let request = provider.last();
     let prefix: String = request.system.iter().map(|b| b.text.clone()).collect();
     assert!(
-        !prefix.contains("Thursday"),
+        !prefix.contains("marmalade"),
         "recall reached the frozen prefix, which misses the cache every turn: {prefix}"
     );
 
@@ -284,7 +293,7 @@ async fn recall_lands_in_the_turn_and_never_in_the_prefix() {
         .map(|m| m.content.clone())
         .unwrap_or_default();
     assert!(
-        recalled.contains("Thursday"),
+        recalled.contains("marmalade"),
         "the session's own earlier turn was not recalled: {recalled}"
     );
     let _ = std::fs::remove_dir_all(&dir);

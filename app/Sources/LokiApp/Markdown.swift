@@ -17,16 +17,28 @@ struct MarkdownText: View {
 private struct Blocks: View {
     let blocks: [Markdown.Block]
 
+    /// Position and kind together. A block that changes kind at the same position is a different
+    /// view, which is what stops SwiftUI reusing one across the change.
+    private var placed: [Placed] {
+        blocks.enumerated().map { Placed(id: "\($0.offset).\($0.element.kind)", block: $0.element) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
-            // Positional identity is correct here and is not the usual mistake: the stream is
-            // append-only, so a block's position is stable for its whole life and only the last
-            // one is still growing.
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+            // Position plus kind, not position alone. The stream is append-only so a block's
+            // position is stable, but the *last* block changes kind as it grows: a paragraph
+            // becomes a list the moment "- " arrives. Identity by position alone reuses the view
+            // across that change and it can keep stale layout.
+            ForEach(placed) { placed in
+                BlockView(block: placed.block)
             }
         }
     }
+}
+
+private struct Placed: Identifiable {
+    let id: String
+    let block: Markdown.Block
 }
 
 private struct BlockView: View {
@@ -200,6 +212,20 @@ enum Markdown {
         case quote([Block])
         case table(header: [String], rows: [[String]], alignments: [Alignment])
         case rule
+
+        /// Which shape this is, for view identity. Not the content: only a change of kind should
+        /// break identity, or every token would rebuild the block it is growing.
+        var kind: String {
+            switch self {
+            case .heading: "heading"
+            case .paragraph: "paragraph"
+            case .code: "code"
+            case .list: "list"
+            case .quote: "quote"
+            case .table: "table"
+            case .rule: "rule"
+            }
+        }
     }
 
     static func parse(_ text: String) -> [Block] {

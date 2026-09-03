@@ -94,6 +94,9 @@ final class Conversation {
 
     private let core: Core?
     private var streaming: Turn.ID?
+    /// Evens out the provider's bursts. See `Streaming.swift` for why the view does not read the
+    /// token stream directly. Built in `observe`, alongside the stream it smooths.
+    @ObservationIgnored private var streamer: Streamer?
 
     /// Reads the provider and key from the environment until `SecretStore` lands in Phase 4.
     ///
@@ -230,9 +233,11 @@ final class Conversation {
                 self?.apply(event)
             }
         }
-        Task { [weak self] in
+        let streamer = Streamer { [weak self] text in self?.show(text) }
+        self.streamer = streamer
+        Task {
             for await token in core.tokens {
-                self?.append(token)
+                streamer.accept(token)
             }
         }
     }
@@ -278,13 +283,14 @@ final class Conversation {
         entries.compactMap { if case .turn(let turn) = $0 { turn } else { nil } }
     }
 
-    private func append(_ token: String) {
+    /// Puts a smoothed batch of characters on screen. Only the streamer calls this.
+    private func show(_ text: String) {
         if let id = streaming, let index = indexOfTurn(id) {
             guard case .turn(var turn) = entries[index] else { return }
-            turn.text += token
+            turn.text += text
             entries[index] = .turn(turn)
         } else {
-            let turn = Turn(speaker: .assistant, text: token)
+            let turn = Turn(speaker: .assistant, text: text)
             streaming = turn.id
             entries.append(.turn(turn))
         }
@@ -318,6 +324,7 @@ final class Conversation {
 
         switch event.kind {
         case "task_started":
+            streamer?.reset()
             streaming = nil
 
         case "scope_opened":
@@ -373,13 +380,18 @@ final class Conversation {
 
         case "interrupted":
             composer = .idle
-            streaming = nil
+            // Everything already received goes up before the mark. §18.3 puts the cut where the
+            // text stopped, and a mark above text still arriving points at the wrong place.
+            streamer?.flush()
             markOpenScopesInterrupted()
             markCut()
 
         case "task_finished":
             composer = .idle
-            streaming = nil
+            // Keeps flowing until the backlog is empty rather than cutting to the end, so an
+            // answer does not finish with a jump. `streaming` is cleared by the next
+            // `task_started`, or the tail would start a turn of its own.
+            streamer?.finish()
             // Event-driven, not polled. Principle 8 forbids a timer for this.
             refreshSpend()
             refreshRecalled()
