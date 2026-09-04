@@ -12,6 +12,7 @@ use loki_core::adapters::clock::SystemClock;
 use loki_core::core::budget::Budget as Spend;
 use loki_core::core::cycle::{Loop, NullTokens};
 use loki_core::core::prompt::Prefix;
+use loki_core::core::sink::Broadcast;
 use loki_core::core::sink::EventSink;
 use loki_core::core::vocab::{Cents, CostModel, Locality};
 use loki_core::memory::consolidate::{Budget, Candidate, ConsolidateError, Extractor, Unbounded};
@@ -158,6 +159,7 @@ async fn memory_at(dir: &std::path::Path, session: &str) -> Arc<Memory> {
             session,
             date(2026, 9, 1),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("memory"),

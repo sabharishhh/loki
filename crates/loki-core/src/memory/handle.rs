@@ -4,7 +4,7 @@
 //! single thing rather than to four. Everything here is Ring 0: §6.2 lists the gate and the store
 //! among the locked internals, so this is not a port and there is no adapter behind it.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use jiff::civil::Date;
 
@@ -20,7 +20,24 @@ use super::resolve::Matcher;
 use super::runtime;
 use super::timeline;
 use super::working_set::{self, WorkingSetError};
+use crate::core::event::Event;
+use crate::core::ids::ConceptId;
+use crate::core::sink::EventSink;
 use crate::core::temporal;
+
+/// Emits one [`Event::MemoryUnreadable`] per file a sync could not parse.
+///
+/// Takes the sink rather than `&self` because `Memory::open` needs it before `Self` exists, and
+/// the case it covers there, a card already broken at session start, is the one worth reporting
+/// most.
+fn report_unreadable(events: &dyn EventSink, stats: super::index::Stats) {
+    for (path, detail) in stats.unreadable {
+        events.emit(&Event::MemoryUnreadable {
+            concept_id: ConceptId::new(path),
+            detail,
+        });
+    }
+}
 
 /// Marks a line in the buffer as something Loki said back, not something the user said (§9.8).
 ///
@@ -105,6 +122,13 @@ fn section_of(concept: &RawConcept, ordinal: u32) -> Option<String> {
 pub struct Memory {
     bundle: Bundle,
     index: Index,
+    /// Where this store's acts go. **Required, not optional.**
+    ///
+    /// It was optional in the first build of the unreadable-card report, and the report was
+    /// therefore never wired up: principle 7 says nothing acts outside the event stream, and a
+    /// sink you can forget to pass is a rule you can forget to keep. Same argument as `Clock`
+    /// being a port and `Locality` a type. Pass an empty [`Broadcast`] where nothing is listening.
+    events: Arc<dyn EventSink>,
     session: String,
     episode: String,
     scope: TierScope,
@@ -123,21 +147,39 @@ impl Memory {
         session: impl Into<String>,
         today: Date,
         scope: TierScope,
+        events: Arc<dyn EventSink>,
     ) -> Result<Self, MemoryError> {
         let bundle = Bundle::open(root).await?;
         seed_singletons(&bundle, today).await?;
+        // Before `Self` exists, so this one cannot go through `resync`. A card that is already
+        // unreadable at session start is the case most worth reporting, and it is the case an
+        // after-the-fact hook would miss.
         {
             let reader = bundle.reader().await;
-            index.sync(&reader)?;
+            report_unreadable(events.as_ref(), index.sync(&reader)?);
         }
         Ok(Self {
             bundle,
             index,
+            events,
             session: session.into(),
             episode: format!("episodes/{today}.md"),
             scope,
             turns: Mutex::new(0),
         })
+    }
+
+    /// Re-reads the bundle into the index, reporting anything that would not parse.
+    ///
+    /// Every sync `Memory` performs goes through here, so a card that stops being readable is an
+    /// event rather than a silence, wherever the sync was triggered from.
+    ///
+    /// # Errors
+    /// Fails if the bundle cannot be read or the index cannot be written.
+    async fn resync(&self) -> Result<(), MemoryError> {
+        let reader = self.bundle.reader().await;
+        report_unreadable(self.events.as_ref(), self.index.sync(&reader)?);
+        Ok(())
     }
 
     #[must_use]
@@ -371,10 +413,7 @@ impl Memory {
             writer.save_concept(path, &concept)?;
             writer.commit(&format!("Marked wrong: {path}"))?;
         }
-        {
-            let reader = self.bundle.reader().await;
-            self.index.sync(&reader)?;
-        }
+        self.resync().await?;
         Ok(())
     }
 
@@ -587,10 +626,7 @@ impl Memory {
             let writer = self.bundle.writer().await;
             writer.commit(&format!("Merged {from} into {into}"))?;
         }
-        {
-            let reader = self.bundle.reader().await;
-            self.index.sync(&reader)?;
-        }
+        self.resync().await?;
         Ok(())
     }
 
@@ -713,10 +749,7 @@ impl Memory {
             writer.save_concept(path, concept)?;
             writer.commit(message)?;
         }
-        {
-            let reader = self.bundle.reader().await;
-            self.index.sync(&reader)?;
-        }
+        self.resync().await?;
         // The prefix is otherwise only rebuilt by consolidation, so a correction made on the trust
         // surface would not reach the model until the session ended. Correcting something and
         // watching it be repeated is the same failure as not being heard at all.
@@ -838,10 +871,7 @@ impl Memory {
         // §10.6: the rows are disposable working data, pruned past the promotion window. The
         // counts folded above are the record, so pruning costs nothing that matters.
         self.index.prune_recalls(today, RECALL_WINDOW_DAYS)?;
-        {
-            let reader = self.bundle.reader().await;
-            self.index.sync(&reader)?;
-        }
+        self.resync().await?;
 
         // Read the buffer, not the episode. The episode is the permanent record and grows all day,
         // so extracting from it made every close re-read the whole day and the extractor, being a

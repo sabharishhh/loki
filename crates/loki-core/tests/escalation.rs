@@ -14,6 +14,7 @@ use loki_core::core::budget::Budget as Spend;
 use loki_core::core::cycle::{Loop, TokenSink};
 use loki_core::core::event::Event;
 use loki_core::core::prompt::Prefix;
+use loki_core::core::sink::Broadcast;
 use loki_core::core::sink::EventSink;
 use loki_core::core::vocab::{Cents, CostModel, Lane, Locality, ModelRole};
 use loki_core::memory::claim::Origin;
@@ -242,6 +243,7 @@ impl Fixture {
                 label,
                 date(2026, 9, 3),
                 TierScope::normal(Locality::Cloud),
+                Arc::new(Broadcast::new()),
             )
             .await
             .expect("memory"),

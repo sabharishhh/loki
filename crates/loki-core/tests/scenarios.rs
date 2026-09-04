@@ -10,10 +10,13 @@
 //! the pass handed the extractor the whole day, every time. It also words facts differently on
 //! each run, because a model does, and every duplicate reported in testing came from that.
 
+use std::sync::Arc;
+
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use jiff::civil::{Date, date};
+use loki_core::core::sink::Broadcast;
 use loki_core::core::vocab::Locality;
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{
@@ -215,6 +218,7 @@ impl App {
             session,
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");

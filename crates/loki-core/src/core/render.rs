@@ -29,6 +29,10 @@ pub fn plain(event: &Event) -> Option<String> {
             (_, 1) => "Recalling one thing I know.".into(),
             (_, n) => format!("Recalling {n} things I know."),
         },
+        Event::MemoryUnreadable { concept_id, .. } => format!(
+            "I cannot read {}, so I am not using it until it is fixed.",
+            concept_id.as_str()
+        ),
         Event::MemoryWritten { op, concept_id } => {
             let what = concept_id.as_str();
             match op {
@@ -162,6 +166,9 @@ pub fn trace(event: &Event) -> String {
         }
         Event::MemoryWritten { op, concept_id } => {
             format!("MemoryWritten {op:?} {}", concept_id.as_str())
+        }
+        Event::MemoryUnreadable { concept_id, detail } => {
+            format!("MemoryUnreadable {} {detail:?}", concept_id.as_str())
         }
         Event::ModelCall {
             provider,

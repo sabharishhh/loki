@@ -15,8 +15,11 @@
 //! it should compare what they assert, and from routing half the answer somewhere nobody looks.
 //! The cases below are that class across families, workplaces, projects, scripts and medicine.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use jiff::civil::{Date, date};
+use loki_core::core::sink::Broadcast;
 use loki_core::core::vocab::Locality;
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{
@@ -152,6 +155,7 @@ impl Store {
             label,
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");

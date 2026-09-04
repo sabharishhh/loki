@@ -746,7 +746,12 @@ async fn a_file_that_stops_parsing_stops_being_recalled() {
     }
     let stats = store.sync().await;
 
-    assert_eq!(stats.unreadable, 1, "the sync has to notice: {stats:?}");
+    assert_eq!(
+        stats.unreadable.len(),
+        1,
+        "the sync has to notice: {stats:?}"
+    );
+    assert_eq!(stats.unreadable[0].0, "people/meera.md");
     assert!(
         store
             .recall("what team is Meera on")

@@ -12,10 +12,13 @@
 //!
 //! Nothing here reuses `scenarios.rs`'s fixture, deliberately.
 
+use std::sync::Arc;
+
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use jiff::civil::{Date, date};
+use loki_core::core::sink::Broadcast;
 use loki_core::core::vocab::Locality;
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
@@ -206,6 +209,7 @@ impl Store {
             label,
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");
@@ -502,6 +506,7 @@ async fn two_readers_on_one_store_do_not_corrupt_it() {
         "second",
         today(),
         TierScope::normal(Locality::Cloud),
+        Arc::new(Broadcast::new()),
     )
     .await
     .expect("open twice");

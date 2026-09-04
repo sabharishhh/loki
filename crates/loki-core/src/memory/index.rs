@@ -71,13 +71,18 @@ pub enum IndexError {
 }
 
 /// What a sync did. Useful for the import progress in §11.3 and for asserting in tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Not `Copy`: `unreadable` carries the paths, because the caller has to name them in an event and
+/// a count cannot. §6.4's shape, the index reports what it did and `Memory` turns that into events.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Stats {
     pub indexed: usize,
     pub removed: usize,
     pub unchanged: usize,
     /// Files on disk that would not parse, whose rows were dropped rather than left standing.
-    pub unreadable: usize,
+    ///
+    /// Paired with the parser's own sentence, which names the failing line.
+    pub unreadable: Vec<(String, String)>,
 }
 
 /// Which concepts a query may see.
@@ -656,16 +661,19 @@ impl Index {
                 stats.unchanged += 1;
                 continue;
             }
-            let Ok(concept) = reader.load_concept(path) else {
-                // Tolerated rather than failing the whole sync, which is OKF's rule, but the rows
-                // go. Left standing they outlived the file: recall kept serving the text of a
-                // claim the record no longer held, while §17.3's screen dropped the card
-                // entirely, and `sync` and `rebuild` disagreed about the same store. Principle 3
-                // says the projection is derived from the record, so a record nobody can read
-                // projects to nothing.
-                remove_concept(&tx, path)?;
-                stats.unreadable += 1;
-                continue;
+            let concept = match reader.load_concept(path) {
+                Ok(concept) => concept,
+                Err(why) => {
+                    // Tolerated rather than failing the whole sync, which is OKF's rule, but the rows
+                    // go. Left standing they outlived the file: recall kept serving the text of a
+                    // claim the record no longer held, while §17.3's screen dropped the card
+                    // entirely, and `sync` and `rebuild` disagreed about the same store. Principle 3
+                    // says the projection is derived from the record, so a record nobody can read
+                    // projects to nothing.
+                    remove_concept(&tx, path)?;
+                    stats.unreadable.push((path.clone(), why.to_string()));
+                    continue;
+                }
             };
             put_concept(&tx, path, &concept, &text, stamp, len)?;
             stats.indexed += 1;

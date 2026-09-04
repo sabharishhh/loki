@@ -82,6 +82,17 @@ pub enum Event {
         op: WriteOp,
         concept_id: ConceptId,
     },
+    /// A concept file on disk would not parse, so the index dropped what it held for it.
+    ///
+    /// Not a [`Self::Blocked`]: the loop carries on and nothing hands control back to the user.
+    /// It is an act all the same, because the projection just stopped describing a file, and
+    /// principle 7 says an act that emits nothing is invisible to a stream written only by the
+    /// code that chose to write it.
+    MemoryUnreadable {
+        concept_id: ConceptId,
+        /// The parser's own sentence. It names the line, which is what makes it fixable.
+        detail: String,
+    },
     ModelCall {
         task: TaskId,
         provider: String,

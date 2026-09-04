@@ -222,7 +222,7 @@ pub unsafe extern "C" fn loki_core_new(
     let clock: Arc<dyn loki_core::ports::clock::Clock> = Arc::new(SystemClock);
     let core = Loop::new(
         Arc::clone(&provider),
-        events,
+        Arc::clone(&events),
         callbacks as Arc<dyn TokenSink>,
         Arc::clone(&clock),
         Prefix::new(SYSTEM),
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn loki_core_new(
     // than no assistant: the conversation is the floor, and memory is what it earns on top.
     let mut core = core;
     let memory = runtime.block_on(async {
-        let memory = open_memory().await?;
+        let memory = open_memory(Arc::clone(&events)).await?;
         core.attach_memory(Arc::clone(&memory)).await.ok()?;
         // §18.2: a session that ended without a close left its buffer on disk, and its turns are
         // claims nobody extracted. Picked up here, before the first turn, so a crash costs a delay
@@ -925,7 +925,7 @@ fn json_string(text: &str) -> *mut c_char {
 ///
 /// Returns `None` rather than an error: every failure here has the same remedy, which is to carry
 /// on without recall, and a store that cannot be opened must not stop the app from answering.
-async fn open_memory() -> Option<Arc<Memory>> {
+async fn open_memory(events: Arc<dyn EventSink>) -> Option<Arc<Memory>> {
     let root = loki_core::paths::memory().ok()?;
     let index = loki_core::paths::index()
         .ok()
@@ -940,6 +940,7 @@ async fn open_memory() -> Option<Arc<Memory>> {
         session,
         now.date(),
         TierScope::normal(Locality::Cloud),
+        events,
     )
     .await
     .ok()

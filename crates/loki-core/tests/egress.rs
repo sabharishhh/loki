@@ -26,6 +26,7 @@ use loki_core::core::budget::Budget;
 use loki_core::core::cycle::{Loop, NullTokens};
 use loki_core::core::event::Event;
 use loki_core::core::prompt::Prefix;
+use loki_core::core::sink::Broadcast;
 use loki_core::core::sink::EventSink;
 use loki_core::core::vocab::{Cents, Locality};
 use loki_core::memory::bundle::Bundle;
@@ -210,6 +211,7 @@ async fn store(dir: &std::path::Path, scope: TierScope) -> Arc<Memory> {
             "wire",
             today(),
             scope,
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("memory"),

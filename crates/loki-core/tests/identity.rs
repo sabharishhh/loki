@@ -4,7 +4,10 @@
 //! two cards, or two things sharing a name becoming one. They are opposite errors on one dial, and
 //! a fix for either can make the other worse, so both directions are tested together on purpose.
 
+use std::sync::Arc;
+
 use jiff::civil::{Date, date};
+use loki_core::core::sink::Broadcast;
 use loki_core::core::vocab::Locality;
 use loki_core::memory::bundle::{ASSISTANT, Bundle, OWNER};
 use loki_core::memory::concept::{Label, Role};
@@ -39,6 +42,7 @@ impl Store {
             label,
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");

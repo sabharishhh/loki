@@ -4,7 +4,11 @@
 //! real git rather than against in-memory structures. A control that works on a struct and not on
 //! the store is exactly the failure this surface exists to make impossible.
 
+use std::sync::Arc;
+
 use jiff::civil::{Date, date};
+use loki_core::core::event::Event;
+use loki_core::core::sink::{Broadcast, Collector};
 use loki_core::core::vocab::Locality;
 use loki_core::memory::claim::Claim;
 use loki_core::memory::concept::{Frontmatter, RawConcept, Status};
@@ -37,6 +41,7 @@ impl Store {
             "session",
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");
@@ -417,4 +422,129 @@ async fn a_card_that_will_not_parse_is_reported_rather_than_omitted() {
         "it is reported as unreadable, not listed as knowledge"
     );
     assert_eq!(known.entities.len(), 1, "the readable card is unaffected");
+}
+
+/// A store with a broken card already on disk, and a sink that keeps what it is told.
+async fn watched(
+    label: &str,
+    files: &[(&str, &str)],
+) -> (std::path::PathBuf, Arc<Collector>, Memory) {
+    let dir = std::env::temp_dir().join(format!(
+        "loki-events-{}-{label}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Written before `Memory::open`, because a card that is already broken at session start is
+    // the case an after-the-fact hook would miss.
+    let bundle = loki_core::memory::bundle::Bundle::open(&dir)
+        .await
+        .expect("bundle");
+    {
+        let writer = bundle.writer().await;
+        for (path, text) in files {
+            writer.write(path, text).expect("write");
+        }
+        writer.commit("fixture").expect("commit");
+    }
+    drop(bundle);
+
+    let events = Arc::new(Collector::new());
+    let memory = Memory::open(
+        &dir,
+        Index::in_memory().expect("index"),
+        "watched",
+        today(),
+        TierScope::normal(Locality::Cloud),
+        Arc::clone(&events) as Arc<dyn loki_core::core::sink::EventSink>,
+    )
+    .await
+    .expect("open");
+    (dir, events, memory)
+}
+
+const BROKEN: &str = "---\nname: Broken\nstatus: stable\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- A claim\n  learned 2026-01-01\n";
+const WHOLE: &str = "---\nname: Whole\nstatus: stable\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- A claim\n  learned: 2026-01-01\n";
+
+fn unreadable_in(events: &Collector) -> Vec<(String, String)> {
+    events
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::MemoryUnreadable { concept_id, detail } => {
+                Some((concept_id.as_str().to_owned(), detail))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// B-59, the half that was left open. Principle 7: an act that emits nothing is invisible to a
+/// stream written only by the code that chose to write it. These three are one family.
+#[tokio::test]
+async fn a_card_broken_before_the_session_starts_is_reported_at_open() {
+    let (dir, events, _memory) = watched("at-open", &[("people/broken.md", BROKEN)]).await;
+
+    let found = unreadable_in(&events);
+    assert_eq!(
+        found.len(),
+        1,
+        "the event has to fire during open: {found:?}"
+    );
+    assert_eq!(found[0].0, "people/broken.md", "it names the file");
+    assert!(
+        found[0].1.contains("11"),
+        "and the line, which is what makes it fixable: {}",
+        found[0].1
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other moment: a file that was fine at open and is edited during the session.
+#[tokio::test]
+async fn a_card_that_breaks_mid_session_is_reported_on_the_next_sync() {
+    let (dir, events, memory) = watched(
+        "mid-session",
+        &[("people/whole.md", WHOLE), ("people/other.md", WHOLE)],
+    )
+    .await;
+    assert!(
+        unreadable_in(&events).is_empty(),
+        "a whole store says nothing"
+    );
+
+    {
+        let writer = memory.bundle().writer().await;
+        writer.write("people/whole.md", BROKEN).expect("break it");
+    }
+    // The realistic shape: a person breaks one card in an editor, and the next thing Loki does is
+    // an ordinary correction on a different one. An operation on the broken card cannot be the
+    // trigger, because it fails on the same parse before it reaches the sync.
+    memory
+        .contradict("people/other.md", 0)
+        .await
+        .expect("a correction elsewhere must not fail over one bad file");
+
+    let found = unreadable_in(&events);
+    assert_eq!(found.len(), 1, "the edit has to be reported: {found:?}");
+    assert_eq!(found[0].0, "people/whole.md");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Silence when there is nothing wrong. An event that fires on a healthy store is noise, and
+/// noise is what gets a stream ignored.
+#[tokio::test]
+async fn a_store_that_reads_cleanly_emits_nothing_about_it() {
+    let (dir, events, _memory) = watched("quiet", &[("people/whole.md", WHOLE)]).await;
+
+    assert!(
+        unreadable_in(&events).is_empty(),
+        "nothing is wrong, so nothing is said: {:?}",
+        events.events()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

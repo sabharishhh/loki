@@ -16,10 +16,13 @@
 //! and the families `CLAUDE.md` asks for: the empty case, the enormous case, and the case where two
 //! rules meet.
 
+use std::sync::Arc;
+
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use jiff::civil::{Date, date};
+use loki_core::core::sink::Broadcast;
 use loki_core::core::vocab::Locality;
 use loki_core::memory::bundle::OWNER;
 use loki_core::memory::claim::Origin;
@@ -225,6 +228,7 @@ impl Run {
             "scorecard",
             today(),
             TierScope::normal(Locality::Cloud),
+            Arc::new(Broadcast::new()),
         )
         .await
         .expect("open");
