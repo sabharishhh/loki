@@ -16,9 +16,6 @@
 //! hit would otherwise silence escalation. The caller may therefore also let the model ask. See
 //! D-062.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use async_trait::async_trait;
 use jiff::civil::Date;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +23,14 @@ use tokio_util::sync::CancellationToken;
 use super::bundle::{Bundle, BundleError};
 use super::gate::TierScope;
 use super::index::{Index, IndexError, Lane, Query, Visibility};
+use crate::core::attempt::{self};
+// `Ending` is part of `Found`'s public shape, so it is re-exported rather than merely imported.
+pub use crate::core::attempt::Ending;
+// Re-exported rather than redefined: these moved to `core::attempt` when the loop did, and every
+// caller and test that named them here still does.
+pub use crate::core::attempt::{OBSERVATION_LINES, clip};
 use crate::core::vocab::ModelRole;
+use crate::ports::clock::Clock;
 use crate::ports::model::{Chunk, Message, ModelProvider, Request, SystemBlock, Usage};
 
 /// Searches one turn may run (§10.5). A hard budget, from the first day.
@@ -457,25 +461,11 @@ pub trait Navigator: Send + Sync {
     async fn next(&self, question: &str, seen: &[String]) -> Result<Option<Op>, RuntimeError>;
 }
 
-/// Why a lane 2 search stopped (§10.8).
-///
-/// Found, empty and could-not-run are three answers rather than two, and a budget that drained
-/// and a loop that went nowhere stopped for different reasons. Collapsing any of them into
-/// "found nothing" is the silence-as-fact §12.4 forbids.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Ending {
-    /// The navigator stopped on its own.
-    #[default]
-    Stopped,
-    /// §10.5's budget of eight went.
-    OutOfBudget,
-    /// Two identical progress signatures in a row (§10.5).
-    Stalled,
-    /// The store could not be read, so no search happened.
-    Failed,
-}
-
 /// What a lane 2 search came back with.
+///
+/// Found, empty and could-not-run are three answers rather than two, and a budget that drained and
+/// a loop that went nowhere stopped for different reasons. [`Ending`] keeps them apart and
+/// [`Found::render`] is where the difference reaches a person.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Found {
     pub lines: Vec<String>,
@@ -523,6 +513,10 @@ impl Found {
                 "I searched my memory and the search stopped getting anywhere before it found it. \
                  That is not the same as it not being there."
             }
+            Ending::OutOfTime => {
+                "I searched my memory and ran out of time before finding it. That is not the same \
+                 as it not being there."
+            }
             Ending::Failed => {
                 "I could not read my memory just now, so I have not searched it. That is not the \
                  same as it not being there."
@@ -555,6 +549,7 @@ impl Found {
                 format!("spent all {SEARCH_BUDGET} of its searches without finding anything")
             }
             Ending::Stalled => "stopped getting anywhere and found nothing".to_owned(),
+            Ending::OutOfTime => "ran out of time before finding anything".to_owned(),
             Ending::Stopped | Ending::Failed => "found nothing".to_owned(),
         };
         format!(
@@ -569,99 +564,56 @@ impl Found {
 /// Starts wherever the navigator starts, which §10.8 expects to be the catalog, narrows with grep
 /// and search, and reads with a line range so a hit expands into the block around it.
 ///
+/// The loop itself is [`crate::core::attempt`], shared with §12.7's search to completion and
+/// §13's tool loop. What is memory's here is the grammar, the store, and the wording.
+///
 /// # Errors
-/// Fails if the bundle or index cannot be reached. A navigator that stops early is not an error.
+/// Fails if the navigator cannot choose a step. A step that fails is a dead end, not an error.
 pub async fn search(
     question: &str,
     runtime: &Runtime<'_>,
     navigator: &dyn Navigator,
     today: Date,
+    clock: &dyn Clock,
 ) -> Result<Found, RuntimeError> {
-    // What the navigator sees, dead ends included, and what actually answered. Separate on
-    // purpose: a model narrowing a search needs to know a path was empty, and the turn does not.
-    let mut seen: Vec<String> = Vec::new();
-    let mut found: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    let mut previous: Option<u64> = None;
-    let mut ending = Ending::Stopped;
-
-    while used < SEARCH_BUDGET {
-        let Some(op) = navigator.next(question, &seen).await? else {
-            break;
-        };
-        used += 1;
-        // The step is recorded beside its result, not just the result. A navigator that cannot
-        // see what it already ran repeats it, and repeating a step costs one of eight.
-        let step = op.line();
-        let outcome = runtime.run(&op, today).await;
-        let now = signature(&step, &outcome);
-        match outcome {
-            Ok(output) if output.trim().is_empty() => seen.push(format!("{step}\nnothing there")),
-            Ok(output) => {
-                let output = clip(&output);
-                seen.push(format!("{step}\n{output}"));
-                found.push(output);
-            }
-            // A dead end is an ordinary step in a narrow, look, refine loop: a path that is not
-            // there, a file that will not parse. The navigator is told and the loop continues,
-            // because aborting the turn over a probe is worse than spending one of eight.
-            Err(why) => seen.push(format!("{step}\nthat did not work: {why}")),
-        }
-        // §10.5: the budget bounds a runaway, and notices nothing about a loop going nowhere.
-        // Eight searches spent re-running one grep cost the same as eight spent narrowing, and
-        // only one of those is a search.
-        if previous == Some(now) {
-            ending = Ending::Stalled;
-            break;
-        }
-        previous = Some(now);
-    }
-
-    // A stall is the more specific reason, so a loop that repeats itself on the last step of the
-    // budget is reported as stuck rather than as thorough.
-    if ending == Ending::Stopped && used >= SEARCH_BUDGET && found.is_empty() {
-        ending = Ending::OutOfBudget;
-    }
+    let steps = Reading {
+        question,
+        runtime,
+        navigator,
+        today,
+    };
+    let outcome = attempt::run(&steps, attempt::Budget::of_steps(SEARCH_BUDGET), clock).await?;
     Ok(Found {
-        lines: found,
-        searched: used,
-        ending,
+        lines: outcome.found,
+        searched: outcome.steps,
+        ending: outcome.ending,
     })
 }
 
-/// One step's progress signature: the operation, how it ended, and how much it produced (§10.5).
-///
-/// **Over the raw byte count, never the rendered slice.** [`clip`] truncates, so a step producing
-/// steadily more output looks stationary through the slice, and a genuinely stuck loop looks alive
-/// the moment a byte of formatting changes. An error carries no output: the same operation failing
-/// twice is no progress however the message is worded.
-fn signature(step: &str, outcome: &Result<String, RuntimeError>) -> u64 {
-    let (status, bytes) = match outcome {
-        Ok(output) if output.trim().is_empty() => (0u8, 0),
-        Ok(output) => (1u8, output.len()),
-        Err(_) => (2u8, 0),
-    };
-    let mut hasher = DefaultHasher::new();
-    step.hash(&mut hasher);
-    status.hash(&mut hasher);
-    bytes.hash(&mut hasher);
-    hasher.finish()
+/// Memory's half of a bounded attempt: a navigator choosing, and the runtime doing.
+struct Reading<'a> {
+    question: &'a str,
+    runtime: &'a Runtime<'a>,
+    navigator: &'a dyn Navigator,
+    today: Date,
 }
 
-/// Lines one observation may carry into a prompt.
-///
-/// A grep over a store with a busy word in it returns hundreds. Unbounded, eight of those is the
-/// context window, which is the failure §10.5 avoids by putting tool output in a file and taking
-/// only the slice.
-const OBSERVATION_LINES: usize = 40;
+#[async_trait]
+impl attempt::Steps for Reading<'_> {
+    type Step = Op;
+    type Error = RuntimeError;
 
-fn clip(output: &str) -> String {
-    let mut lines: Vec<&str> = output.lines().take(OBSERVATION_LINES).collect();
-    let over = output.lines().count().saturating_sub(OBSERVATION_LINES);
-    if over > 0 {
-        lines.push("(more lines, not shown. narrow the search)");
+    async fn next(&self, seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+        self.navigator.next(self.question, seen).await
     }
-    lines.join("\n")
+
+    fn describe(&self, step: &Op) -> String {
+        step.line()
+    }
+
+    async fn run(&self, step: &Op) -> Result<String, RuntimeError> {
+        self.runtime.run(step, self.today).await
+    }
 }
 
 /// The lane a search ran on, for §10.6's log.
@@ -779,6 +731,7 @@ impl Navigator for ModelNavigator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::attempt::signature;
 
     #[test]
     fn both_conditions_are_needed_to_escalate() {
@@ -1038,20 +991,20 @@ mod tests {
             "the premise: both clip to the same slice"
         );
         assert_ne!(
-            signature(step, &Ok(short.clone())),
-            signature(step, &Ok(long)),
+            signature::<RuntimeError>(step, &Ok(short.clone())),
+            signature::<RuntimeError>(step, &Ok(long)),
             "so the signature must read the raw output, not the slice"
         );
 
         // And the same step producing the same bytes twice is stagnation, which is the point.
         assert_eq!(
-            signature(step, &Ok(short.clone())),
-            signature(step, &Ok(short))
+            signature::<RuntimeError>(step, &Ok(short.clone())),
+            signature::<RuntimeError>(step, &Ok(short))
         );
 
         // Empty, non-empty and failed are three statuses, not two.
-        let failed = signature(step, &Err(RuntimeError::Navigate("no".to_owned())));
-        assert_ne!(failed, signature(step, &Ok(String::new())));
+        let failed = signature::<RuntimeError>(step, &Err(RuntimeError::Navigate("no".to_owned())));
+        assert_ne!(failed, signature::<RuntimeError>(step, &Ok(String::new())));
         assert_ne!(
             failed,
             signature(

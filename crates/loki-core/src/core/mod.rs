@@ -5,6 +5,7 @@
 //!
 //! Built so far:
 //!
+//! - [`attempt`] is the bounded loop the search and tool loops both run.
 //! - [`ids`] holds the identifier newtypes the event stream uses.
 //! - [`vocab`] holds the small closed sets the events are described in.
 //! - [`payload`] holds the tool call payloads events carry.
@@ -23,6 +24,7 @@
 //! - `tier` is host-assigned reversibility tiers.
 //! - `undo` is the persistent undo journal.
 
+pub mod attempt;
 pub mod budget;
 pub mod checkpoint;
 pub mod cycle;

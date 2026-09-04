@@ -499,7 +499,9 @@ impl Loop {
     ) {
         let provider = Arc::clone(&self.provider);
         let navigator = runtime::ModelNavigator::new(provider.as_ref(), cancel);
-        let found = memory.search_deeply(question, &navigator, today).await;
+        let found = memory
+            .search_deeply(question, &navigator, today, self.clock.as_ref())
+            .await;
         // Charged whether or not the search worked. Tokens spent on a failed search are still
         // spent, and a ledger that only counts successes is not a ledger. A navigator that never
         // ran is a different thing from one that ran and found nothing, and only the second is a

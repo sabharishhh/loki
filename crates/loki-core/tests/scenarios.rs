@@ -770,6 +770,7 @@ fn one_query_hashes_the_same_way_everywhere() {
 mod lane_two {
     use super::{App, today};
     use async_trait::async_trait;
+    use loki_core::adapters::clock::SystemClock;
     use loki_core::memory::index::{Query, Visibility};
     use loki_core::memory::runtime::{Ending, Navigator, Op, RuntimeError, should_escalate};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -924,7 +925,12 @@ mod lane_two {
         // Lane 2 goes looking with a query the store can actually match.
         let found = app
             .memory
-            .search_deeply("computer science", &Route::to("computer science"), today())
+            .search_deeply(
+                "computer science",
+                &Route::to("computer science"),
+                today(),
+                &SystemClock,
+            )
             .await
             .expect("lane 2");
         assert!(
@@ -948,6 +954,7 @@ mod lane_two {
                 "my sister's phone number",
                 &Route::to("sister phone number"),
                 today(),
+                &SystemClock,
             )
             .await
             .expect("lane 2");
@@ -970,7 +977,12 @@ mod lane_two {
 
         let found = app
             .memory
-            .search_deeply("anything", &Wandering(AtomicUsize::new(0)), today())
+            .search_deeply(
+                "anything",
+                &Wandering(AtomicUsize::new(0)),
+                today(),
+                &SystemClock,
+            )
             .await
             .expect("lane 2");
 
@@ -992,7 +1004,7 @@ mod lane_two {
 
         let found = app
             .memory
-            .search_deeply("anything", &Endless, today())
+            .search_deeply("anything", &Endless, today(), &SystemClock)
             .await
             .expect("lane 2");
 
@@ -1023,7 +1035,12 @@ mod lane_two {
 
         let found = app
             .memory
-            .search_deeply("anything", &Alternating(AtomicUsize::new(0)), today())
+            .search_deeply(
+                "anything",
+                &Alternating(AtomicUsize::new(0)),
+                today(),
+                &SystemClock,
+            )
             .await
             .expect("lane 2");
 
@@ -1047,6 +1064,7 @@ mod lane_two {
                     step: AtomicUsize::new(0),
                 },
                 today(),
+                &SystemClock,
             )
             .await
             .expect("lane 2");

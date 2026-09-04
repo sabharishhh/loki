@@ -351,9 +351,10 @@ impl Memory {
         question: &str,
         navigator: &dyn runtime::Navigator,
         today: Date,
+        clock: &dyn crate::ports::clock::Clock,
     ) -> Result<runtime::Found, runtime::RuntimeError> {
         let rt = runtime::Runtime::new(&self.bundle, &self.index, self.scope);
-        runtime::search(question, &rt, navigator, today).await
+        runtime::search(question, &rt, navigator, today, clock).await
     }
 
     /// The memory runtime, for a caller that wants one primitive rather than a whole search.
