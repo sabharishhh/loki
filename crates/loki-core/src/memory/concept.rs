@@ -23,6 +23,36 @@ pub enum Status {
     Deprecated,
 }
 
+/// Surface forms that always mean the owner, whatever the owner is called (§9.4, S-21).
+///
+/// These are not names, they are how a conversation refers to its two fixed participants, so they
+/// keep meaning the owner after a rename and can never mean a second person. Resolution answers
+/// them from the fixed path and never asks a model, which is both free and the only way the answer
+/// can be the same every time. B-53.
+pub const OWNER_FORMS: [&str; 4] = ["the user", "me", "myself", "the owner"];
+
+/// Surface forms that always mean the assistant.
+///
+/// `you` belongs here and never to the owner: from inside a conversation "you" is Loki, so a store
+/// that answered both would file "you are Loki" onto the owner (D-066).
+pub const ASSISTANT_FORMS: [&str; 2] = ["you", "the assistant"];
+
+/// The fixed card a reserved surface form means, or `None` for an ordinary name.
+///
+/// Case-insensitive and whole-form: "the user's father" is a descriptor of the owner and not the
+/// owner, so only an exact match counts.
+#[must_use]
+pub fn reserved(surface: &str) -> Option<&'static str> {
+    let form = surface.trim().to_lowercase();
+    if OWNER_FORMS.contains(&form.as_str()) {
+        return Some(super::bundle::OWNER);
+    }
+    if ASSISTANT_FORMS.contains(&form.as_str()) {
+        return Some(super::bundle::ASSISTANT);
+    }
+    None
+}
+
 /// Who an entity is to this store (§9.4, S-21).
 ///
 /// Exactly one `Owner` and one `Assistant`, both seeded before the first turn so an "I" or a "you"

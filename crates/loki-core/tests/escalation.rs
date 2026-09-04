@@ -456,6 +456,59 @@ async fn a_miss_reaches_the_model_as_a_miss() {
     );
 }
 
+/// B-56, from Sabharish's session. An explicit instruction to search ran no search at all.
+///
+/// "search the memory to find everything that is listed in it" contains none of the thirteen
+/// markers `asks_about_the_past` looks for, so the floor never fired and the model was never armed
+/// to ask. It answered out of the working set and headed the answer "here is everything currently
+/// listed in memory", which is a false statement assembled from true ones.
+#[tokio::test]
+async fn an_instruction_to_search_runs_a_search() {
+    let mut app = Fixture::open(
+        "instructed",
+        &["Here is what I found."],
+        &["SEARCH computer science", "DONE"],
+    )
+    .await;
+    app.ask("search the memory to find everything that is listed in it")
+        .await;
+
+    assert!(
+        !app.provider.requests(ModelRole::Utility).is_empty(),
+        "the instruction has to reach lane 2"
+    );
+    let primary = app.provider.requests(ModelRole::Primary);
+    assert_eq!(primary.len(), 1, "the floor needs no second call");
+    assert!(
+        prompt_text(&primary[0]).contains("A deeper search of memory"),
+        "{}",
+        prompt_text(&primary[0])
+    );
+}
+
+/// The other half of B-56: an instruction to search ignores the score.
+///
+/// A good keyword hit does not answer "search your memory and list everything in it", and the
+/// floor's `nothing_to_read` gate would otherwise swallow the instruction whenever lane 1 happened
+/// to return something.
+#[tokio::test]
+async fn an_instruction_to_search_is_not_satisfied_by_a_good_recall() {
+    let mut app = Fixture::open(
+        "instructed-with-recall",
+        &["Here is what I found."],
+        &["CATALOG", "DONE"],
+    )
+    .await;
+    // "computer science" is in the store and lane 1 will answer it well.
+    app.ask("check your memory for everything about computer science")
+        .await;
+
+    assert!(
+        !app.provider.requests(ModelRole::Utility).is_empty(),
+        "a good lane 1 hit does not answer an instruction to search"
+    );
+}
+
 /// Failure point 91. Found, empty and could-not-run are three answers, and only two reached the
 /// model: a search the store refused was reported to the event stream and nowhere else, so the
 /// model wrote its answer as though memory had been read and had held nothing.

@@ -301,6 +301,61 @@ pub fn asks_about_the_past(message: &str) -> bool {
     MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
+/// An explicit instruction to search memory (§10.8).
+///
+/// **Separate from [`asks_about_the_past`], and it ignores the score.** That one reads a question
+/// for markers of the past; this reads an instruction. "Search your memory and tell me everything
+/// in it" contains none of the thirteen markers, so lane 1 came back empty, the floor never fired,
+/// the model was never armed to ask, and the answer was composed out of the working set and headed
+/// "here is everything currently listed in memory". A subset presented as the whole store, which
+/// is §10.8's silence-as-fact wearing the opposite face. B-56.
+///
+/// A verb **followed closely** by a memory word, never either alone and never in either order.
+/// "Find me a restaurant" names no memory; "my memory is bad, I should check my calendar" has both
+/// words and asks for nothing. B-47 is the record of what a loose marker list costs, and this rule
+/// is the narrowest one that still catches every phrasing of the instruction.
+#[must_use]
+pub fn asks_to_search(message: &str) -> bool {
+    const VERBS: [&str; 8] = [
+        "search",
+        "look",
+        "find",
+        "check",
+        "list",
+        "recall",
+        "dig",
+        "go through",
+    ];
+    const SUBJECTS: [&str; 8] = [
+        "memory",
+        "memories",
+        "remember",
+        "stored",
+        "notes",
+        "you know",
+        "know about",
+        "you have",
+    ];
+    /// Characters the object may sit behind the verb. Wide enough for "look *through your* notes",
+    /// narrow enough that two unrelated clauses never pair up.
+    const REACH: usize = 24;
+
+    let lower = message.to_lowercase();
+    VERBS.iter().any(|verb| {
+        lower.match_indices(verb).any(|(at, _)| {
+            let after = &lower[at + verb.len()..];
+            // By characters, not bytes. A message in another script must not split a code point.
+            let end = after
+                .char_indices()
+                .nth(REACH)
+                .map_or(after.len(), |(boundary, _)| boundary);
+            SUBJECTS
+                .iter()
+                .any(|subject| after[..end].contains(subject))
+        })
+    })
+}
+
 /// §10.8's two conditions, both checked here and neither by a model.
 ///
 /// The message has to be asking about the past, *and* lane 1's best hit has to have fallen below
@@ -752,6 +807,55 @@ mod tests {
         assert!(asks_about_the_past("did I tell you about my dad"));
         // The user's own phrasing, which a narrower marker missed.
         assert!(asks_about_the_past("what all do you know about my degree"));
+    }
+
+    /// B-56, from Sabharish's session. An instruction to search is not a question about the past,
+    /// and none of the thirteen markers is in it, so nothing armed and nothing searched.
+    #[test]
+    fn an_instruction_to_search_memory_is_recognised_as_one() {
+        for message in [
+            "search the memory to find everything that is listed in it",
+            "check your memory for what I said about my father",
+            "look through your notes and tell me",
+            "list everything you know about me",
+            "search your memory",
+            "can you recall what is stored about my degree",
+        ] {
+            assert!(asks_to_search(message), "should search: {message:?}");
+        }
+    }
+
+    /// The half that matters more. A loose list is what B-47 cost, so both words together in the
+    /// wrong order or the wrong clause must stay quiet.
+    #[test]
+    fn a_sentence_that_merely_contains_both_words_does_not_search() {
+        for message in [
+            // A verb with nothing to search.
+            "find me a restaurant near Kochi",
+            "check the weather",
+            "list the steps for setting up a rust project",
+            // A memory word nowhere near the verb, in a different clause.
+            "my memory is bad, I should check my calendar",
+            "I have notes everywhere and I cannot find my keys",
+            // Neither.
+            "my dad is a civil contractor",
+            "",
+        ] {
+            assert!(!asks_to_search(message), "should not search: {message:?}");
+        }
+    }
+
+    /// A message in another script must not panic the window, whatever it decides.
+    #[test]
+    fn the_window_does_not_split_a_character() {
+        for message in [
+            "search the நினைவகம் for my name",
+            "check मेरी memory के लिए",
+            "找一下 memory 里面有什么",
+            "search 🧠🧠🧠🧠🧠🧠🧠🧠🧠🧠 memory",
+        ] {
+            let _ = asks_to_search(message);
+        }
     }
 
     #[test]

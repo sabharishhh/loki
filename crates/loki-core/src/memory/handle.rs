@@ -868,9 +868,11 @@ impl Memory {
 /// under the owner; this is the correction, see D-066. `I` is left out for a second reason: it is
 /// one letter, and blocking's near-name match on a single character catches everything.
 async fn seed_singletons(bundle: &Bundle, today: Date) -> Result<(), MemoryError> {
-    use super::concept::{Frontmatter, Label, RawConcept, Role, render};
+    use super::concept::{
+        ASSISTANT_FORMS, Frontmatter, Label, OWNER_FORMS, RawConcept, Role, Status, render,
+    };
 
-    for (path, name, role, label, aliases) in [
+    for (path, name, role, label, forms) in [
         (
             bundle::OWNER,
             // Not "you". The card's name is a surface form blocking answers to, and inside a
@@ -880,14 +882,14 @@ async fn seed_singletons(bundle: &Bundle, today: Date) -> Result<(), MemoryError
             Role::Owner,
             // No name has been given yet, which is exactly what `described` records.
             Label::Described,
-            ["me", "myself", "the owner"].as_slice(),
+            OWNER_FORMS.as_slice(),
         ),
         (
             bundle::ASSISTANT,
             "Loki",
             Role::Assistant,
             Label::Named,
-            ["you", "the assistant"].as_slice(),
+            ASSISTANT_FORMS.as_slice(),
         ),
     ] {
         let exists = {
@@ -897,12 +899,23 @@ async fn seed_singletons(bundle: &Bundle, today: Date) -> Result<(), MemoryError
         if exists {
             continue;
         }
-        // Seeded with no claims, so it is `draft` and the gate keeps it out of every prompt until
-        // it has learned something. No exception needed anywhere.
+        // **Stable from birth, unlike everything else.** `draft` records that a concept has not
+        // settled, and these two settled before the first turn: their existence is not a guess and
+        // no evidence will ever arrive to confirm it. Left as drafts, the assistant's own card
+        // could never reach a prompt, because nothing is ever *stated* about Loki and promotion
+        // needs a stated claim. B-55. The claim-level gate is untouched, so an inferred claim on
+        // either card is still a candidate and still out of the prompt.
         let mut front = Frontmatter::new(name, today);
+        front.status = Status::Stable;
         front.role = role;
         front.label = label;
-        front.aliases = aliases.iter().map(|a| (*a).to_owned()).collect();
+        // From the one list resolution reads, so the forms that always mean this card and the
+        // aliases written to disk cannot drift apart.
+        front.aliases = forms
+            .iter()
+            .filter(|form| !form.eq_ignore_ascii_case(name))
+            .map(|form| (*form).to_owned())
+            .collect();
         let writer = bundle.writer().await;
         writer.write(path, &render(&RawConcept::new(front)))?;
     }

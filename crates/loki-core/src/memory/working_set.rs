@@ -20,6 +20,22 @@ use super::index::{Index, IndexError};
 /// one: a provider-specific count in Ring 0 would tie the frozen prefix to a provider.
 pub const MAX_CHARS: usize = 4_000;
 
+/// What the block is, said in the block itself.
+///
+/// **Without this the model reads a subset as the whole store.** Everything here passed the §10.4
+/// gate and fits [`MAX_CHARS`], so guesses under review, retired claims and anything that fell off
+/// the cap are missing by design. Asked to list what it remembered, Loki narrated this block under
+/// the heading "here is everything currently listed in memory", which is a false statement made
+/// out of true ones. §10.8's honest exhaustion, pointed at the prefix rather than at a search.
+/// B-56.
+const PREAMBLE: &str = "# Working set
+
+What is settled about the user, capped and ranked by use. It is not the whole of memory: guesses
+under review, retired claims and anything past the cap are on disk and are reached by searching.
+Never describe this list as everything you know.
+
+";
+
 /// How many concepts are considered before the cap does the rest of the work.
 const CANDIDATES: usize = 40;
 
@@ -59,7 +75,7 @@ pub async fn generate(
     // Every card's display name, so an edge reads as "father: Vaidyanathan" rather than as a path.
     let names = display_names(bundle).await;
 
-    let mut out = String::from("# Working set\n\n");
+    let mut out = String::from(PREAMBLE);
     let mut result = Generated::default();
 
     for path in ranked {

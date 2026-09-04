@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use super::concept;
 use super::index::{Candidate, Index, IndexError};
 use crate::core::vocab::ModelRole;
 use crate::ports::model::{Message, ModelError, ModelProvider, Request, SystemBlock};
@@ -129,10 +130,24 @@ pub async fn resolve(
         return Err(ResolveError::NoSurfaceForm);
     }
 
+    // **The two seeded cards before anything else.** `the user` is the commonest subject in the
+    // store and it is not a name: it is how the extractor refers to the owner on every single
+    // claim. Sent through blocking and a matcher it was a coin flip, and B-53 is what that cost.
+    // Nine claims from one session asked the same question nine times, got MATCH, an empty reply
+    // and MATCH again, and the owner's facts landed on two cards. Answered here it is
+    // deterministic, free, and cannot produce a second owner.
+    if let Some(path) = concept::reserved(trimmed) {
+        return Ok(Resolution::Existing {
+            path: settled(path.to_owned(), index),
+        });
+    }
+
     // The graph before the strings. An edge is something somebody said outright, so it beats every
     // guess blocking could make, and it is what turns "my sister" and "Lakshmi" into one card.
     if let Some(path) = through_the_graph(trimmed, relation, index)? {
-        return Ok(Resolution::Existing { path });
+        return Ok(Resolution::Existing {
+            path: settled(path, index),
+        });
     }
 
     let mut candidates = index.candidates(trimmed, tags, MAX_CANDIDATES)?;
@@ -157,7 +172,7 @@ pub async fn resolve(
         Decision::Existing(at) => candidates.get(at).map_or_else(
             || fresh(trimmed, kind),
             |c| Resolution::Existing {
-                path: c.path.clone(),
+                path: settled(c.path.clone(), index),
             },
         ),
         Decision::New => fresh(trimmed, kind),
@@ -257,6 +272,30 @@ fn one_word(label: &str) -> Option<&str> {
 }
 
 /// A new entity, with its alias list seeded from the form that was used (§9.4 step 3).
+/// Follows `merged_into` to the card a tombstone became (§9.4).
+///
+/// **A merged card still answers to its old names.** Blocking excludes tombstones, but a relation
+/// can still point at one and a reserved form can still name one, and a write that lands on a
+/// tombstone is invisible in both directions: the §10.4 gate keeps a deprecated concept out of
+/// every prompt, and §17.3's duplicate list skips it, so the fact is neither usable nor
+/// repairable. Four of Sabharish's facts went that way. B-54.
+///
+/// Bounded, because a cycle in the pointers must not become a hang. On anything unreadable the
+/// original path is returned unchanged, which is the behaviour that existed before this.
+fn settled(path: String, index: &Index) -> String {
+    let mut at = path;
+    for _ in 0..MERGE_DEPTH {
+        match index.merged_into(&at) {
+            Ok(Some(next)) if next != at => at = next,
+            _ => break,
+        }
+    }
+    at
+}
+
+/// How far a chain of merges is followed. A store with more than this is malformed.
+const MERGE_DEPTH: usize = 8;
+
 fn fresh(surface: &str, kind: Kind) -> Resolution {
     Resolution::New {
         path: format!("{}/{}.md", kind.directory(), slug(surface)),
@@ -390,13 +429,39 @@ impl Matcher for ModelMatcher<'_> {
             }
         }
 
+        // **A non-answer is asked again, once.** Measured on Sabharish's store: the same question
+        // came back empty after 1422 ms, twice in one pass, and an unreadable answer used to fall
+        // through to `New`. "Prefer NEW over a guess" is a rule about answers, and a model that
+        // returned nothing has not guessed and has not answered. B-53.
+        for attempt in 0..=RETRIES {
+            let answer = self.ask(&prompt).await?;
+            if let Some(decision) = parse_decision(&answer, candidates.len()) {
+                return Ok(decision);
+            }
+            if attempt == RETRIES {
+                // Still nothing. `New` is the documented direction to fail in: a duplicate is one
+                // tap on §17.3's list, and a wrong match writes a fact onto the wrong person where
+                // nothing surfaces it. It is a decision now rather than a fallthrough.
+                return Ok(Decision::New);
+            }
+        }
+        Ok(Decision::New)
+    }
+}
+
+/// How many times an unreadable answer is asked again.
+const RETRIES: usize = 1;
+
+impl ModelMatcher<'_> {
+    async fn ask(&self, prompt: &str) -> Result<String, ResolveError> {
+        use futures_util::StreamExt as _;
+
         let request = Request {
             role: ModelRole::Utility,
             system: vec![SystemBlock::new(INSTRUCTIONS)],
-            messages: vec![Message::user(prompt)],
+            messages: vec![Message::user(prompt.to_owned())],
             max_tokens: 32,
         };
-
         let mut stream = self
             .provider
             .complete(request, self.cancel.clone())
@@ -404,27 +469,28 @@ impl Matcher for ModelMatcher<'_> {
             .map_err(ResolveError::Model)?;
 
         let mut answer = String::new();
-        use futures_util::StreamExt as _;
         while let Some(chunk) = stream.next().await {
             if let crate::ports::model::Chunk::Text(text) = chunk.map_err(ResolveError::Model)? {
                 answer.push_str(&text);
             }
         }
-        Ok(parse_decision(&answer, candidates.len()))
+        Ok(answer)
     }
 }
 
-/// Reads the matcher's one line.
+/// Reads the matcher's one line, or `None` when there is no line to read.
 ///
-/// Tolerant on purpose, and it fails towards `New`. A malformed answer that becomes a new file
-/// costs a duplicate the user can merge; one that becomes a match writes a fact onto the wrong
-/// person, which is the over-supersession §21.2 measures.
-fn parse_decision(answer: &str, count: usize) -> Decision {
+/// Tolerant on purpose, and where it does decide it fails towards `New`: a malformed answer that
+/// becomes a new file costs a duplicate the user can merge, and one that becomes a match writes a
+/// fact onto the wrong person, which is the over-supersession §21.2 measures.
+///
+/// **An empty or wordless reply is not an answer.** It used to be read as `New`, so a provider
+/// hiccup created a person. The caller asks again instead.
+fn parse_decision(answer: &str, count: usize) -> Option<Decision> {
     let line = answer
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or_default()
+        .find(|l| !l.is_empty())?
         .to_uppercase();
 
     let numbers: Vec<usize> = line
@@ -439,16 +505,18 @@ fn parse_decision(answer: &str, count: usize) -> Decision {
         unique.sort_unstable();
         unique.dedup();
         if unique.len() >= 2 {
-            return Decision::Tie(unique);
+            return Some(Decision::Tie(unique));
         }
-        return Decision::New;
+        return Some(Decision::New);
     }
     if line.starts_with("MATCH")
         && let Some(&first) = numbers.first()
     {
-        return Decision::Existing(first);
+        return Some(Decision::Existing(first));
     }
-    Decision::New
+    // A word that is neither MATCH nor TIE, NEW included. The model answered; it just did not pick
+    // anybody.
+    Some(Decision::New)
 }
 
 #[cfg(test)]
@@ -474,17 +542,22 @@ mod tests {
 
     #[test]
     fn the_matcher_answers_are_read() {
-        assert_eq!(parse_decision("MATCH 2", 5), Decision::Existing(2));
-        assert_eq!(parse_decision("  match 0  \n", 5), Decision::Existing(0));
-        assert_eq!(parse_decision("NEW", 5), Decision::New);
-        assert_eq!(parse_decision("TIE 0 3", 5), Decision::Tie(vec![0, 3]));
+        assert_eq!(parse_decision("MATCH 2", 5), Some(Decision::Existing(2)));
+        assert_eq!(
+            parse_decision("  match 0  \n", 5),
+            Some(Decision::Existing(0))
+        );
+        assert_eq!(parse_decision("NEW", 5), Some(Decision::New));
+        assert_eq!(
+            parse_decision("TIE 0 3", 5),
+            Some(Decision::Tie(vec![0, 3]))
+        );
     }
 
     /// A wrong merge is the expensive mistake, so anything unclear has to land on `New`.
     #[test]
     fn a_malformed_answer_falls_towards_a_new_entity() {
         for answer in [
-            "",
             "I think it is probably Meera?",
             "MATCH",
             "MATCH 9",
@@ -494,15 +567,54 @@ mod tests {
         ] {
             assert_eq!(
                 parse_decision(answer, 5),
-                Decision::New,
+                Some(Decision::New),
                 "answer was {answer:?}"
             );
         }
     }
 
+    /// B-53. A model that returned nothing has not answered, and `New` creates a person.
+    #[test]
+    fn a_reply_with_no_words_in_it_is_not_an_answer() {
+        for answer in ["", "   ", "\n\n", "\t \r\n  "] {
+            assert_eq!(
+                parse_decision(answer, 5),
+                None,
+                "a non-answer must be asked again, not read as NEW: {answer:?}"
+            );
+        }
+        // A reply with any word in it is an answer, even an unusable one.
+        assert_eq!(parse_decision("hmm", 5), Some(Decision::New));
+    }
+
     #[test]
     fn a_tie_naming_the_same_candidate_twice_is_not_a_tie() {
-        assert_eq!(parse_decision("TIE 2 2", 5), Decision::New);
+        assert_eq!(parse_decision("TIE 2 2", 5), Some(Decision::New));
+    }
+
+    /// B-53. The two seeded cards are answered from their fixed paths and never by a model.
+    #[test]
+    fn the_reserved_forms_always_mean_the_seeded_cards() {
+        for form in ["the user", "The User", "  me  ", "myself", "the owner"] {
+            assert_eq!(concept::reserved(form), Some(crate::memory::bundle::OWNER));
+        }
+        for form in ["you", "You", "the assistant"] {
+            assert_eq!(
+                concept::reserved(form),
+                Some(crate::memory::bundle::ASSISTANT)
+            );
+        }
+        // A descriptor of the owner is not the owner, and a real name is nobody reserved.
+        for form in [
+            "the user's father",
+            "the users",
+            "Sabharish",
+            "Loki",
+            "the user's sister",
+            "",
+        ] {
+            assert_eq!(concept::reserved(form), None, "{form:?}");
+        }
     }
 
     #[test]

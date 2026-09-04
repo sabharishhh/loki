@@ -24,7 +24,7 @@ use super::gate::TierScope;
 
 /// Bumped whenever the schema changes. A mismatch wipes and rebuilds rather than migrating,
 /// because the files can always produce it again.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Signal weights for §10.1. They sum to one, so a score is directly comparable across queries,
 /// which is what §12.6's "did memory already know" needs to threshold on.
@@ -453,6 +453,7 @@ CREATE TABLE IF NOT EXISTS concept (
     status      TEXT    NOT NULL,
     verified    INTEGER NOT NULL DEFAULT 0,
     described   INTEGER NOT NULL DEFAULT 0,
+    merged_into TEXT,
     stale_after INTEGER,
     mtime       INTEGER NOT NULL,
     len         INTEGER NOT NULL
@@ -1137,6 +1138,26 @@ impl Index {
         Ok((found.len() == 1).then(|| found.remove(0)))
     }
 
+    /// The card a tombstone merged into, if this path is one (§9.4).
+    ///
+    /// One hop. [`super::resolve`] walks the chain, because it is the caller that knows how far a
+    /// pointer may be followed before the store is simply malformed.
+    ///
+    /// # Errors
+    /// Fails if the index cannot be read.
+    pub fn merged_into(&self, path: &str) -> Result<Option<String>, IndexError> {
+        let db = self.db.lock().map_err(|_| IndexError::Poisoned)?;
+        db.query_row(
+            "SELECT merged_into FROM concept WHERE path = ?1",
+            params![path],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(IndexError::Read(other)),
+        })
+    }
+
     pub fn candidates(
         &self,
         surface: &str,
@@ -1151,9 +1172,16 @@ impl Index {
         let wanted: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
 
         let mut best: HashMap<String, Candidate> = HashMap::new();
+        // **A tombstone is never a candidate.** Its names belong to whatever it merged into, and a
+        // claim written onto it is invisible in both directions: the §10.4 gate keeps a deprecated
+        // concept out of every prompt, and §17.3's duplicate list skips it, so nothing can surface
+        // the fact and nothing can repair it. Four of Sabharish's facts landed there because the
+        // tombstone's name was the literal surface form and outranked the card it had merged into.
+        // B-54.
         let mut stmt = db
             .prepare(
-                "SELECT c.path, c.name, a.text FROM alias a JOIN concept c ON c.id = a.concept",
+                "SELECT c.path, c.name, a.text FROM alias a JOIN concept c ON c.id = a.concept
+                 WHERE c.merged_into IS NULL",
             )
             .map_err(IndexError::Read)?;
         let rows = stmt
@@ -1286,14 +1314,15 @@ fn put_concept(
     let verified = i64::from(concept.front.is_human_verified());
     let described = i64::from(concept.front.label == super::concept::Label::Described);
     tx.execute(
-        "INSERT INTO concept(path, name, status, verified, described, stale_after, mtime, len)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO concept(path, name, status, verified, described, merged_into, stale_after, mtime, len)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             path,
             concept.front.name,
             status_str(concept.front.status),
             verified,
             described,
+            concept.front.merged_into,
             concept.front.stale_after.map(to_days),
             mtime,
             len

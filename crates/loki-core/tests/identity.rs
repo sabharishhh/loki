@@ -67,6 +67,17 @@ impl Store {
             .collect()
     }
 
+    /// Filenames in one directory of the bundle, sorted.
+    async fn dir_entries(&self, dir: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.dir.join("memory").join(dir))
+            .or_else(|_| std::fs::read_dir(self.dir.join(dir)))
+            .expect("read dir")
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Where blocking would send a claim about this surface form.
     fn blocks_to(&self, surface: &str) -> Vec<String> {
         self.memory
@@ -1258,5 +1269,286 @@ mod prefix {
             prefix.contains("Sabharish"),
             "the prompt has to know whose store this is: {prefix:?}"
         );
+    }
+
+    /// B-56. The block is a capped, gated subset, and it has to say so in itself.
+    ///
+    /// Asked to list what it remembered, Loki narrated this block under the heading "here is
+    /// everything currently listed in memory". Nothing in the prefix told it the block was
+    /// partial, so the sentence was the natural thing to write out of it.
+    #[tokio::test]
+    async fn the_working_set_says_it_is_not_the_whole_store() {
+        let store = store_with(
+            "working-set-preamble",
+            vec![Fact {
+                trigger: "my name is Sabharish",
+                surface: "the user",
+                attribute: "name",
+                text: "The user's name is Sabharish",
+                aliases: &["Sabharish"],
+                relation: None,
+            }],
+        )
+        .await;
+
+        let prefix = store.memory.working_set().await.expect("working set");
+        assert!(
+            prefix.contains("not the whole of memory"),
+            "the block must not read as the whole store: {prefix:?}"
+        );
+        assert!(
+            prefix.contains("Never describe this list as everything you know"),
+            "{prefix:?}"
+        );
+    }
+}
+
+/// B-53, B-54 and B-55, from Sabharish's store on 2026-09-04.
+///
+/// One session of nine facts about the owner, every one of them extracted with the subject `the
+/// user`, ended up on two cards. The subject was sent to a model matcher once per claim, and the
+/// model answered `MATCH`, then returned nothing at all, then `MATCH` again. `the user` is not a
+/// name: it is how a conversation refers to one of its two fixed participants, and it now resolves
+/// without asking anybody.
+mod the_two_fixed_cards {
+    use super::{Store, today};
+    use async_trait::async_trait;
+    use loki_core::memory::bundle::{ASSISTANT, OWNER};
+    use loki_core::memory::claim::Origin;
+    use loki_core::memory::concept::Status;
+    use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
+    use loki_core::memory::index::Candidate as EntityCandidate;
+    use loki_core::memory::resolve::{Decision, Kind, Matcher, Resolution, ResolveError, resolve};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Every fact in the session, phrased the way the extractor actually phrases them.
+    const SAID: [(&str, &str); 6] = [
+        ("name", "The user's name is Sabharish"),
+        (
+            "education",
+            "Sabharish is a Computer Science B.Tech. graduate",
+        ),
+        ("native_place", "Sabharish's native place is Palakkad"),
+        (
+            "higher_education_location",
+            "Sabharish moved to Kochi for higher studies",
+        ),
+        ("honors", "Sabharish received an Honors degree"),
+        ("medical_condition", "Sabharish has OCD"),
+    ];
+
+    struct EverythingIsNew;
+
+    #[async_trait]
+    impl Extractor for EverythingIsNew {
+        async fn extract(&self, _e: &str, _t: &str) -> Result<Vec<Candidate>, ConsolidateError> {
+            Ok(SAID
+                .iter()
+                .map(|(attribute, text)| Candidate {
+                    surface: "the user".to_owned(),
+                    kind: Kind::Person,
+                    heading: (*attribute).to_owned(),
+                    attribute: (*attribute).to_owned(),
+                    text: (*text).to_owned(),
+                    days_ago: None,
+                    valid_from: None,
+                    origin: Origin::Stated,
+                    tags: vec![],
+                    aliases: vec![],
+                    value: None,
+                    relation: None,
+                })
+                .collect())
+        }
+    }
+
+    /// The worst matcher there is: it answers "a new person" to everything, and counts.
+    ///
+    /// The count is the assertion. A matcher that is never asked cannot be wrong, cannot be slow,
+    /// and cannot be non-deterministic, which is the whole argument for the short circuit.
+    #[derive(Default)]
+    struct Useless(AtomicUsize);
+
+    #[async_trait]
+    impl Matcher for Useless {
+        async fn decide(
+            &self,
+            _s: &str,
+            _c: &str,
+            _kind: Kind,
+            _candidates: &[EntityCandidate],
+        ) -> Result<Decision, ResolveError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Decision::New)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owners_facts_land_on_one_card_however_the_matcher_answers() {
+        let store = Store::open("owner-not-split").await;
+        let matcher = Useless::default();
+        store
+            .memory
+            .record("user", "I am Sabharish")
+            .await
+            .expect("record");
+        store
+            .memory
+            .close(&EverythingIsNew, &matcher, &Unbounded, today())
+            .await
+            .expect("close");
+
+        assert_eq!(
+            matcher.0.load(Ordering::Relaxed),
+            0,
+            "the owner is answered from the fixed path, never by a model"
+        );
+
+        let owner = store.card(OWNER).await;
+        let landed: Vec<String> = owner.claims().map(|c| c.text.clone()).collect();
+        for (_, text) in SAID {
+            assert!(landed.iter().any(|got| got == text), "missing: {text}");
+        }
+
+        let stray = store.dir_entries("people").await;
+        assert_eq!(
+            stray,
+            ["loki.md", "you.md"],
+            "no second card for the same person"
+        );
+    }
+
+    /// The reserved forms are the conversation's two participants, not a prefix match on them.
+    #[tokio::test]
+    async fn a_descriptor_of_the_owner_is_not_the_owner() {
+        let store = Store::open("owner-descriptor").await;
+        let matcher = Useless::default();
+
+        let got = resolve(
+            "the user's father",
+            &[],
+            "The user's father is a civil contractor",
+            Kind::Person,
+            None,
+            store.memory.index(),
+            &matcher,
+        )
+        .await
+        .expect("resolve");
+
+        assert!(
+            !matches!(&got, Resolution::Existing { path } if path == OWNER),
+            "a descriptor of the owner must never be the owner: {got:?}"
+        );
+    }
+
+    /// B-54, and it is two rules meeting: a merged card still answers to its old names.
+    ///
+    /// Four facts went into a tombstone the day after it was merged, where the §10.4 gate keeps
+    /// them out of every prompt and §17.3's duplicate list skips them, so nothing could use them
+    /// and nothing could repair them.
+    #[tokio::test]
+    async fn a_claim_reaching_a_tombstone_lands_on_the_card_it_became() {
+        let store = Store::open("tombstone").await;
+        // Two cards for one person, the split this whole file exists to prevent, made on purpose
+        // so the repair afterwards has something to repair.
+        for (surface, attribute, text) in [
+            ("Meera", "role", "Meera runs infra"),
+            ("Meera Raghunathan", "city", "Meera lives in Kochi"),
+        ] {
+            store.memory.record("user", text).await.expect("record");
+            store
+                .memory
+                .close(
+                    &OneFact {
+                        surface,
+                        attribute,
+                        text,
+                    },
+                    &Useless::default(),
+                    &Unbounded,
+                    today(),
+                )
+                .await
+                .expect("close");
+        }
+        store
+            .memory
+            .merge("people/meera-raghunathan.md", "people/meera.md", today())
+            .await
+            .expect("merge");
+
+        let tombstone = "people/meera-raghunathan.md".to_owned();
+        for surface in ["Meera", "Meera Raghunathan"] {
+            assert!(
+                !store.blocks_to(surface).contains(&tombstone),
+                "a tombstone is not a candidate for {surface:?}: {:?}",
+                store.blocks_to(surface)
+            );
+        }
+
+        let matcher = Useless::default();
+        let got = resolve(
+            "Meera Raghunathan",
+            &[],
+            "Meera plays the veena",
+            Kind::Person,
+            None,
+            store.memory.index(),
+            &matcher,
+        )
+        .await
+        .expect("resolve");
+        assert!(
+            !matches!(&got, Resolution::Existing { path } if *path == tombstone),
+            "a write must never land on a tombstone: {got:?}"
+        );
+    }
+
+    /// One fact, filed against whatever surface form the caller names.
+    struct OneFact {
+        surface: &'static str,
+        attribute: &'static str,
+        text: &'static str,
+    }
+
+    #[async_trait]
+    impl Extractor for OneFact {
+        async fn extract(&self, _e: &str, text: &str) -> Result<Vec<Candidate>, ConsolidateError> {
+            if !text.contains(self.text) {
+                return Ok(Vec::new());
+            }
+            Ok(vec![Candidate {
+                surface: self.surface.to_owned(),
+                kind: Kind::Person,
+                heading: self.attribute.to_owned(),
+                attribute: self.attribute.to_owned(),
+                text: self.text.to_owned(),
+                days_ago: None,
+                valid_from: None,
+                origin: Origin::Stated,
+                tags: vec![],
+                aliases: vec![],
+                value: None,
+                relation: None,
+            }])
+        }
+    }
+
+    /// B-55. Both cards settled before the first turn, so the assistant's own card is reachable.
+    ///
+    /// The claim-level gate is untouched: an inferred claim on either card is still a candidate and
+    /// still never prompt-eligible, which is §10.6 and is why this changes nothing about what the
+    /// model can quote.
+    #[tokio::test]
+    async fn the_seeded_cards_are_settled_rather_than_drafts() {
+        let store = Store::open("seeded-stable").await;
+        for path in [OWNER, ASSISTANT] {
+            assert_eq!(
+                store.card(path).await.front.status,
+                Status::Stable,
+                "{path} is not a guess about whether it exists"
+            );
+        }
     }
 }

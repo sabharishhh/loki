@@ -361,7 +361,11 @@ impl Loop {
             // seconds finding nothing (B-47).
             let nothing_to_read =
                 recalled.is_empty() || runtime::missed_the_subject(&message, &texts);
-            let floor = nothing_to_read && runtime::should_escalate(&message, best);
+            // An instruction to search is not a question the score can answer. "Search my memory
+            // and list everything in it" is not satisfied by a good keyword hit, and it is not
+            // satisfied by the working set either, so it escalates whatever lane 1 returned. B-56.
+            let floor = runtime::asks_to_search(&message)
+                || (nothing_to_read && runtime::should_escalate(&message, best));
             if floor {
                 self.escalate(task, &memory, &message, today, cancel.clone())
                     .await;
