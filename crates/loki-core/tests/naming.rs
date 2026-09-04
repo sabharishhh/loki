@@ -23,7 +23,7 @@ use loki_core::memory::consolidate::{
     Candidate, ConsolidateError, Extractor, RelationTo, Unbounded,
 };
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::handle::Memory;
+use loki_core::memory::handle::{Memory, Speaker};
 use loki_core::memory::index::{Candidate as EntityCandidate, Index, Query};
 use loki_core::memory::knowledge::Knowledge;
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
@@ -159,7 +159,7 @@ impl Store {
         let turns: Vec<&str> = script.iter().map(|s| s.turn).collect();
         let extractor = Reads(script);
         for turn in turns {
-            memory.record("user", turn).await.expect("record");
+            memory.record(Speaker::User, turn).await.expect("record");
             memory
                 .close(&extractor, &FirstMatch, &Unbounded, today())
                 .await

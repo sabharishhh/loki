@@ -20,7 +20,7 @@ use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::temporal;
 use super::vocab::{BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
-use crate::memory::handle::{self, Memory};
+use crate::memory::handle::{self, Memory, Speaker};
 use crate::memory::runtime;
 use crate::ports::clock::Clock;
 use crate::ports::model::{Chunk, Message, ModelError, ModelProvider, StopReason, Usage};
@@ -325,7 +325,7 @@ impl Loop {
         let mut armed = false;
 
         if let Some(memory) = self.memory.clone() {
-            memory.record("user", &message).await?;
+            memory.record(Speaker::User, &message).await?;
             let recalled = memory.recall(&message, self.window_keeps, today)?;
             let best = recalled.first().map(|hit| hit.score.value());
             let texts: Vec<String> = recalled.iter().map(|hit| hit.text.clone()).collect();
@@ -417,7 +417,7 @@ impl Loop {
         if !outcome.text.is_empty() {
             self.turn.push(Message::assistant(&outcome.text));
             if let Some(memory) = self.memory.clone() {
-                memory.record("loki", &outcome.text).await?;
+                memory.record(Speaker::Loki, &outcome.text).await?;
             }
         }
 

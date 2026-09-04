@@ -19,7 +19,7 @@ use loki_core::core::vocab::{Cents, CostModel, Lane, Locality, ModelRole};
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::handle::Memory;
+use loki_core::memory::handle::{Memory, Speaker};
 use loki_core::memory::index::{Candidate as EntityCandidate, Index};
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 use loki_core::ports::model::{
@@ -247,7 +247,7 @@ impl Fixture {
             .expect("memory"),
         );
         memory
-            .record("user", "I did computer science")
+            .record(Speaker::User, "I did computer science")
             .await
             .expect("record");
         memory

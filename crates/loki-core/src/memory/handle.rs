@@ -30,6 +30,36 @@ use crate::core::temporal;
 /// this reads a log we already write.
 pub const RECALLED: &str = "**recalled**:";
 
+/// Who said a turn, and therefore whether consolidation may read it (§9.8, §9.12).
+///
+/// **A type rather than a string, because a string was already two strings.** The loop recorded
+/// `loki` and a test recorded `assistant` for the same speaker, so a rule keyed on either would
+/// have silently missed the other, which is exactly how the defect below stayed invisible.
+///
+/// `stated` means the user said it. A durable fact about the user comes from the user, so Loki's
+/// own words are the record's business and never extraction's. B-57.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speaker {
+    User,
+    Loki,
+}
+
+impl Speaker {
+    /// How the turn is written into the episode and the index.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Loki => "loki",
+        }
+    }
+
+    /// Whether consolidation is allowed to extract facts from this speaker's turn.
+    const fn is_a_source(self) -> bool {
+        matches!(self, Self::User)
+    }
+}
+
 /// How long a recall row counts towards promotion (§10.6, §26 question 17).
 ///
 /// A claim heavily used last year and untouched since should not still be promoting things. Ninety
@@ -192,23 +222,33 @@ impl Memory {
     ///
     /// # Errors
     /// Fails if the episode cannot be appended to or the index cannot be written.
-    pub async fn record(&self, speaker: &str, text: &str) -> Result<(), MemoryError> {
+    pub async fn record(&self, speaker: Speaker, text: &str) -> Result<(), MemoryError> {
         let ordinal = {
             let mut turns = self.turns.lock().unwrap_or_else(|e| e.into_inner());
             *turns += 1;
             *turns
         };
-        let line = format!("\n**{speaker}**: {text}\n");
+        let line = format!("\n**{}**: {text}\n", speaker.label());
         {
             let writer = self.bundle.writer().await;
             // Two writes, two jobs. The episode is the permanent dated record §11.3 imports from
             // and lane 2 reaches. The buffer is what has not been consolidated yet, and it is what
             // consolidation reads, so a second close in one session does not re-extract the first.
             writer.append(&self.episode, &line)?;
-            writer.append(bundle::CURRENT, &line)?;
+            // **Loki's own turn never enters the buffer.** §9.8 says recalled content is never
+            // re-extracted, and the marker covered the injected block and not the answer written
+            // out of it. Measured: a turn recalled seven facts, Loki listed them, and the next
+            // close filed the paraphrase as fresh claims, one of which was false. Structural
+            // rather than a filter, because the buffer is the extraction input and what is not
+            // written cannot be parsed wrong. B-57.
+            if speaker.is_a_source() {
+                writer.append(bundle::CURRENT, &line)?;
+            }
         }
+        // The index still gets it. In-session recall reads the `turn` table rather than the
+        // buffer, so what Loki said this session stays findable.
         self.index
-            .record_turn(&self.session, ordinal, speaker, text)?;
+            .record_turn(&self.session, ordinal, speaker.label(), text)?;
         Ok(())
     }
 

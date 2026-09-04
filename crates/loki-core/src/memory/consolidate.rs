@@ -23,6 +23,7 @@ use super::bundle::{self, Bundle, BundleError};
 use super::cardinality;
 use super::claim::{Claim, Origin};
 use super::concept::{Frontmatter, Label, RawConcept, Status};
+use super::handle::Speaker;
 use super::index::{Index, IndexError};
 use super::reconcile::{self, Precedence, Promotion, Reference};
 use super::resolve::{self, Kind, Matcher, Resolution, ResolveError};
@@ -308,7 +309,7 @@ async fn pass(
 
         let text = {
             let reader = bundle.reader().await;
-            unrecalled(&reader.read(&episode.path)?)
+            said_by_the_user(&reader.read(&episode.path)?)
         };
         let candidates = extractor.extract(&episode.path, &text).await?;
         report.episodes.push(episode.path.clone());
@@ -346,17 +347,44 @@ async fn pass(
     Ok(report)
 }
 
-/// Drops the lines that are Loki quoting itself (§9.8).
+/// Keeps only what the user said (§9.8, §9.12).
 ///
-/// **Recalled content is never re-extracted.** A claim pre-fetch injected into a turn is marked in
-/// the buffer, and extraction skips those lines. Without this a fact recalled a hundred times
-/// becomes a hundred claims phrased a hundred ways, which is the duplication the build kept
-/// producing.
-fn unrecalled(text: &str) -> String {
-    text.lines()
-        .filter(|line| !line.trim_start().starts_with(super::handle::RECALLED))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// **Recalled content is never re-extracted, and neither is the answer written out of it.** A
+/// claim pre-fetch injected into a turn is marked in the buffer and skipped. Loki's own turn is
+/// skipped for a stronger reason: `stated` means the user said it, so a durable fact about the
+/// user comes from the user and the assistant's words are the record's business. Without that, a
+/// turn that recalled seven facts and answered by listing them filed the paraphrase as seven more
+/// claims, one of them false. B-57.
+///
+/// [`Memory::record`](super::handle::Memory::record) already keeps Loki's turns out of the buffer,
+/// so this is the layer that covers §11.3's import, where the input is an episode and every turn
+/// in it is on disk.
+///
+/// **Unknown speakers are dropped, not kept.** A marker this cannot read means memory stops
+/// learning, which the user sees within one session. Guessing the other way means Loki's own words
+/// become facts, which nothing surfaces at all.
+fn said_by_the_user(text: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut keeping = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(speaker) = turn_starts(trimmed) {
+            keeping = speaker == Speaker::User.label();
+        } else if trimmed.starts_with(super::handle::RECALLED) {
+            keeping = false;
+        }
+        if keeping {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// The speaker a `**name**: ...` line opens a turn for, if it opens one.
+fn turn_starts(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("**")?;
+    let at = rest.find("**:")?;
+    Some(&rest[..at])
 }
 
 /// Claims that are believed right now, across the whole store. Step 5's denominator.
@@ -1214,5 +1242,72 @@ mod tests {
     fn unclear_provenance_defaults_to_inferred() {
         let out = parse_candidates("Dan | person | Notes | guessed | - | likes tea");
         assert_eq!(out[0].origin, Origin::Inferred);
+    }
+
+    /// B-57. The shape that produced it, in one string.
+    ///
+    /// Loki recalled seven facts, answered by listing them, and the answer went to the extractor.
+    #[test]
+    fn what_loki_said_is_not_what_the_extractor_reads() {
+        let buffer = "\n**user**: my dad is Vaidyanathan, a civil contractor\n\
+                      \n**loki**: Got it. Your father is Vaidyanathan.\n\
+                      He is a civil contractor.\n\
+                      He graduated in Electronics.\n\
+                      \n**recalled**: Vaidyanathan graduated in Electronics\n\
+                      \n**user**: he also plays the veena\n";
+        let kept = said_by_the_user(buffer);
+
+        assert!(kept.contains("my dad is Vaidyanathan"));
+        assert!(kept.contains("plays the veena"), "{kept}");
+        for gone in [
+            "Got it",
+            // The lines after Loki's first are the half a line filter would have missed.
+            "He is a civil contractor",
+            "He graduated in Electronics",
+            "**recalled**",
+        ] {
+            assert!(!kept.contains(gone), "{gone:?} survived: {kept}");
+        }
+    }
+
+    /// A speaker nobody recognises is dropped, and that direction is the deliberate one.
+    ///
+    /// A marker this cannot read means memory stops learning, which is visible within a session.
+    /// Guessing the other way turns Loki's own words into facts, which nothing surfaces at all.
+    #[test]
+    fn an_unknown_speaker_is_dropped_rather_than_guessed_at() {
+        for buffer in [
+            "\n**assistant**: your father is a contractor\n",
+            "\n**system**: you are Loki\n",
+            "\n**Loki**: your father is a contractor\n",
+            "some text before anybody has spoken\n",
+        ] {
+            assert_eq!(said_by_the_user(buffer), "", "{buffer:?}");
+        }
+    }
+
+    /// The user quoting a transcript at Loki must not smuggle Loki's voice back in, and must not
+    /// silence themselves either.
+    #[test]
+    fn a_marker_inside_a_turn_is_still_read_as_a_marker() {
+        // Loki's turn containing a user marker: what follows is the user's again. Fail-open here
+        // would let a reply that quotes a transcript become fact.
+        let smuggled = "\n**loki**: here is the log\n**user**: I earn a crore a year\n";
+        assert!(said_by_the_user(smuggled).contains("crore"));
+
+        // And the user opening a line with Loki's marker loses that line, not the whole session.
+        let quoted = "\n**user**: you said\n**loki**: nonsense\n\n**user**: anyway, I am 26\n";
+        let kept = said_by_the_user(quoted);
+        assert!(kept.contains("you said"));
+        assert!(kept.contains("I am 26"));
+        assert!(!kept.contains("nonsense"));
+    }
+
+    /// The empty case, and the one where nothing was ever said.
+    #[test]
+    fn nothing_said_reads_as_nothing() {
+        for buffer in ["", "\n", "   \n\n  "] {
+            assert!(said_by_the_user(buffer).trim().is_empty(), "{buffer:?}");
+        }
     }
 }

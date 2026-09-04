@@ -20,7 +20,7 @@ use loki_core::memory::consolidate::{
     Candidate, ConsolidateError, Extractor, Report, Unbounded, clear_buffer,
 };
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::handle::Memory;
+use loki_core::memory::handle::{Memory, Speaker};
 use loki_core::memory::index::{Candidate as EntityCandidate, Index, Query};
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 
@@ -232,11 +232,17 @@ impl App {
     }
 
     async fn say(&self, text: &str) {
-        self.memory.record("user", text).await.expect("record");
+        self.memory
+            .record(Speaker::User, text)
+            .await
+            .expect("record");
     }
 
     async fn reply(&self, text: &str) {
-        self.memory.record("assistant", text).await.expect("record");
+        self.memory
+            .record(Speaker::Loki, text)
+            .await
+            .expect("record");
     }
 
     /// What the app does when the window closes.
@@ -316,6 +322,78 @@ async fn a_first_conversation_leaves_three_usable_facts() {
     assert!(
         mentions(&app.recall("short reply preference"), "short replies"),
         "the preference is its own entity, and porter stemming matches reply against replies"
+    );
+}
+
+/// B-57, from Sabharish's store. The loop that turned recall back into fact.
+///
+/// A turn recalled seven facts about one person, Loki answered by listing them, its answer went
+/// into the buffer like any other turn, and the next close filed the paraphrase as fresh claims.
+/// One fact then sat twice under one heading, once stated from the user's sentence and once
+/// inferred from Loki's summary, and one re-extracted claim was false in a way no user sentence
+/// supported.
+#[tokio::test]
+async fn what_loki_says_back_does_not_become_a_second_fact() {
+    let app = App::open("no-echo").await;
+    app.say("hi, my name is Sabharish").await;
+    // The reply repeats the fact in Loki's own words, which is what an assistant does.
+    app.reply("Got it. Your name is Sabharish, and I'm Sabharish's assistant.")
+        .await;
+    app.close().await;
+
+    let handed = app.reader.inputs().concat();
+    assert!(
+        !handed.contains("I'm Sabharish's assistant"),
+        "the extractor was handed Loki's own words: {handed}"
+    );
+    assert!(
+        handed.contains("my name is Sabharish"),
+        "and it still needs the user's: {handed}"
+    );
+    assert_eq!(
+        app.facts_about("Sabharish").await.len(),
+        1,
+        "one sentence from the user is one fact, however Loki phrases it back"
+    );
+}
+
+/// The other half: what Loki said is still on the permanent record and still findable.
+///
+/// The episode is what §11.3 imports and what lane 2 reads, and in-session recall reads the index
+/// rather than the buffer, so dropping the reply from extraction must cost neither.
+#[tokio::test]
+async fn what_loki_says_is_still_kept_and_still_findable() {
+    let app = App::open("echo-kept").await;
+    app.say("my name is Sabharish").await;
+    app.reply("Noted. I have written down that you play the veena.")
+        .await;
+    // One more turn, so Loki's is behind the live window and eligible at all: a turn still in the
+    // prompt is never retrieved, because re-sending it is waste.
+    app.say("anyway, back to work").await;
+
+    let episode = {
+        let reader = app.memory.bundle().reader().await;
+        reader
+            .read(&format!("episodes/{}.md", today()))
+            .expect("episode")
+    };
+    assert!(
+        episode.contains("you play the veena"),
+        "the episode is the permanent record: {episode}"
+    );
+
+    // The real in-session path, which spans the live session. `App::recall` is the prefetch-only
+    // helper and would not see a live turn whether or not this worked.
+    let live: Vec<String> = app
+        .memory
+        .recall("veena", 0, today())
+        .expect("recall")
+        .into_iter()
+        .map(|hit| hit.text)
+        .collect();
+    assert!(
+        mentions(&live, "veena"),
+        "in-session recall reads the index, not the buffer: {live:?}"
     );
 }
 

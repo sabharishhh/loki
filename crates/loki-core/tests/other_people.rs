@@ -20,7 +20,7 @@ use loki_core::core::vocab::Locality;
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::handle::Memory;
+use loki_core::memory::handle::{Memory, Speaker};
 use loki_core::memory::index::{Candidate as EntityCandidate, Index, Query};
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 
@@ -217,7 +217,10 @@ impl Store {
     }
 
     async fn say(&self, text: &str) {
-        self.memory.record("user", text).await.expect("record");
+        self.memory
+            .record(Speaker::User, text)
+            .await
+            .expect("record");
     }
 
     async fn close(&self) {

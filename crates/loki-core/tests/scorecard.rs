@@ -27,7 +27,7 @@ use loki_core::memory::consolidate::{
     Candidate, ConsolidateError, Extractor, RelationTo, Unbounded,
 };
 use loki_core::memory::gate::TierScope;
-use loki_core::memory::handle::Memory;
+use loki_core::memory::handle::{Memory, Speaker};
 use loki_core::memory::index::{Candidate as EntityCandidate, Index, Query};
 use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 
@@ -231,7 +231,10 @@ impl Run {
 
         // One close per turn, which is what a person opening and shutting the app all day makes.
         for turn in &case.turns {
-            memory.record("user", turn.said).await.expect("record");
+            memory
+                .record(Speaker::User, turn.said)
+                .await
+                .expect("record");
             let staged = Staged(Mutex::new(vec![Turn {
                 said: turn.said,
                 facts: turn.facts.iter().map(clone_fact).collect(),

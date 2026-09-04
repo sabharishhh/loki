@@ -245,7 +245,11 @@ mod cardinality {
         let store = Store::open(label).await;
         let extractor = Says(staged.to_vec());
         for (said, _, _) in staged {
-            store.memory.record("user", said).await.expect("record");
+            store
+                .memory
+                .record(loki_core::memory::handle::Speaker::User, said)
+                .await
+                .expect("record");
             store
                 .memory
                 .close(&extractor, &FirstMatch, &Unbounded, today())
@@ -356,7 +360,11 @@ mod names {
         let said: Vec<&str> = facts.iter().map(|f| f.trigger).collect();
         let extractor = Says(facts);
         for line in said {
-            store.memory.record("user", line).await.expect("record");
+            store
+                .memory
+                .record(loki_core::memory::handle::Speaker::User, line)
+                .await
+                .expect("record");
             store
                 .memory
                 .close(&extractor, &FirstMatch, &Unbounded, today())
@@ -756,7 +764,10 @@ mod merging {
 
         store
             .memory
-            .record("user", "Meera is on the design team")
+            .record(
+                loki_core::memory::handle::Speaker::User,
+                "Meera is on the design team",
+            )
             .await
             .expect("record");
         store
@@ -772,7 +783,10 @@ mod merging {
 
         store
             .memory
-            .record("user", "the other Meera runs infra")
+            .record(
+                loki_core::memory::handle::Speaker::User,
+                "the other Meera runs infra",
+            )
             .await
             .expect("record");
         store
@@ -809,7 +823,10 @@ mod merging {
 
         store
             .memory
-            .record("user", "Apple announced a new laptop")
+            .record(
+                loki_core::memory::handle::Speaker::User,
+                "Apple announced a new laptop",
+            )
             .await
             .expect("record");
         store
@@ -825,7 +842,10 @@ mod merging {
 
         store
             .memory
-            .record("user", "I am allergic to apple")
+            .record(
+                loki_core::memory::handle::Speaker::User,
+                "I am allergic to apple",
+            )
             .await
             .expect("record");
         store
@@ -1389,7 +1409,7 @@ mod the_two_fixed_cards {
         let matcher = Useless::default();
         store
             .memory
-            .record("user", "I am Sabharish")
+            .record(loki_core::memory::handle::Speaker::User, "I am Sabharish")
             .await
             .expect("record");
         store
@@ -1456,7 +1476,11 @@ mod the_two_fixed_cards {
             ("Meera", "role", "Meera runs infra"),
             ("Meera Raghunathan", "city", "Meera lives in Kochi"),
         ] {
-            store.memory.record("user", text).await.expect("record");
+            store
+                .memory
+                .record(loki_core::memory::handle::Speaker::User, text)
+                .await
+                .expect("record");
             store
                 .memory
                 .close(
