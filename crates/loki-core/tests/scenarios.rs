@@ -689,7 +689,8 @@ mod lane_two {
     use super::{App, today};
     use async_trait::async_trait;
     use loki_core::memory::index::{Query, Visibility};
-    use loki_core::memory::runtime::{Navigator, Op, RuntimeError, should_escalate};
+    use loki_core::memory::runtime::{Ending, Navigator, Op, RuntimeError, should_escalate};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Walks §10.8's own route: start from the catalog, narrow with a ranked search, stop.
     struct Route {
@@ -721,7 +722,23 @@ mod lane_two {
         }
     }
 
-    /// A navigator that never stops, for checking the budget actually bounds the loop.
+    /// A navigator that never stops and never repeats a step, for checking the budget bounds it.
+    ///
+    /// It has to vary: §10.5's stagnation check would otherwise stop it long before eight, and the
+    /// test would silently stop being about the budget.
+    struct Wandering(AtomicUsize);
+
+    #[async_trait]
+    impl Navigator for Wandering {
+        async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+            let step = self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(Op::Ls {
+                dir: format!("nowhere-{step}"),
+            }))
+        }
+    }
+
+    /// A navigator that never stops and re-runs one step forever.
     struct Endless;
 
     #[async_trait]
@@ -729,6 +746,45 @@ mod lane_two {
         async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
             Ok(Some(Op::Ls {
                 dir: "nowhere".to_owned(),
+            }))
+        }
+    }
+
+    /// A navigator stuck in a two-step cycle. No step ever follows itself.
+    struct Alternating(AtomicUsize);
+
+    #[async_trait]
+    impl Navigator for Alternating {
+        async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+            let step = self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(Op::Ls {
+                dir: if step.is_multiple_of(2) {
+                    "here"
+                } else {
+                    "there"
+                }
+                .to_owned(),
+            }))
+        }
+    }
+
+    /// Finds something on its first step, then gets stuck on a dead end.
+    struct HitThenStuck {
+        query: String,
+        step: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Navigator for HitThenStuck {
+        async fn next(&self, _q: &str, _seen: &[String]) -> Result<Option<Op>, RuntimeError> {
+            Ok(Some(if self.step.fetch_add(1, Ordering::Relaxed) == 0 {
+                Op::Search {
+                    query: self.query.clone(),
+                }
+            } else {
+                Op::Ls {
+                    dir: "nowhere".to_owned(),
+                }
             }))
         }
     }
@@ -832,16 +888,99 @@ mod lane_two {
 
         let found = app
             .memory
-            .search_deeply("anything", &Endless, today())
+            .search_deeply("anything", &Wandering(AtomicUsize::new(0)), today())
             .await
             .expect("lane 2");
 
         assert_eq!(found.searched, 8, "§10.5's hard budget of eight");
-        assert!(
-            found.out_of_budget,
+        assert_eq!(
+            found.ending,
+            Ending::OutOfBudget,
             "and it says so rather than looking empty"
         );
         assert!(found.render().contains("ran out of searches"));
+    }
+
+    /// §10.5: a budget bounds a runaway and notices nothing about a loop going nowhere.
+    #[tokio::test]
+    async fn one_step_repeated_ends_the_search_long_before_the_budget() {
+        let app = App::open("stagnation").await;
+        app.say("my name is Sabharish").await;
+        app.close().await;
+
+        let found = app
+            .memory
+            .search_deeply("anything", &Endless, today())
+            .await
+            .expect("lane 2");
+
+        assert_eq!(found.searched, 2, "the second identical step is the signal");
+        assert_eq!(found.ending, Ending::Stalled);
+        assert!(
+            !found.render().contains("ran out of searches"),
+            "a stuck loop did not spend a budget: {}",
+            found.render()
+        );
+        for text in [found.render(), found.brief()] {
+            assert!(
+                !text.contains("never"),
+                "and it is still not the user's fault: {text}"
+            );
+        }
+    }
+
+    /// Two steps in a cycle are still going nowhere, and are still not two identical signatures.
+    ///
+    /// The check is deliberately last-step-only. Holding every signature ever seen would stop this
+    /// at step three, and would also stop an honest search that revisits a file it read earlier.
+    #[tokio::test]
+    async fn alternating_between_two_steps_spends_the_budget_rather_than_stalling() {
+        let app = App::open("alternating").await;
+        app.say("my name is Sabharish").await;
+        app.close().await;
+
+        let found = app
+            .memory
+            .search_deeply("anything", &Alternating(AtomicUsize::new(0)), today())
+            .await
+            .expect("lane 2");
+
+        assert_eq!(found.searched, 8);
+        assert_eq!(found.ending, Ending::OutOfBudget);
+    }
+
+    /// Stopping early must not throw away what the search already had.
+    #[tokio::test]
+    async fn a_search_that_stalls_still_carries_what_it_found() {
+        let app = App::open("stall-with-hit").await;
+        app.say("I did computer science").await;
+        app.close().await;
+
+        let found = app
+            .memory
+            .search_deeply(
+                "computer science",
+                &HitThenStuck {
+                    query: "computer science".to_owned(),
+                    step: AtomicUsize::new(0),
+                },
+                today(),
+            )
+            .await
+            .expect("lane 2");
+
+        assert_eq!(found.ending, Ending::Stalled);
+        assert_eq!(found.searched, 3, "the hit, then the dead end twice");
+        assert!(
+            found.render().contains("computer science"),
+            "the hit survives the early stop: {}",
+            found.render()
+        );
+        assert!(
+            !found.render().contains("stopped getting anywhere"),
+            "and how it ended is not the answer when it has one: {}",
+            found.render()
+        );
     }
 
     /// §10.6: a candidate is searchable on lane 2 and never prompt-eligible.

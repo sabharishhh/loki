@@ -36,6 +36,8 @@ struct Scripted {
     answers: Mutex<Vec<String>>,
     steps: Mutex<Vec<String>>,
     requests: Mutex<Vec<Request>>,
+    /// When set, every navigator call fails. The store is then unreadable, not empty.
+    navigator_fails: bool,
 }
 
 impl Scripted {
@@ -44,6 +46,16 @@ impl Scripted {
             answers: Mutex::new(answers.iter().rev().map(|s| (*s).to_owned()).collect()),
             steps: Mutex::new(steps.iter().rev().map(|s| (*s).to_owned()).collect()),
             requests: Mutex::new(Vec::new()),
+            navigator_fails: false,
+        })
+    }
+
+    fn breaking_the_navigator(answers: &[&str]) -> Arc<Self> {
+        Arc::new(Self {
+            answers: Mutex::new(answers.iter().rev().map(|s| (*s).to_owned()).collect()),
+            steps: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
+            navigator_fails: true,
         })
     }
 
@@ -93,6 +105,13 @@ impl ModelProvider for Scripted {
         _cancel: CancellationToken,
     ) -> Result<ChunkStream, ModelError> {
         let reply = match req.role {
+            ModelRole::Utility if self.navigator_fails => {
+                self.requests.lock().expect("lock").push(req);
+                return Err(ModelError::Upstream {
+                    status: 503,
+                    body: "the index is unavailable".to_owned(),
+                });
+            }
             ModelRole::Utility => take(&self.steps, "DONE"),
             ModelRole::Primary => take(&self.answers, "Noted."),
         };
@@ -205,6 +224,10 @@ struct Fixture {
 
 impl Fixture {
     async fn open(label: &str, answers: &[&str], steps: &[&str]) -> Self {
+        Self::with(label, Scripted::new(answers, steps)).await
+    }
+
+    async fn with(label: &str, provider: Arc<Scripted>) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "loki-escalation-{}-{label}-{:?}",
             std::process::id(),
@@ -232,7 +255,6 @@ impl Fixture {
             .await
             .expect("close");
 
-        let provider = Scripted::new(answers, steps);
         let tape = Arc::new(Tape::default());
         let events = Arc::new(Collector::default());
         let mut core = Loop::new(
@@ -431,6 +453,38 @@ async fn a_miss_reaches_the_model_as_a_miss() {
     assert!(
         prompt.contains("Never say the user did not tell you"),
         "a miss must not read as an absence: {prompt}"
+    );
+}
+
+/// Failure point 91. Found, empty and could-not-run are three answers, and only two reached the
+/// model: a search the store refused was reported to the event stream and nowhere else, so the
+/// model wrote its answer as though memory had been read and had held nothing.
+#[tokio::test]
+async fn a_search_that_could_not_run_reaches_the_model_as_a_failure() {
+    let mut app = Fixture::with(
+        "unreadable",
+        Scripted::breaking_the_navigator(&["I could not check just now."]),
+    )
+    .await;
+    app.ask("what did I tell you about Meera earlier").await;
+
+    assert!(
+        app.events
+            .all()
+            .iter()
+            .any(|e| matches!(e, Event::Blocked { .. })),
+        "the failure is still on the event stream"
+    );
+
+    let prompt = prompt_text(&app.provider.requests(ModelRole::Primary)[0]);
+    assert!(prompt.contains("could not run"), "{prompt}");
+    assert!(
+        prompt.contains("Never say the user did not tell you"),
+        "a store that refused must not read as an absence: {prompt}"
+    );
+    assert!(
+        !prompt.contains("found nothing"),
+        "and it is not a miss either, because nothing was searched: {prompt}"
     );
 }
 

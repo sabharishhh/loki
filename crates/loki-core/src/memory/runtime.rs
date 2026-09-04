@@ -16,6 +16,9 @@
 //! hit would otherwise silence escalation. The caller may therefore also let the model ask. See
 //! D-062.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use async_trait::async_trait;
 use jiff::civil::Date;
 use tokio_util::sync::CancellationToken;
@@ -399,17 +402,48 @@ pub trait Navigator: Send + Sync {
     async fn next(&self, question: &str, seen: &[String]) -> Result<Option<Op>, RuntimeError>;
 }
 
+/// Why a lane 2 search stopped (§10.8).
+///
+/// Found, empty and could-not-run are three answers rather than two, and a budget that drained
+/// and a loop that went nowhere stopped for different reasons. Collapsing any of them into
+/// "found nothing" is the silence-as-fact §12.4 forbids.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Ending {
+    /// The navigator stopped on its own.
+    #[default]
+    Stopped,
+    /// §10.5's budget of eight went.
+    OutOfBudget,
+    /// Two identical progress signatures in a row (§10.5).
+    Stalled,
+    /// The store could not be read, so no search happened.
+    Failed,
+}
+
 /// What a lane 2 search came back with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Found {
     pub lines: Vec<String>,
     /// How much of §10.5's budget went.
     pub searched: usize,
-    /// True when the budget ran out with nothing found, as opposed to finding nothing.
-    pub out_of_budget: bool,
+    /// Why the loop stopped. Only changes what is said when `lines` is empty.
+    pub ending: Ending,
 }
 
 impl Found {
+    /// The outcome of a search that could not run at all (§10.8).
+    ///
+    /// A store that refused to be read is not a store that holds nothing, and the caller has to
+    /// be able to say which without inventing the distinction itself.
+    #[must_use]
+    pub fn failed() -> Self {
+        Self {
+            lines: Vec::new(),
+            searched: 0,
+            ending: Ending::Failed,
+        }
+    }
+
     /// What the turn carries, or why it carries nothing (§10.8).
     ///
     /// **Honest exhaustion, applied inward.** §12.4 says a page the ladder could not read is
@@ -421,14 +455,25 @@ impl Found {
         if !self.lines.is_empty() {
             return format!("I searched my memory and found:\n{}", self.lines.join("\n"));
         }
-        if self.out_of_budget {
-            return "I searched my memory and ran out of searches before finding it. \
-                    That is not the same as it not being there."
-                .to_owned();
+        match self.ending {
+            Ending::Stopped => {
+                "I searched my memory and did not find it. That does not mean you never said it, \
+                 only that I could not find it."
+            }
+            Ending::OutOfBudget => {
+                "I searched my memory and ran out of searches before finding it. That is not the \
+                 same as it not being there."
+            }
+            Ending::Stalled => {
+                "I searched my memory and the search stopped getting anywhere before it found it. \
+                 That is not the same as it not being there."
+            }
+            Ending::Failed => {
+                "I could not read my memory just now, so I have not searched it. That is not the \
+                 same as it not being there."
+            }
         }
-        "I searched my memory and did not find it. That does not mean you never said it, \
-         only that I could not find it."
-            .to_owned()
+        .to_owned()
     }
 
     /// The same three outcomes, addressed to the model rather than to the user.
@@ -444,16 +489,23 @@ impl Found {
                 self.lines.join("\n")
             );
         }
-        if self.out_of_budget {
-            return format!(
-                "A deeper search of memory spent all {SEARCH_BUDGET} of its searches without \
-                 finding anything. Say that you could not find it. Never say the user did not \
-                 tell you."
-            );
+        if self.ending == Ending::Failed {
+            return "A deeper search of memory could not run, because the store could not be \
+                    read. Say that you could not check just now. Never say the user did not tell \
+                    you."
+                .to_owned();
         }
-        "A deeper search of memory found nothing. Say that you could not find it. Never say the \
-         user did not tell you."
-            .to_owned()
+        let how = match self.ending {
+            Ending::OutOfBudget => {
+                format!("spent all {SEARCH_BUDGET} of its searches without finding anything")
+            }
+            Ending::Stalled => "stopped getting anywhere and found nothing".to_owned(),
+            Ending::Stopped | Ending::Failed => "found nothing".to_owned(),
+        };
+        format!(
+            "A deeper search of memory {how}. Say that you could not find it. Never say the user \
+             did not tell you."
+        )
     }
 }
 
@@ -475,6 +527,8 @@ pub async fn search(
     let mut seen: Vec<String> = Vec::new();
     let mut found: Vec<String> = Vec::new();
     let mut used = 0usize;
+    let mut previous: Option<u64> = None;
+    let mut ending = Ending::Stopped;
 
     while used < SEARCH_BUDGET {
         let Some(op) = navigator.next(question, &seen).await? else {
@@ -484,7 +538,9 @@ pub async fn search(
         // The step is recorded beside its result, not just the result. A navigator that cannot
         // see what it already ran repeats it, and repeating a step costs one of eight.
         let step = op.line();
-        match runtime.run(&op, today).await {
+        let outcome = runtime.run(&op, today).await;
+        let now = signature(&step, &outcome);
+        match outcome {
             Ok(output) if output.trim().is_empty() => seen.push(format!("{step}\nnothing there")),
             Ok(output) => {
                 let output = clip(&output);
@@ -496,14 +552,45 @@ pub async fn search(
             // because aborting the turn over a probe is worse than spending one of eight.
             Err(why) => seen.push(format!("{step}\nthat did not work: {why}")),
         }
+        // §10.5: the budget bounds a runaway, and notices nothing about a loop going nowhere.
+        // Eight searches spent re-running one grep cost the same as eight spent narrowing, and
+        // only one of those is a search.
+        if previous == Some(now) {
+            ending = Ending::Stalled;
+            break;
+        }
+        previous = Some(now);
     }
 
-    let out_of_budget = used >= SEARCH_BUDGET && found.is_empty();
+    // A stall is the more specific reason, so a loop that repeats itself on the last step of the
+    // budget is reported as stuck rather than as thorough.
+    if ending == Ending::Stopped && used >= SEARCH_BUDGET && found.is_empty() {
+        ending = Ending::OutOfBudget;
+    }
     Ok(Found {
         lines: found,
         searched: used,
-        out_of_budget,
+        ending,
     })
+}
+
+/// One step's progress signature: the operation, how it ended, and how much it produced (§10.5).
+///
+/// **Over the raw byte count, never the rendered slice.** [`clip`] truncates, so a step producing
+/// steadily more output looks stationary through the slice, and a genuinely stuck loop looks alive
+/// the moment a byte of formatting changes. An error carries no output: the same operation failing
+/// twice is no progress however the message is worded.
+fn signature(step: &str, outcome: &Result<String, RuntimeError>) -> u64 {
+    let (status, bytes) = match outcome {
+        Ok(output) if output.trim().is_empty() => (0u8, 0),
+        Ok(output) => (1u8, output.len()),
+        Err(_) => (2u8, 0),
+    };
+    let mut hasher = DefaultHasher::new();
+    step.hash(&mut hasher);
+    status.hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Lines one observation may carry into a prompt.
@@ -798,7 +885,7 @@ mod tests {
         );
 
         let spent = Found {
-            out_of_budget: true,
+            ending: Ending::OutOfBudget,
             searched: SEARCH_BUDGET,
             ..Found::default()
         };
@@ -807,6 +894,66 @@ mod tests {
             spent.render(),
             empty.render(),
             "running out and finding nothing are different answers"
+        );
+
+        // §10.8's third answer. A store that refused is not a store that holds nothing, and the
+        // model has to be told which before it writes a sentence about the user's memory.
+        let broken = Found::failed();
+        assert!(broken.render().contains("could not read my memory"));
+        assert!(broken.brief().contains("could not run"));
+        for other in [&empty, &spent] {
+            assert_ne!(broken.brief(), other.brief());
+        }
+        for text in [broken.render(), broken.brief()] {
+            assert!(
+                !text.contains("found nothing") && !text.contains("did not find it"),
+                "a search that never ran must not report a miss: {text}"
+            );
+        }
+    }
+
+    /// §10.5: the signature is over the raw byte count, never the slice that reaches the prompt.
+    ///
+    /// The interesting case is two outputs long enough to clip identically. Through the rendered
+    /// slice they are the same observation, so a task producing steadily more output would look
+    /// stationary and be cut off as stuck.
+    #[test]
+    fn a_growing_output_is_not_stagnation_even_when_the_slice_stops_growing() {
+        let step = "mem_grep pattern=x path=.";
+        let short = (0..OBSERVATION_LINES * 2)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let long = (0..OBSERVATION_LINES * 4)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            clip(&short),
+            clip(&long),
+            "the premise: both clip to the same slice"
+        );
+        assert_ne!(
+            signature(step, &Ok(short.clone())),
+            signature(step, &Ok(long)),
+            "so the signature must read the raw output, not the slice"
+        );
+
+        // And the same step producing the same bytes twice is stagnation, which is the point.
+        assert_eq!(
+            signature(step, &Ok(short.clone())),
+            signature(step, &Ok(short))
+        );
+
+        // Empty, non-empty and failed are three statuses, not two.
+        let failed = signature(step, &Err(RuntimeError::Navigate("no".to_owned())));
+        assert_ne!(failed, signature(step, &Ok(String::new())));
+        assert_ne!(
+            failed,
+            signature(
+                "mem_ls dir=.",
+                &Err(RuntimeError::Navigate("no".to_owned()))
+            )
         );
     }
 }

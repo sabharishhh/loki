@@ -514,12 +514,19 @@ impl Loop {
                 });
                 self.turn.set_search(found.brief());
             }
-            Err(why) => self.events.emit(&Event::Blocked {
-                reason: BlockReason::ProviderFailed {
-                    provider: self.provider.id().to_owned(),
-                    detail: why.to_string(),
-                },
-            }),
+            // §10.8: found, empty and could-not-run are three answers. Reporting the failure only
+            // to the event stream left the model answering as though the store held nothing, which
+            // is the silence-as-fact the section forbids, arriving through the code that
+            // implements it. Failure point 91.
+            Err(why) => {
+                self.events.emit(&Event::Blocked {
+                    reason: BlockReason::ProviderFailed {
+                        provider: self.provider.id().to_owned(),
+                        detail: why.to_string(),
+                    },
+                });
+                self.turn.set_search(runtime::Found::failed().brief());
+            }
         }
     }
 
