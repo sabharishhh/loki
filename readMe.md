@@ -41,7 +41,7 @@ rather than something enforced by code review. See `tests/egress.rs`.
 
 ## Setup
 
-Needs Rust 1.96 (pinned in `rust-toolchain.toml`) and Xcode 26.
+Needs Rust 1.98 (pinned in `rust-toolchain.toml`), Xcode 26, and `cmake` for the TLS build.
 
 ```bash
 make core     # build the Rust side
