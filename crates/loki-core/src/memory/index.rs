@@ -696,7 +696,8 @@ impl Index {
     /// Ranked claims for a query, best first.
     ///
     /// Ranking is §10.1: keyword match, recency, usage count, and link distance from what is
-    /// already in context.
+    /// already in context. **Every candidate is scored before anything is cut**, because the cap
+    /// is on what reaches the prompt and not on what the ranking may consider.
     ///
     /// # Errors
     /// Fails if the index cannot be read.
@@ -726,7 +727,7 @@ impl Index {
             }
         }
         let today = to_days(query.today);
-        let mut out = Vec::with_capacity(query.limit);
+        let mut out = Vec::with_capacity(candidates.len());
 
         let mut stmt = db
             .prepare(
@@ -791,9 +792,6 @@ impl Index {
                 valid_from: row.valid_from.map(from_days),
                 score,
             });
-            if out.len() == query.limit {
-                break;
-            }
         }
 
         if let Some(session) = query.session {

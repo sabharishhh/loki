@@ -100,20 +100,91 @@ okf_version: '0.2'
   confidence: low   source: inferred
 ";
 
+/// A card that answers to a word none of its claims contain (§10.1, D-070).
+const ASHOK: &str = r"---
+name: Ashok
+status: stable
+aliases:
+- appa
+generated:
+  by: loki/0.1
+  at: 2026-08-01
+tags:
+- person
+okf_version: '0.2'
+---
+
+## Work
+- Runs a civil contracting firm in Palakkad
+  learned: 2026-08-01   unlearned: null
+  confidence: high   source: stated
+  usage_count: 6
+";
+
+/// One long claim carrying the usage and recency §10.1 weighs, and a bm25 that buries it.
+///
+/// Long on purpose, and on one line because an indented continuation parses as metadata and is
+/// dropped: bm25 penalises a long document, so this sorts below every decoy on keyword strength
+/// and can only surface if the other three signals are allowed to speak.
+const NANDINI: &str = r"---
+name: Nandini
+status: stable
+generated:
+  by: loki/0.1
+  at: 2026-08-30
+tags:
+- person
+okf_version: '0.2'
+---
+
+## Delivery
+- Argued for most of an afternoon that the tooling rewrite, the migration and the documentation backlog should not all land together, and settled on holding every one of them back until the next release
+  learned: 2026-08-30   unlearned: null
+  confidence: high   source: stated
+  usage_count: 40
+";
+
+/// A short card mentioning the crowded word once, so bm25 puts it near the top and nothing else
+/// about it earns a place.
+fn decoy(name: &str) -> String {
+    format!(
+        "---
+name: {name}
+status: stable
+generated:
+  by: loki/0.1
+  at: 2025-01-05
+okf_version: '0.2'
+---
+
+## Misc
+- The release went out
+  learned: 2025-01-05   unlearned: null
+  confidence: low   source: inferred
+"
+    )
+}
+
 struct Store {
     bundle: Bundle,
     index: Index,
     dir: std::path::PathBuf,
 }
 
+/// A scratch directory unique to the test and the thread running it.
+fn scratch(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "loki-index-{}-{label}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 impl Store {
     async fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "loki-index-{}-{label}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch(label);
         let bundle = Bundle::open(&dir).await.expect("open bundle");
         {
             let writer = bundle.writer().await;
@@ -130,18 +201,45 @@ impl Store {
         store
     }
 
+    /// Six cards mentioning one word, so any realistic cap is smaller than the candidate set.
+    ///
+    /// The other two are the cases a cap can hide: one that bm25 buries and the signals lift, and
+    /// one that answers to a name rather than to its own words.
+    async fn crowded(label: &str) -> Self {
+        let dir = scratch(label);
+        let bundle = Bundle::open(&dir).await.expect("open bundle");
+        {
+            let writer = bundle.writer().await;
+            for name in ["one", "two", "three", "four", "five", "six"] {
+                writer
+                    .write(&format!("projects/{name}.md"), &decoy(name))
+                    .expect("decoy");
+            }
+            writer.write("people/nandini.md", NANDINI).expect("nandini");
+            writer.write("people/ashok.md", ASHOK).expect("ashok");
+        }
+        let index = Index::in_memory().expect("index");
+        let store = Self { bundle, index, dir };
+        store.sync().await;
+        store
+    }
+
     async fn sync(&self) -> loki_core::memory::index::Stats {
         let reader = self.bundle.reader().await;
         self.index.sync(&reader).expect("sync")
     }
 
     fn recall(&self, text: &str) -> Vec<loki_core::memory::index::Recalled> {
+        self.recall_at(text, 10)
+    }
+
+    fn recall_at(&self, text: &str, limit: usize) -> Vec<loki_core::memory::index::Recalled> {
         self.index
             .recall(&Query::prefetch(
                 text,
                 TierScope::normal(Locality::Cloud),
                 TODAY,
-                10,
+                limit,
             ))
             .expect("recall")
     }
@@ -558,4 +656,68 @@ fn an_index_from_an_older_schema_is_rebuilt_rather_than_queried() {
     assert!(hits.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B-58. The cap is on what reaches the prompt, never on what the ranking may consider.
+///
+/// Recall scored candidates in bm25 order and stopped at the cap, so the three signals that are
+/// not keyword match, 45 percent of the weight, could only reorder claims bm25 had already put in
+/// front. The four cases below are one family: a cut taken before the sort.
+#[tokio::test]
+async fn a_claim_bm25_buries_is_still_ranked_when_the_signals_lift_it() {
+    let store = Store::crowded("buried").await;
+
+    let hits = store.recall_at("the release", 3);
+
+    assert!(
+        hits.iter().any(|h| h.path == "people/nandini.md"),
+        "a heavily used, recent claim must reach a cap of three: {hits:?}"
+    );
+}
+
+/// The other door into §10.1's ranking, and the one a cap closed first.
+///
+/// The question names a card by an alias and also carries a word six other cards match, so the
+/// keyword hits fill the cap on their own. The margin here is deliberately wide: the case is about
+/// whether the alias door is reachable at all, not about where it lands.
+#[tokio::test]
+async fn a_name_match_is_reached_even_when_keyword_hits_fill_the_cap() {
+    let store = Store::crowded("alias").await;
+
+    let hits = store.recall_at("what did appa say about the release", 3);
+
+    assert!(
+        hits.iter().any(|h| h.path == "people/ashok.md"),
+        "a card answering to a query term must be ranked, not left past the cut: {hits:?}"
+    );
+}
+
+/// The invariant rather than an instance, so a future cut before the sort fails here too.
+#[tokio::test]
+async fn a_capped_result_is_the_head_of_an_uncapped_one() {
+    let store = Store::crowded("head").await;
+
+    let capped = store.recall_at("the release", 3);
+    let full = store.recall_at("the release", 50);
+
+    let rows = |hits: &[loki_core::memory::index::Recalled]| {
+        hits.iter()
+            .take(3)
+            .map(|h| (h.path.clone(), h.ordinal))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(&capped),
+        rows(&full),
+        "capping must cut the tail, not decide the head"
+    );
+}
+
+/// The other direction, because scoring everything is not a licence to return everything.
+#[tokio::test]
+async fn the_cap_still_holds_when_far_more_claims_match() {
+    let store = Store::crowded("cap").await;
+
+    assert_eq!(store.recall_at("the release", 2).len(), 2);
+    assert!(store.recall_at("the release", 50).len() > 2);
 }
