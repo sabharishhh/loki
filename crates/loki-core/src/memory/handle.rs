@@ -903,8 +903,12 @@ async fn seed_singletons(bundle: &Bundle, today: Date) -> Result<(), MemoryError
         // settled, and these two settled before the first turn: their existence is not a guess and
         // no evidence will ever arrive to confirm it. Left as drafts, the assistant's own card
         // could never reach a prompt, because nothing is ever *stated* about Loki and promotion
-        // needs a stated claim. B-55. The claim-level gate is untouched, so an inferred claim on
-        // either card is still a candidate and still out of the prompt.
+        // needs a stated claim. B-55.
+        //
+        // The consequence, since it is easy to read the wrong way: `visible_claims` filters on
+        // privacy, origin, belief and world time and on nothing about confidence, so an inferred
+        // claim on a stable card does reach the prompt. §10.6's candidate rule lives at the
+        // concept level, not the claim level.
         let mut front = Frontmatter::new(name, today);
         front.status = Status::Stable;
         front.role = role;

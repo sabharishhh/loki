@@ -1537,9 +1537,9 @@ mod the_two_fixed_cards {
 
     /// B-55. Both cards settled before the first turn, so the assistant's own card is reachable.
     ///
-    /// The claim-level gate is untouched: an inferred claim on either card is still a candidate and
-    /// still never prompt-eligible, which is §10.6 and is why this changes nothing about what the
-    /// model can quote.
+    /// Draft records that a concept has not settled, and these two settled before anything was
+    /// said. Left as drafts the assistant's card could never reach a prompt at all: promotion needs
+    /// a stated claim and nothing is ever stated about Loki.
     #[tokio::test]
     async fn the_seeded_cards_are_settled_rather_than_drafts() {
         let store = Store::open("seeded-stable").await;
