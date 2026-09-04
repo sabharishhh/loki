@@ -3,7 +3,7 @@
 //! A port exists only where something crosses to the outside world. If both sides of an
 //! interface are code we own and will never swap, it is a function call, not a port.
 //!
-//! Built so far: [`clock`], [`model`], [`tool`].
+//! Built so far: [`clock`], [`egress`], [`model`], [`tool`].
 //!
 //! Planned:
 //!
@@ -17,7 +17,9 @@
 //! | `SecretStore`    | macOS Keychain                                           |
 //! | `EventSink`      | plain renderer, trace renderer, ledger, undo journal     |
 //! | `Clock`          | the system clock, a fake clock for tests                 |
+//! | `Egress`         | one HTTP client, and a recording proxy in tests          |
 
 pub mod clock;
+pub mod egress;
 pub mod model;
 pub mod tool;

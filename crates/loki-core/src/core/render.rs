@@ -91,7 +91,10 @@ pub fn plain(event: &Event) -> Option<String> {
         | Event::ScopeClosed { .. }
         | Event::ToolProgress { .. }
         | Event::ToolReturned { .. }
-        | Event::ModelCall { .. } => return None,
+        | Event::ModelCall { .. }
+        // A request leaving is the trace's business and not the reader's. What the request was
+        // *for* already has its own plain line.
+        | Event::Egress { .. } => return None,
     })
 }
 
@@ -172,6 +175,9 @@ pub fn trace(event: &Event) -> String {
             "ModelCall {provider} role={role:?} locality={locality:?} in={tokens_in} out={tokens_out} cost={}c",
             cost.charge(*tokens_in, *tokens_out).get()
         ),
+        Event::Egress { host, path, bytes } => {
+            format!("Egress {host}{path} {bytes}b")
+        }
         Event::BudgetWarning { spent, ceiling } => {
             format!("BudgetWarning {}c of {}c", spent.get(), ceiling.get())
         }

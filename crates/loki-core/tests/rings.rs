@@ -123,3 +123,52 @@ fn the_check_can_actually_see_the_source() {
         "memory is Ring 0 and must be covered"
     );
 }
+
+/// §21.7: one egress point, and a test that says so.
+///
+/// **A promise nobody has exercised is a guess.** §9.11's locality tier is enforced by the type
+/// system on the paths the compiler can see and by nothing at all on a path somebody adds later.
+/// `adapters/egress.rs` emits an event before every send, so a second client anywhere in the tree
+/// is traffic the event stream cannot describe: failure point 88, which is the shape the Grok
+/// Build capture found in somebody else's product.
+///
+/// The list is deliberately literal rather than clever. A check nobody can read is a check
+/// somebody deletes.
+#[test]
+fn nothing_but_the_egress_adapter_builds_a_transport() {
+    const TRANSPORTS: [&str; 6] = [
+        "reqwest::Client",
+        "reqwest::get",
+        "reqwest::blocking",
+        "TcpStream::connect",
+        "hyper::Client",
+        "ureq::",
+    ];
+
+    let mut offences = Vec::new();
+    for module in ["core", "ports", "memory", "adapters"] {
+        for file in rust_files(&src(module)) {
+            // The one place allowed to. `ports/egress.rs` is deliberately not exempt: Ring 1
+            // naming a transport is the other half of the same rule.
+            if file.ends_with("adapters/egress.rs") {
+                continue;
+            }
+            for (number, line) in code_lines(&file) {
+                for transport in TRANSPORTS {
+                    if line.contains(transport) {
+                        offences.push(format!(
+                            "{}:{number} builds a transport: {line}",
+                            file.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "every outbound request leaves through ports::egress (§21.7):\n{}",
+        offences.join("\n")
+    );
+}

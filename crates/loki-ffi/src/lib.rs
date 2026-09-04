@@ -156,23 +156,6 @@ pub unsafe extern "C" fn loki_core_new(
     // SAFETY: contract above. Null is allowed and means "the provider's default".
     let model = unsafe { as_str(model) };
 
-    let provider: Arc<dyn ModelProvider> = match provider {
-        LokiProvider::Anthropic => match Anthropic::new(api_key) {
-            Ok(p) => Arc::new(match model {
-                Some(m) => p.with_model(m),
-                None => p,
-            }),
-            Err(_) => return std::ptr::null_mut(),
-        },
-        LokiProvider::Openai => match Openai::new(api_key) {
-            Ok(p) => Arc::new(match model {
-                Some(m) => p.with_model(m),
-                None => p,
-            }),
-            Err(_) => return std::ptr::null_mut(),
-        },
-    };
-
     let Ok(runtime) = Runtime::new() else {
         return std::ptr::null_mut();
     };
@@ -206,6 +189,31 @@ pub unsafe extern "C" fn loki_core_new(
         |path| loki_core::adapters::journal::Journal::open(&path, loki_core::VERSION),
     ));
     events = events.with(Arc::clone(&journal) as Arc<dyn EventSink>);
+
+    // The stream is finished before the transport is built, because §21.7's egress event has to
+    // reach the same sinks as everything else, the journal included. A second stream for the wire
+    // is a stream nobody reads.
+    let events: Arc<dyn EventSink> = Arc::new(events);
+    let Ok(http) = loki_core::adapters::egress::Http::new(Arc::clone(&events)) else {
+        return std::ptr::null_mut();
+    };
+    let egress: Arc<dyn loki_core::ports::egress::Egress> = Arc::new(http);
+    let provider: Arc<dyn ModelProvider> = match provider {
+        LokiProvider::Anthropic => {
+            let p = Anthropic::new(egress, api_key);
+            Arc::new(match model {
+                Some(m) => p.with_model(m),
+                None => p,
+            })
+        }
+        LokiProvider::Openai => {
+            let p = Openai::new(egress, api_key);
+            Arc::new(match model {
+                Some(m) => p.with_model(m),
+                None => p,
+            })
+        }
+    };
     let provider: Arc<dyn ModelProvider> = Arc::new(loki_core::adapters::journal::Journalled::new(
         provider,
         Arc::clone(&journal),
@@ -214,7 +222,7 @@ pub unsafe extern "C" fn loki_core_new(
     let clock: Arc<dyn loki_core::ports::clock::Clock> = Arc::new(SystemClock);
     let core = Loop::new(
         Arc::clone(&provider),
-        Arc::new(events),
+        events,
         callbacks as Arc<dyn TokenSink>,
         Arc::clone(&clock),
         Prefix::new(SYSTEM),

@@ -91,6 +91,16 @@ pub enum Event {
         tokens_out: u32,
         cost: CostModel,
     },
+    /// One outbound request, emitted before the bytes move (§21.7, failure point 88).
+    ///
+    /// `bytes` is the body length exactly, so §21.7 can compare what a socket saw against what the
+    /// stream accounted for. Host and path, never the query string: an event stream is written to
+    /// a log file, and a query string is where a credential ends up.
+    Egress {
+        host: String,
+        path: String,
+        bytes: usize,
+    },
     BudgetWarning {
         spent: Cents,
         ceiling: Cents,

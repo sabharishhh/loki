@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use loki_core::adapters::clock::SystemClock;
+use loki_core::adapters::egress::Http;
 use loki_core::adapters::journal::{Journal, Journalled};
 use loki_core::adapters::{anthropic::Anthropic, openai::Openai};
 use loki_core::core::budget::Budget;
@@ -18,6 +19,7 @@ use loki_core::core::prompt::Prefix;
 use loki_core::core::render;
 use loki_core::core::sink::{Broadcast, EventSink};
 use loki_core::core::vocab::Cents;
+use loki_core::ports::egress::Egress;
 use loki_core::ports::model::ModelProvider;
 use tokio_util::sync::CancellationToken;
 
@@ -70,20 +72,20 @@ fn env(name: &str) -> Option<String> {
 
 /// `LOKI_PROVIDER` picks between the two when both keys are set. `LOKI_MODEL` overrides the
 /// provider's default model.
-fn provider() -> Result<Arc<dyn ModelProvider>, String> {
+fn provider(egress: Arc<dyn Egress>) -> Result<Arc<dyn ModelProvider>, String> {
     let model = env("LOKI_MODEL");
     let anthropic = env("ANTHROPIC_API_KEY");
     let openai = env("OPENAI_API_KEY");
 
     let build_anthropic = |key: String| -> Result<Arc<dyn ModelProvider>, String> {
-        let p = Anthropic::new(key).map_err(|e| e.to_string())?;
+        let p = Anthropic::new(Arc::clone(&egress), key);
         Ok(Arc::new(match &model {
             Some(m) => p.with_model(m),
             None => p,
         }))
     };
     let build_openai = |key: String| -> Result<Arc<dyn ModelProvider>, String> {
-        let p = Openai::new(key).map_err(|e| e.to_string())?;
+        let p = Openai::new(Arc::clone(&egress), key);
         Ok(Arc::new(match &model {
             Some(m) => p.with_model(m),
             None => p,
@@ -110,14 +112,6 @@ fn provider() -> Result<Arc<dyn ModelProvider>, String> {
 
 #[tokio::main]
 async fn main() {
-    let provider = match provider() {
-        Ok(provider) => provider,
-        Err(message) => {
-            eprintln!("loki-core {}\n{message}", loki_core::VERSION);
-            std::process::exit(1);
-        }
-    };
-
     let renderer: Arc<dyn EventSink> = if std::env::var("LOKI_TRACE").is_ok() {
         Arc::new(Trace)
     } else {
@@ -143,12 +137,31 @@ async fn main() {
         |path| Journal::open(&path, loki_core::VERSION),
     ));
     events = events.with(Arc::clone(&journal) as Arc<dyn EventSink>);
+
+    // The stream is finished before the transport is built, because §21.7's egress event has to
+    // reach the same sinks as everything else. A second stream for the wire is a stream nobody
+    // reads.
+    let events: Arc<dyn EventSink> = Arc::new(events);
+    let egress: Arc<dyn Egress> = match Http::new(Arc::clone(&events)) {
+        Ok(http) => Arc::new(http),
+        Err(e) => {
+            eprintln!("loki-core {}\n{e}", loki_core::VERSION);
+            std::process::exit(1);
+        }
+    };
+    let provider = match provider(egress) {
+        Ok(provider) => provider,
+        Err(message) => {
+            eprintln!("loki-core {}\n{message}", loki_core::VERSION);
+            std::process::exit(1);
+        }
+    };
     let provider: Arc<dyn ModelProvider> =
         Arc::new(Journalled::new(provider, Arc::clone(&journal)));
 
     let mut core = Loop::new(
         Arc::clone(&provider),
-        Arc::new(events),
+        events,
         Arc::new(Stdout),
         Arc::new(SystemClock),
         Prefix::new(SYSTEM),

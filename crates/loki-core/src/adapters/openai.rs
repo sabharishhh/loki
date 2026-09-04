@@ -7,6 +7,8 @@
 //! on a prefix match rather than marked per block, so `SystemBlock::cache` is ignored here. The
 //! two-zone ordering still matters, because that is what keeps the prefix byte-identical.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -14,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::pricing;
 use super::sse::{self, EventParser};
 use crate::core::vocab::{Cents, CostModel, Locality};
+use crate::ports::egress::{Egress, EgressError, Outbound};
 use crate::ports::model::{
     Caps, Chunk, ChunkStream, ModelError, ModelProvider, Request, Role, StopReason, ToolSupport,
     Usage,
@@ -24,7 +27,7 @@ const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const DEFAULT_CONTEXT_WINDOW: usize = 400_000;
 
 pub struct Openai {
-    http: reqwest::Client,
+    egress: Arc<dyn Egress>,
     api_key: String,
     base_url: String,
     model: String,
@@ -34,19 +37,17 @@ pub struct Openai {
 }
 
 impl Openai {
-    /// # Errors
-    /// Fails if the HTTP client cannot be built.
-    pub fn new(api_key: impl Into<String>) -> Result<Self, ModelError> {
-        Ok(Self {
-            http: reqwest::Client::builder()
-                .build()
-                .map_err(|e| ModelError::Transport(e.to_string()))?,
+    /// Takes the process's one way out (§21.7), rather than building a client of its own.
+    #[must_use]
+    pub fn new(egress: Arc<dyn Egress>, api_key: impl Into<String>) -> Self {
+        Self {
+            egress,
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: DEFAULT_MODEL.to_owned(),
             cost: None,
             max_context: DEFAULT_CONTEXT_WINDOW,
-        })
+        }
     }
 
     #[must_use]
@@ -114,19 +115,30 @@ impl ModelProvider for Openai {
     ) -> Result<ChunkStream, ModelError> {
         let body = WireRequest::from_request(&self.model, &req);
         let url = format!("{}/chat/completions", self.base_url);
+        let raw = serde_json::to_vec(&body).map_err(|e| ModelError::BadRequest(e.to_string()))?;
 
-        let response = tokio::select! {
-            () = cancel.cancelled() => return Err(ModelError::Cancelled),
-            result = self
-                .http
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send() => result.map_err(|e| ModelError::Transport(e.to_string()))?,
-        };
+        let request = Outbound::post(url, raw)
+            .with_header("authorization", format!("Bearer {}", self.api_key));
+        let response = self
+            .egress
+            .send(request, cancel.clone())
+            .await
+            .map_err(egress_error)?;
 
         let response = sse::check_status(response).await?;
         Ok(Box::pin(sse::decode(response, cancel, Parser)))
+    }
+}
+
+/// The port's failures in the model port's words.
+///
+/// Shared with [`super::anthropic`], because a cancelled send means the same thing to both and two
+/// copies of a mapping is how they drift.
+pub(super) fn egress_error(error: EgressError) -> ModelError {
+    match error {
+        EgressError::Cancelled => ModelError::Cancelled,
+        EgressError::BadRequest(why) => ModelError::BadRequest(why),
+        EgressError::Transport(why) => ModelError::Transport(why),
     }
 }
 
@@ -289,6 +301,23 @@ impl From<WireUsage> for Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An egress that never sends, for tests about a provider's shape rather than its traffic.
+    struct Nowhere;
+
+    #[async_trait]
+    impl Egress for Nowhere {
+        async fn send(
+            &self,
+            _request: Outbound,
+            _cancel: CancellationToken,
+        ) -> Result<crate::ports::egress::Landed, crate::ports::egress::EgressError> {
+            Err(crate::ports::egress::EgressError::Transport(
+                "this test never sends".to_owned(),
+            ))
+        }
+    }
+
     use crate::core::vocab::ModelRole;
     use crate::ports::model::{Message, SystemBlock};
 
@@ -406,7 +435,7 @@ mod tests {
 
     #[test]
     fn pricing_follows_the_model() {
-        let provider = Openai::new("k").unwrap();
+        let provider = Openai::new(Arc::new(Nowhere), "k");
         assert_eq!(
             provider.caps().cost,
             CostModel::PerToken {
@@ -416,7 +445,7 @@ mod tests {
             "the default model should be priced"
         );
 
-        let mini = Openai::new("k").unwrap().with_model("gpt-5-mini");
+        let mini = Openai::new(Arc::new(Nowhere), "k").with_model("gpt-5-mini");
         assert_eq!(
             mini.caps().cost,
             CostModel::PerToken {
@@ -428,15 +457,14 @@ mod tests {
 
     #[test]
     fn an_unpriced_model_reports_free_rather_than_a_guess() {
-        let unknown = Openai::new("k").unwrap().with_model("some-local-model");
+        let unknown = Openai::new(Arc::new(Nowhere), "k").with_model("some-local-model");
         assert_eq!(unknown.caps().cost, CostModel::Free);
         assert_eq!(unknown.id(), "openai");
     }
 
     #[test]
     fn explicit_pricing_wins_over_the_table() {
-        let forced = Openai::new("k")
-            .unwrap()
+        let forced = Openai::new(Arc::new(Nowhere), "k")
             .with_model("gpt-5.6-terra")
             .with_pricing(Cents::new(1), Cents::new(2));
         assert_eq!(

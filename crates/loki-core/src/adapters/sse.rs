@@ -4,6 +4,7 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::ports::egress::Landed;
 use crate::ports::model::{Chunk, ModelError, StopReason};
 
 /// Maps one SSE `data:` payload to zero or more chunks.
@@ -17,12 +18,14 @@ pub trait EventParser: Send + 'static {
 
 /// Decodes an SSE response into chunks, stopping as soon as the token is cancelled.
 pub fn decode<P: EventParser>(
-    response: reqwest::Response,
+    response: Landed,
     cancel: CancellationToken,
     mut parser: P,
 ) -> impl futures_core::Stream<Item = Result<Chunk, ModelError>> + Send + 'static {
     async_stream::stream! {
-        let mut events = response.bytes_stream().eventsource();
+        // `Vec<u8>` is `AsRef<[u8]>`, which is all the decoder wants, so the port's byte stream
+        // goes straight in and no transport type appears here.
+        let mut events = response.body.eventsource();
 
         loop {
             let event = tokio::select! {
@@ -61,25 +64,30 @@ pub fn decode<P: EventParser>(
     }
 }
 
-/// Turns a non-success HTTP response into the right [`ModelError`].
+/// Turns a non-success response into the right [`ModelError`], draining the body for its words.
+///
+/// A status is not an error at the port (§12.4 needs to say a page could not be read rather than
+/// return it as empty), so the judgement is here, where a 429 is known to mean something.
 ///
 /// # Errors
 /// Returns an error for every non-success status.
-pub async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, ModelError> {
-    let status = response.status();
-    if status.is_success() {
+pub async fn check_status(response: Landed) -> Result<Landed, ModelError> {
+    if (200..300).contains(&response.status) {
         return Ok(response);
     }
 
-    let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .map(std::time::Duration::from_secs);
-    let body = response.text().await.unwrap_or_default();
+    let Landed {
+        status,
+        retry_after,
+        mut body,
+    } = response;
+    let mut raw = Vec::new();
+    while let Some(Ok(chunk)) = body.next().await {
+        raw.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&raw).into_owned();
 
-    Err(match status.as_u16() {
+    Err(match status {
         400 => ModelError::BadRequest(body),
         // Keep the provider's own words. It knows why it refused and we do not.
         401 | 403 => ModelError::Unauthorized(body),

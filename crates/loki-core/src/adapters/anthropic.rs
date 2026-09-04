@@ -3,6 +3,8 @@
 //! Raw HTTP against `POST /v1/messages`. There is no official Rust SDK, so the wire types below
 //! mirror the documented request and SSE shapes.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -11,6 +13,7 @@ use super::sse::{self, EventParser};
 
 use super::pricing;
 use crate::core::vocab::{CostModel, Locality};
+use crate::ports::egress::{Egress, Outbound};
 use crate::ports::model::{
     Caps, Chunk, ChunkStream, Message, ModelError, ModelProvider, Request, Role, StopReason,
     ToolSupport, Usage,
@@ -22,27 +25,38 @@ const DEFAULT_MODEL: &str = "claude-opus-5";
 const CONTEXT_WINDOW: usize = 1_000_000;
 
 pub struct Anthropic {
-    http: reqwest::Client,
+    egress: Arc<dyn Egress>,
     api_key: String,
+    base_url: String,
     model: String,
 }
 
 impl Anthropic {
-    /// # Errors
-    /// Fails if the HTTP client cannot be built.
-    pub fn new(api_key: impl Into<String>) -> Result<Self, ModelError> {
-        Ok(Self {
-            http: reqwest::Client::builder()
-                .build()
-                .map_err(|e| ModelError::Transport(e.to_string()))?,
+    /// Takes the process's one way out (§21.7), rather than building a client of its own.
+    #[must_use]
+    pub fn new(egress: Arc<dyn Egress>, api_key: impl Into<String>) -> Self {
+        Self {
+            egress,
             api_key: api_key.into(),
+            base_url: API_URL.to_owned(),
             model: DEFAULT_MODEL.to_owned(),
-        })
+        }
     }
 
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Points at an Anthropic-compatible endpoint instead of Anthropic itself.
+    ///
+    /// The counterpart of [`Openai::with_base_url`](super::openai::Openai::with_base_url), and
+    /// §21.7 needs it: a proxy the test can read is an endpoint, and a provider with a fixed URL
+    /// cannot be pointed at one.
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
         self
     }
 }
@@ -77,17 +91,16 @@ impl ModelProvider for Anthropic {
         cancel: CancellationToken,
     ) -> Result<ChunkStream, ModelError> {
         let body = WireRequest::from_request(&self.model, &req);
+        let raw = serde_json::to_vec(&body).map_err(|e| ModelError::BadRequest(e.to_string()))?;
 
-        let response = tokio::select! {
-            () = cancel.cancelled() => return Err(ModelError::Cancelled),
-            result = self
-                .http
-                .post(API_URL)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", API_VERSION)
-                .json(&body)
-                .send() => result.map_err(|e| ModelError::Transport(e.to_string()))?,
-        };
+        let request = Outbound::post(&self.base_url, raw)
+            .with_header("x-api-key", &self.api_key)
+            .with_header("anthropic-version", API_VERSION);
+        let response = self
+            .egress
+            .send(request, cancel.clone())
+            .await
+            .map_err(super::openai::egress_error)?;
 
         let response = sse::check_status(response).await?;
         Ok(Box::pin(sse::decode(response, cancel, Parser)))
@@ -267,6 +280,23 @@ impl From<WireUsage> for Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An egress that never sends, for tests about a provider's shape rather than its traffic.
+    struct Nowhere;
+
+    #[async_trait]
+    impl Egress for Nowhere {
+        async fn send(
+            &self,
+            _request: Outbound,
+            _cancel: CancellationToken,
+        ) -> Result<crate::ports::egress::Landed, crate::ports::egress::EgressError> {
+            Err(crate::ports::egress::EgressError::Transport(
+                "this test never sends".to_owned(),
+            ))
+        }
+    }
+
     use crate::core::vocab::ModelRole;
     use crate::ports::model::SystemBlock;
 
@@ -346,7 +376,7 @@ mod tests {
 
     #[test]
     fn caps_report_cloud_and_native_tools() {
-        let provider = Anthropic::new("test-key").unwrap();
+        let provider = Anthropic::new(Arc::new(Nowhere), "test-key");
         let caps = provider.caps();
         assert_eq!(caps.locality, Locality::Cloud);
         assert_eq!(caps.tools, ToolSupport::Native);
