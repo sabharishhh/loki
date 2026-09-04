@@ -123,9 +123,8 @@ okf_version: '0.2'
 
 /// One long claim carrying the usage and recency §10.1 weighs, and a bm25 that buries it.
 ///
-/// Long on purpose, and on one line because an indented continuation parses as metadata and is
-/// dropped: bm25 penalises a long document, so this sorts below every decoy on keyword strength
-/// and can only surface if the other three signals are allowed to speak.
+/// Long on purpose: bm25 penalises a long document, so this sorts below every decoy on keyword
+/// strength and can only surface if the other three signals are allowed to speak.
 const NANDINI: &str = r"---
 name: Nandini
 status: stable
@@ -720,4 +719,68 @@ async fn the_cap_still_holds_when_far_more_claims_match() {
 
     assert_eq!(store.recall_at("the release", 2).len(), 2);
     assert!(store.recall_at("the release", 50).len() > 2);
+}
+
+/// B-59. A record nobody can read projects to nothing.
+///
+/// A hand edit that broke a file used to leave its rows standing: recall kept serving the text of
+/// a claim the file no longer held, while §17.3's screen dropped the card entirely. The two
+/// cases below are the halves of that, and the family is a projection outliving its record.
+#[tokio::test]
+async fn a_file_that_stops_parsing_stops_being_recalled() {
+    let store = Store::new("unreadable").await;
+    assert!(
+        !store.recall("what team is Meera on").is_empty(),
+        "the fixture has to be recallable before the edit means anything"
+    );
+
+    // A person edits the card and loses a colon. Nothing else about the file changes.
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "people/meera.md",
+                &MEERA.replace("learned: 2026-08-29", "learned 2026-08-29"),
+            )
+            .expect("edit");
+    }
+    let stats = store.sync().await;
+
+    assert_eq!(stats.unreadable, 1, "the sync has to notice: {stats:?}");
+    assert!(
+        store
+            .recall("what team is Meera on")
+            .iter()
+            .all(|h| h.path != "people/meera.md"),
+        "a claim the file no longer holds must not still answer"
+    );
+}
+
+/// The property underneath it. `rebuild` is `sync` over a wiped index, so if the two disagree,
+/// one of them is wrong about what the files say.
+#[tokio::test]
+async fn sync_and_rebuild_agree_about_a_file_that_will_not_parse() {
+    let store = Store::new("agree").await;
+    {
+        let writer = store.bundle.writer().await;
+        writer
+            .write(
+                "people/meera.md",
+                &MEERA.replace("learned: 2026-08-29", "learned 2026-08-29"),
+            )
+            .expect("edit");
+    }
+    store.sync().await;
+    let after_sync = store.index.claim_count().expect("count");
+
+    {
+        let reader = store.bundle.reader().await;
+        store.index.rebuild(&reader).expect("rebuild");
+    }
+    let after_rebuild = store.index.claim_count().expect("count");
+
+    assert_eq!(
+        after_sync, after_rebuild,
+        "an incremental sync and a rebuild have to describe the same store"
+    );
 }

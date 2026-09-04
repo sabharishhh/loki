@@ -384,3 +384,37 @@ async fn a_conflict_about_one_thing_does_not_hide_everything_else() {
         "the shadowed claim never reaches a prompt: {recalled:?}"
     );
 }
+
+/// B-59. §17.3's rule applied to the case where the file cannot be read at all.
+///
+/// A card that will not parse used to vanish from this screen while the index carried on serving
+/// it, so the one surface built for checking the work was the only place it disappeared from.
+#[tokio::test]
+async fn a_card_that_will_not_parse_is_reported_rather_than_omitted() {
+    let store = Store::new("unreadable", &[("people/sabharish.md", contested())]).await;
+
+    {
+        let writer = store.memory.bundle().writer().await;
+        writer
+            .write(
+                "people/broken.md",
+                "---\nname: Broken\nstatus: stable\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- A claim\n  learned 2026-01-01\n",
+            )
+            .expect("write");
+    }
+
+    let known = store.memory.knowledge(today()).await.expect("knowledge");
+
+    assert_eq!(known.unreadable.len(), 1, "the card has to be reported");
+    assert_eq!(known.unreadable[0].path, "people/broken.md");
+    assert!(
+        known.unreadable[0].detail.contains("11"),
+        "the detail names the line, which is what makes it fixable: {:?}",
+        known.unreadable[0].detail
+    );
+    assert!(
+        known.entities.iter().all(|e| e.path != "people/broken.md"),
+        "it is reported as unreadable, not listed as knowledge"
+    );
+    assert_eq!(known.entities.len(), 1, "the readable card is unaffected");
+}

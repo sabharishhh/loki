@@ -76,6 +76,8 @@ pub struct Stats {
     pub indexed: usize,
     pub removed: usize,
     pub unchanged: usize,
+    /// Files on disk that would not parse, whose rows were dropped rather than left standing.
+    pub unreadable: usize,
 }
 
 /// Which concepts a query may see.
@@ -655,8 +657,14 @@ impl Index {
                 continue;
             }
             let Ok(concept) = reader.load_concept(path) else {
-                // Unparseable concepts are skipped rather than failing the whole sync. OKF
-                // conformance says a consumer tolerates what it does not understand.
+                // Tolerated rather than failing the whole sync, which is OKF's rule, but the rows
+                // go. Left standing they outlived the file: recall kept serving the text of a
+                // claim the record no longer held, while §17.3's screen dropped the card
+                // entirely, and `sync` and `rebuild` disagreed about the same store. Principle 3
+                // says the projection is derived from the record, so a record nobody can read
+                // projects to nothing.
+                remove_concept(&tx, path)?;
+                stats.unreadable += 1;
                 continue;
             };
             put_concept(&tx, path, &concept, &text, stamp, len)?;

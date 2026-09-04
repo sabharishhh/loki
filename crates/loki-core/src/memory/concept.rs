@@ -378,7 +378,19 @@ pub fn parse(text: &str) -> Result<RawConcept, ParseError> {
         } else if let Some(claim) = pending.as_mut()
             && !trimmed.is_empty()
         {
-            apply_attribute(claim, trimmed, line_no)?;
+            match classify(trimmed) {
+                Indented::Attributes => apply_attribute(claim, trimmed, line_no)?,
+                Indented::MissingColon => {
+                    return Err(ParseError::BadAttribute {
+                        line: line_no,
+                        found: trimmed.to_owned(),
+                    });
+                }
+                Indented::Continuation => {
+                    claim.text.push(' ');
+                    claim.text.push_str(trimmed);
+                }
+            }
         }
     }
     flush(&mut pending, &mut sections);
@@ -444,6 +456,75 @@ fn flush(pending: &mut Option<Claim>, sections: &mut Vec<Section>) {
             claims: vec![claim],
         });
     }
+}
+
+/// Every key an attribute line may carry, including the two v0.8 spellings.
+///
+/// Used only to tell a mistyped attribute from prose. Applying them is [`apply_attribute`]'s job,
+/// and an unknown key is still tolerated there, per OKF.
+const KEYS: [&str; 17] = [
+    "attribute",
+    "about",
+    "value",
+    "valid_from",
+    "valid_to",
+    "learned",
+    "unlearned",
+    "confidence",
+    "origin",
+    "source",
+    "privacy",
+    "replaced_by",
+    "usage_count",
+    "recalls",
+    "recall_days",
+    "recall_queries",
+    "evidence",
+];
+
+/// What an indented line under a claim turned out to be.
+enum Indented {
+    /// Shaped like `key: value`. Unknown keys included, which OKF requires a consumer to tolerate.
+    Attributes,
+    /// A known key with its colon missing. An error, not prose: reading `learned 2026-08-01` as a
+    /// sentence would fold a date into the claim text where nothing could ever find it again.
+    MissingColon,
+    /// A wrapped claim. Markdown continues a list item on the next indented line and the readme
+    /// invites hand editing, so a line an editor wrapped has to survive being read back.
+    Continuation,
+}
+
+/// Decides which of the three an indented line is, on shape rather than on a known key.
+///
+/// **Shape, because OKF says to tolerate an unknown key.** Testing for a known key would turn
+/// `nickname: appa` into claim text instead of ignoring it, which trades one silent loss for
+/// another. A line whose every pair is `word: value` is metadata whether or not we know the word.
+fn classify(line: &str) -> Indented {
+    // `evidence` holds a URL, so its value contains a colon and the splitter would misread it.
+    if line.starts_with("evidence:") {
+        return Indented::Attributes;
+    }
+    let shaped = split_pairs(line).iter().all(|pair| {
+        pair.split_once(':').is_some_and(|(key, _)| {
+            let key = key.trim();
+            !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_')
+        })
+    });
+    if shaped {
+        return Indented::Attributes;
+    }
+    // The cost of the strict reading: a claim wrapping onto a line that opens with one of the
+    // seventeen reserved words fails to parse. Rare, named in the error, and the safe direction:
+    // an error is fixed, and a date quietly swallowed into a sentence is not.
+    let opener = line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(':');
+    if KEYS.contains(&opener) {
+        return Indented::MissingColon;
+    }
+    Indented::Continuation
 }
 
 fn apply_attribute(claim: &mut Claim, line: &str, line_no: usize) -> Result<(), ParseError> {
@@ -922,6 +1003,60 @@ okf_version: '0.2'
         let text = "---\nname: X\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- A claim\n  valid_from: 2026-01-01   learned: 2026-01-01\n  some_future_field: whatever\n";
         let concept = parse(text).expect("unknown fields should not fail the parse");
         assert_eq!(concept.claims().count(), 1);
+    }
+
+    /// B-59. An editor wrapping a long claim is the edit `readMe.md` invites, and it used to make
+    /// the whole card unreadable. These five are one family: what an indented line under a claim
+    /// is, which the file had no cases for at all.
+    #[test]
+    fn a_claim_wrapped_by_an_editor_reads_as_one_claim() {
+        let text = "---\nname: Ashok\ngenerated:\n  by: loki\n  at: 2026-08-01\n---\n\n## Work\n- Runs a civil contracting firm in Palakkad and has done since 1998, mostly\n  residential work around the town\n  learned: 2026-08-01\n";
+        let concept = parse(text).expect("a wrapped claim has to parse");
+        let claim = concept.claims().next().expect("claim");
+        assert_eq!(
+            claim.text,
+            "Runs a civil contracting firm in Palakkad and has done since 1998, mostly residential work around the town"
+        );
+        assert_eq!(
+            claim.validity.learned,
+            date(2026, 8, 1),
+            "metadata still lands"
+        );
+    }
+
+    /// The cost of accepting continuations, and the line where it is refused.
+    #[test]
+    fn an_attribute_that_lost_its_colon_is_still_an_error() {
+        let text = "---\nname: X\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- A claim\n  learned 2026-01-01\n";
+        let found = parse(text).expect_err("a mistyped key must not become prose");
+        assert!(
+            matches!(found, ParseError::BadAttribute { .. }),
+            "swallowing a date into the claim text loses it where nothing can find it: {found:?}"
+        );
+    }
+
+    /// A sentence is not metadata because it happens to contain a colon.
+    #[test]
+    fn prose_carrying_a_colon_is_not_read_as_an_attribute() {
+        let text = "---\nname: X\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- The split came out at\n  roughly 3:1 in favour of holding\n  learned: 2026-01-01\n";
+        let concept = parse(text).expect("prose with a colon has to parse");
+        assert_eq!(
+            concept.claims().next().expect("claim").text,
+            "The split came out at roughly 3:1 in favour of holding"
+        );
+    }
+
+    /// The decision Sabharish made: the file is normalized on the next write, never re-wrapped.
+    #[test]
+    fn a_wrapped_claim_is_normalized_onto_one_line_by_render() {
+        let text = "---\nname: X\ngenerated:\n  by: loki\n  at: 2026-01-01\n---\n\n## R\n- One claim split\n  across two lines\n  learned: 2026-01-01\n";
+        let once = render(&parse(text).expect("parse"));
+        assert!(
+            once.contains("- One claim split across two lines\n"),
+            "render writes a claim on one line: {once}"
+        );
+        let twice = render(&parse(&once).expect("reparse"));
+        assert_eq!(once, twice, "normalizing has to settle after one pass");
     }
 
     #[test]

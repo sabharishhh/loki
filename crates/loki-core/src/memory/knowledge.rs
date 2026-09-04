@@ -37,6 +37,20 @@ pub struct Knowledge {
     /// A split can arrive from a hand edit or an import as easily as from consolidation, and a
     /// one-shot report would only ever catch the third.
     pub duplicates: Vec<Duplicate>,
+    /// Cards on disk that will not parse, so nothing can read them and nothing is using them.
+    ///
+    /// Shown rather than skipped. A card missing from this screen reads as a card Loki never
+    /// heard about, and §10.8's rule is that could-not-read is a third outcome and not an
+    /// absence. It is also the only place a hand edit that broke a file can be noticed.
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// A file the parser refused, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unreadable {
+    pub path: String,
+    /// The parser's own sentence. It names the line, which is what makes it fixable.
+    pub detail: String,
 }
 
 /// Two or more cards claiming the same surface form.
@@ -141,10 +155,15 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
     };
 
     let mut cards: Vec<(String, RawConcept)> = Vec::with_capacity(paths.len());
+    let mut unreadable = Vec::new();
     for path in paths {
         let reader = bundle.reader().await;
-        if let Ok(concept) = reader.load_concept(&path) {
-            cards.push((path, concept));
+        match reader.load_concept(&path) {
+            Ok(concept) => cards.push((path, concept)),
+            Err(why) => unreadable.push(Unreadable {
+                detail: why.to_string(),
+                path,
+            }),
         }
     }
     // Every card's display name, so a relation row can read "sister  Lakshmi" rather than showing
@@ -177,6 +196,7 @@ pub async fn read(bundle: &Bundle, today: Date) -> Result<Knowledge, BundleError
     Ok(Knowledge {
         entities,
         duplicates,
+        unreadable,
     })
 }
 
