@@ -8,9 +8,28 @@ import SwiftUI
 struct ThreadView: View {
     let conversation: Conversation
 
-    /// Whether the newest turn is on screen. Only when it is not does the app follow the stream,
-    /// because yanking the view down while somebody is reading back is worse than a stale scroll.
+    /// Whether the app is tracking the end of the thread.
+    ///
+    /// **Set by sending, cleared only by scrolling up on purpose.** Gating the follow on "is the
+    /// end currently on screen" was wrong in both directions: sending a message from halfway up
+    /// the thread left the reader looking at an old answer with no sign anything had happened, and
+    /// the space this view opens under a new question puts the end off screen the instant it is
+    /// asked, which switched the follow off for the whole reply.
+    @State private var following = true
+    /// Whether the end of the thread is on screen. Drives the caret, nothing else.
     @State private var atBottom = true
+    /// The last geometry seen, so a scroll the reader performed can be told from content growing
+    /// underneath them.
+    @State private var seen = Geometry()
+    /// The viewport, for the room a new question needs under it.
+    @State private var viewport: CGFloat = 0
+
+    /// What a scroll needs to know about itself.
+    private struct Geometry: Equatable {
+        var offset: CGFloat = 0
+        var content: CGFloat = 0
+        var container: CGFloat = 0
+    }
 
     var body: some View {
         if conversation.entries.isEmpty && conversation.lastError == nil {
@@ -38,7 +57,7 @@ struct ThreadView: View {
                             )
                             .id(turn.id)
                         case .scope(let scope):
-                            ThinkingTrace(scope: scope, live: scope.state != .idle)
+                            ThinkingTrace(scope: scope, live: conversation.isLive(scope))
                                 .id(scope.id)
                         }
                     }
@@ -50,6 +69,17 @@ struct ThreadView: View {
                     if !conversation.summary.isEmpty {
                         SessionSummary(lines: conversation.summary)
                     }
+
+                    // Room for the answer to arrive into.
+                    //
+                    // A question sent from the bottom of a full window has nowhere to go: it can
+                    // be scrolled to the bottom edge and no further, so it sits under the composer
+                    // with the reply forming below the fold. This opens most of a viewport beneath
+                    // it while the turn runs, which is what lets the question rise to the top and
+                    // the answer be read where it lands. It closes again once the turn is done.
+                    Color.clear
+                        .frame(height: tailRoom)
+                        .id(Self.tailID)
                 }
                 // Capped at the measure, padded, then centred, in that order. The same three
                 // steps the composer takes, so the column's edges line up with the field's and
@@ -59,24 +89,24 @@ struct ThreadView: View {
                 .padding(.vertical, Theme.Space.xxl)
                 .frame(maxWidth: .infinity)
             }
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                // Within a line of the end counts as being at the end, or the caret flickers on
-                // during the last few pixels of an ordinary scroll.
-                geometry.contentOffset.y + geometry.containerSize.height
-                    >= geometry.contentSize.height - 24
-            } action: { _, atBottom in
-                self.atBottom = atBottom
+            .onScrollGeometryChange(for: Geometry.self) { geometry in
+                Geometry(
+                    offset: geometry.contentOffset.y,
+                    content: geometry.contentSize.height,
+                    container: geometry.containerSize.height
+                )
+            } action: { _, now in
+                react(to: now, proxy: proxy)
             }
-            .onChange(of: conversation.entries.last?.id) {
-                guard let last = conversation.entries.last, atBottom else { return }
-                withAnimation(Theme.Motion.control) { proxy.scrollTo(last.id, anchor: .bottom) }
+            .onChange(of: conversation.entries.count) {
+                arrived(proxy: proxy)
             }
             .overlay(alignment: .bottom) {
                 if !atBottom {
                     ScrollDown {
-                        guard let last = conversation.entries.last else { return }
+                        following = true
                         withAnimation(Theme.Motion.panel) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
+                            proxy.scrollTo(Self.tailID, anchor: .bottom)
                         }
                     }
                     .padding(.bottom, Theme.Space.l)
@@ -84,8 +114,72 @@ struct ThreadView: View {
                 }
             }
             .animation(Theme.Motion.control, value: atBottom)
+            .animation(Theme.Motion.panel, value: conversation.working)
         }
         .background(Theme.Colors.background)
+    }
+
+    /// The end of the stack. Only the caret jumps here; the follow pins the last real entry.
+    private static let tailID = "thread-tail"
+
+    /// How much empty space sits under the newest turn while one is running.
+    ///
+    /// Not a whole viewport. A question that rises to the very top with nothing under it reads as
+    /// the thread having been cleared, and the answer then arrives at the top of an empty screen.
+    private var tailRoom: CGFloat { conversation.working ? viewport * 0.62 : 0 }
+
+    /// The last thing in the thread that is actually a turn or a trace.
+    private var lastEntryID: AnyHashable? {
+        switch conversation.entries.last {
+        case .turn(let turn): AnyHashable(turn.id)
+        case .scope(let scope): AnyHashable(scope.id)
+        case nil: nil
+        }
+    }
+
+    /// Reads one scroll.
+    ///
+    /// Two things arrive through the same callback and mean opposite things. Content growing under
+    /// a still pointer is the answer streaming in, and the follow should hold. The offset moving up
+    /// while the content is the same size is the reader going back for something, and the follow
+    /// should stop. Telling them apart is the whole of the logic.
+    private func react(to now: Geometry, proxy: ScrollViewProxy) {
+        viewport = now.container
+        // The room under the newest turn is not content, so reaching the last word counts as
+        // reaching the end even with half a screen of nothing below it.
+        let end = now.content - tailRoom
+        let fold = now.offset + now.container
+        atBottom = fold >= end - 24
+        defer { seen = now }
+
+        if now.content == seen.content, now.offset < seen.offset - 2 {
+            following = false
+            return
+        }
+        if atBottom {
+            following = true
+            return
+        }
+        // The answer has outgrown the room left for it. Keep its last line on the fold rather than
+        // pinning the empty tail, which would push the question that was asked off the top.
+        if following, now.content > seen.content, let last = lastEntryID {
+            proxy.scrollTo(last, anchor: .bottom)
+        }
+    }
+
+    /// A turn was added.
+    ///
+    /// A question goes to the top of the window and the answer fills in underneath it, which is
+    /// the one placement that keeps both on screen. Anything else is a new turn arriving where the
+    /// reader is not looking.
+    private func arrived(proxy: ScrollViewProxy) {
+        guard case .turn(let turn) = conversation.entries.last, turn.speaker == .user else { return }
+        following = true
+        // A tick later, because the row and the room under it do not exist until this update has
+        // been laid out, and scrolling to a view that has not been placed yet does nothing.
+        Task { @MainActor in
+            withAnimation(Theme.Motion.panel) { proxy.scrollTo(turn.id, anchor: .top) }
+        }
     }
 }
 

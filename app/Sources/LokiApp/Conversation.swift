@@ -31,6 +31,12 @@ struct Scope: Identifiable {
     var state: Theme.State
     var steps: [Step] = []
     var elapsed: UInt64?
+    /// When the reader started waiting.
+    ///
+    /// The turn's start for the first scope of a turn, not the scope's own. Recall runs before
+    /// the model call and opens no scope of its own, so counting from `ScopeOpened` leaves that
+    /// time out of the only number the reader is shown.
+    var began = ContinuousClock.now
     /// Depth in the scope tree. A nested scope is indented under its parent so a code-mode
     /// script's calls read as its own steps rather than as a flat list (§13.3).
     var depth: Int = 0
@@ -91,6 +97,22 @@ final class Conversation {
     private var captureWhenDone = false
     /// Set while a capture is in flight, so two turns cannot consolidate at once.
     private var capturing = false
+
+    /// A turn is under way: from the moment send is pressed until the answer is fully on screen.
+    ///
+    /// Deliberately wider than the core's task. It ends when the streamer has finished painting,
+    /// not when the last token arrived, because the two differ by the whole length of the drain
+    /// and the reader is waiting for the second one.
+    private(set) var working = false
+    /// When the reader started waiting, for the trace's clock.
+    @ObservationIgnored private var turnBegan: ContinuousClock.Instant?
+    /// Where this turn's entries begin. Anything before it belongs to an earlier turn.
+    @ObservationIgnored private var turnFloor = 0
+    /// Steps reported before the turn opened a scope to hold them.
+    @ObservationIgnored private var queuedSteps: [Step] = []
+    /// The newest scope, so a trace can ask whether it is the one still running without every
+    /// trace in the thread walking the thread to find out.
+    private var newestScope: UInt64?
 
     /// The per-turn cap the rail counts against. Mirrors `RECALL_CAP` in the core.
     static let recallCap = 5
@@ -254,6 +276,7 @@ final class Conversation {
             }
         }
         let streamer = Streamer { [weak self] text in self?.show(text) }
+        streamer.onIdle = { [weak self] in self?.endTurn() }
         self.streamer = streamer
         Task {
             for await token in core.tokens {
@@ -289,6 +312,7 @@ final class Conversation {
     func send(_ text: String) {
         guard let core else { return }
         entries.append(.turn(Turn(speaker: .user, text: text)))
+        beginTurn()
         lastError = nil
         composer = .running
         // §8.1's exception: an explicit instruction to remember applies to this session, not the
@@ -300,6 +324,7 @@ final class Conversation {
         } catch {
             lastError = String(describing: error)
             composer = .idle
+            working = false
         }
     }
 
@@ -325,6 +350,34 @@ final class Conversation {
     /// Turns only, for the popover's session count.
     var turns: [Turn] {
         entries.compactMap { if case .turn(let turn) = $0 { turn } else { nil } }
+    }
+
+    /// Marks the start of a wait. Called on send, and again when the core says the task opened.
+    ///
+    /// Idempotent within a turn: the second call keeps the first clock, because the reader started
+    /// waiting when they pressed send, not when the core got round to saying so.
+    private func beginTurn() {
+        if !working { turnBegan = .now }
+        working = true
+        turnFloor = entries.count
+        queuedSteps.removeAll()
+    }
+
+    /// The answer is fully on screen. Only the streamer decides this.
+    private func endTurn() {
+        working = false
+        turnBegan = nil
+    }
+
+    /// Whether this trace is still counting.
+    ///
+    /// A scope of the running turn stays live until the answer has finished painting, so the
+    /// figure the reader is left with is the wait they actually had rather than the length of the
+    /// model call inside it.
+    func isLive(_ scope: Scope) -> Bool {
+        if scope.state != .idle { return true }
+        guard working else { return false }
+        return newestScope == scope.id
     }
 
     /// Puts a smoothed batch of characters on screen. Only the streamer calls this.
@@ -354,11 +407,22 @@ final class Conversation {
         entries[index] = .scope(scope)
     }
 
-    /// The most recent scope, which is where a step belongs.
+    /// The most recent scope of the running turn, which is where a step belongs.
+    ///
+    /// **Only this turn's.** Lane 1 recall runs before the model call, so its step is reported
+    /// while the turn has no scope open. Taking the last scope in the thread filed it under the
+    /// previous answer, where it read as something Loki had done for a question already answered,
+    /// and on the first turn of a session it was dropped on the floor. Steps that arrive early
+    /// wait for the scope that will hold them.
     private func appendStep(_ step: Step) {
-        guard let index = entries.lastIndex(where: { if case .scope = $0 { true } else { false } }),
-              case .scope(var scope) = entries[index]
-        else { return }
+        let index = entries.indices.dropFirst(turnFloor).last {
+            if case .scope = entries[$0] { return true }
+            return false
+        }
+        guard let index, case .scope(var scope) = entries[index] else {
+            queuedSteps.append(step)
+            return
+        }
         scope.steps.append(step)
         entries[index] = .scope(scope)
     }
@@ -370,6 +434,7 @@ final class Conversation {
         case "task_started":
             streamer?.reset()
             streaming = nil
+            beginTurn()
 
         case "scope_opened":
             guard let id = fields["id"] as? UInt64 else { return }
@@ -382,16 +447,24 @@ final class Conversation {
                     return nil
                 }.last
             } ?? 0
+            let firstOfTurn = !entries.indices.dropFirst(turnFloor).contains {
+                if case .scope = entries[$0] { return true }
+                return false
+            }
             entries.append(
                 .scope(
                     Scope(
                         id: id,
                         kind: fields["kind"] as? String ?? "tool",
                         state: .reading,
+                        steps: firstOfTurn ? queuedSteps : [],
+                        began: firstOfTurn ? (turnBegan ?? .now) : .now,
                         depth: depth
                     )
                 )
             )
+            newestScope = id
+            if firstOfTurn { queuedSteps.removeAll() }
 
         case "scope_closed":
             guard let id = fields["id"] as? UInt64 else { return }

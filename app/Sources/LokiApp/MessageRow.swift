@@ -4,7 +4,8 @@ import SwiftUI
 ///
 /// **The controls appear on hover and hold their space when they do not.** A row that grows a
 /// toolbar when the pointer arrives shoves every row below it down, and reading a thread while it
-/// twitches is miserable. The bar is always laid out and only its opacity changes.
+/// twitches is miserable. The bar is always laid out and only its opacity changes, and nothing
+/// else about the row changes at all.
 ///
 /// Loki's turns carry the mark. The user's do not, because you know who you are.
 struct MessageRow: View {
@@ -45,13 +46,10 @@ struct MessageRow: View {
         }
         .padding(.horizontal, Theme.Space.s)
         .padding(.vertical, Theme.Space.xs)
-        // R3: the row says which turn the controls belong to. Without it they fade in over a dense
-        // thread looking unattached to anything. One step of lift, no border, so it reads as a
-        // pointer following the reader rather than as a selection.
-        .background(
-            revealed ? Theme.Colors.surface : .clear,
-            in: .rect(cornerRadius: Theme.Radius.panel)
-        )
+        // Nothing lifts. A panel appearing behind a turn on hover is a second rectangle competing
+        // with the one the turn already draws, and it reads as a selection nobody made. What the
+        // pointer reveals is the controls, and that is the whole of the feedback.
+        //
         // Without this the row only registers a hover where it actually draws, so reaching for
         // the controls crosses a gap, the row thinks the pointer left, and they vanish under the
         // cursor. The whole rectangle is the row.

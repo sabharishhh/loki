@@ -310,8 +310,11 @@ extension Composer {
 /// One control rather than a mic plus a separate meter: the thing you pressed is the thing that
 /// shows it is listening, and the composer stays free to show what was heard.
 struct MicControl: View {
-    /// Seven, so there is a true centre bar for the tallest reading to sit on.
-    static let bars = 7
+    /// Five, with a true centre bar for the tallest reading to sit on.
+    ///
+    /// Seven was wider than the mic glyph it replaces, so the composer's left edge shifted every
+    /// time recording started. Five keeps the shape, keeps the centre, and fits the same box.
+    static let bars = 5
 
     let recording: Bool
     let levels: [Float]
@@ -343,7 +346,7 @@ struct MicControl: View {
                         .foregroundStyle(Theme.Colors.tertiary)
                 }
             }
-            .frame(width: 38, height: 22)
+            .frame(width: 30, height: 22)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -403,7 +406,7 @@ struct MicControl: View {
         let reading = levels[max(levels.count - 1 - distance, 0)]
         // Shoulders sit lower than the centre even at the same reading, which is what gives the
         // group its shape instead of leaving it a flat row.
-        let falloff = 1 - CGFloat(distance) * 0.22
+        let falloff = 1 - CGFloat(distance) * 0.28
         let level = CGFloat(reading) * falloff
         return Self.minHeight + max(level, 0) * (Self.maxHeight - Self.minHeight)
     }

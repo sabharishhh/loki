@@ -31,6 +31,11 @@ final class Dictation {
     private(set) var transcript = ""
     /// Recent input loudness, 0 to 1, oldest first. Drives the waveform.
     private(set) var levels: [Float] = []
+    /// Whether the detector currently hears a voice.
+    ///
+    /// The meter rests on this. A room is never silent, and a level meter honest enough to show a
+    /// fan is a meter that moves when nobody is talking, which reads as the app mishearing you.
+    private(set) var speaking = false
 
     /// Fires the moment speech is detected, before transcription finishes.
     ///
@@ -71,6 +76,7 @@ final class Dictation {
         heard = Transcript()
         spoken = Transcript()
         levels = []
+        speaking = false
 
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             status = .denied
@@ -112,6 +118,7 @@ final class Dictation {
 
         transcript = text
         levels = []
+        speaking = false
         status = .idle
         return text
     }
@@ -221,8 +228,9 @@ final class Dictation {
         })
         tasks.append(Task { [weak self] in
             guard let detections = self?.detectorResults(detector) else { return }
-            for await detected in detections where detected {
-                self?.onSpeechStart?()
+            for await detected in detections {
+                self?.speaking = detected
+                if detected { self?.onSpeechStart?() }
             }
         })
 
@@ -334,8 +342,11 @@ final class Dictation {
     private var pump: AudioPump?
 
     /// Keeps a short rolling window, which is all a waveform needs.
+    ///
+    /// Silence while the detector hears no voice, so the meter rests between sentences instead of
+    /// drawing the room.
     private func push(_ level: Float) {
-        levels.append(level)
+        levels.append(speaking ? level : 0)
         if levels.count > Self.waveformBars {
             levels.removeFirst(levels.count - Self.waveformBars)
         }
@@ -385,23 +396,67 @@ private final class AudioPump: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         from connection: AVCaptureConnection
     ) {
         guard let source = Self.pcmBuffer(from: sampleBuffer) else { return }
-        levels.yield(Self.loudness(of: source))
+        levels.yield(loudness(of: source))
         guard let converted = convert(source) else { return }
         continuation.yield(AnalyzerInput(buffer: converted))
     }
 
-    /// Root mean square of the buffer, scaled so ordinary speech fills most of the range.
-    private static func loudness(of buffer: AVAudioPCMBuffer) -> Float {
+    /// How loud a voice is in this buffer, 0 to 1, measured against the room rather than against
+    /// full scale.
+    ///
+    /// **A plain RMS meter shows the room.** `sqrt(rms * 12)` put a quiet office at 15% and a fan
+    /// two feet away at 35%, so the bars rumbled with nobody speaking. Two things fix that and
+    /// neither works alone.
+    ///
+    /// A one-pole high pass at 150Hz first, because fans, air conditioning, desk knocks and wind
+    /// on the mic are nearly all below it and speech nearly all above. What survives is close to
+    /// what a voice contributes.
+    ///
+    /// Then a floor that learns the room. Loudness is read in decibels and measured against a
+    /// running estimate of the quietest thing recently heard: it drops quickly to follow a room
+    /// getting quieter and creeps up slowly, so a steady noise becomes the new zero within a
+    /// second or so instead of holding the bars off the ground. The meter reads what stands
+    /// `margin` decibels above that, which speech clears easily and a steady noise never does.
+    private func loudness(of buffer: AVAudioPCMBuffer) -> Float {
         guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
         let frames = Int(buffer.frameLength)
+
+        // y[n] = a * (y[n-1] + x[n] - x[n-1]), the standard one-pole high pass.
+        let rc = 1 / (2 * Float.pi * Self.cutoffHz)
+        let dt = 1 / Float(max(buffer.format.sampleRate, 1))
+        let a = rc / (rc + dt)
+
         var sum: Float = 0
         for i in 0..<frames {
-            sum += channel[i] * channel[i]
+            let sample = channel[i]
+            highPassed = a * (highPassed + sample - lastSample)
+            lastSample = sample
+            sum += highPassed * highPassed
         }
+
         let rms = (sum / Float(frames)).squareRoot()
-        // Speech sits well below full scale, so a linear meter barely moves. Compress it.
-        return min(1, (rms * 12).squareRoot())
+        let db = 20 * log10(max(rms, 1e-7))
+
+        // Fall fast, rise slowly. The floor should follow a room that goes quiet at once and take
+        // its time deciding that a room has become permanently louder.
+        floorDb += (db - floorDb) * (db < floorDb ? 0.3 : 0.0015)
+
+        let gate = floorDb + Self.marginDb
+        let level = (db - gate) / Self.rangeDb
+        return min(1, max(0, level))
     }
+
+    /// Below this, sound is furniture rather than speech.
+    private static let cutoffHz: Float = 150
+    /// How far above the room a sound must stand before the meter shows it.
+    private static let marginDb: Float = 10
+    /// Decibels from the gate to a full bar. Ordinary speech runs about this far above a room.
+    private static let rangeDb: Float = 24
+
+    private var highPassed: Float = 0
+    private var lastSample: Float = 0
+    /// The room, in dBFS. Starts low so the first breath does not set it.
+    private var floorDb: Float = -70
 
     private func convert(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         if source.format == target { return source }
