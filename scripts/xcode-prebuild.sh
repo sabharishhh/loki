@@ -46,8 +46,14 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+# Run from the repo root so rustup reads `rust-toolchain.toml`. It resolves the toolchain from the
+# working directory, never from `--manifest-path`, so a pre-action launched from anywhere else
+# silently builds with whatever `stable` happens to be. That is the same class of failure this
+# script exists to prevent, one level up: the right core, built by the wrong compiler.
+cd "$ROOT" || { echo "error: cannot enter $ROOT" >&2; rm -f "$ARCHIVE"; exit 1; }
+
 echo "building the core: cargo build $FLAGS"
-if cargo build --manifest-path "$ROOT/Cargo.toml" -p loki-ffi $FLAGS; then
+if cargo build -p loki-ffi $FLAGS; then
   exit 0
 fi
 
