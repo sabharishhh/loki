@@ -74,17 +74,34 @@ struct Composer: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.borderless)
-            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+            .background(
+                canSend ? Theme.Colors.yellow : .clear,
+                in: .rect(cornerRadius: Theme.Radius.control)
+            )
+            .foregroundStyle(canSend ? Theme.Colors.onYellow : Theme.Colors.tertiary)
+            .animation(Theme.Motion.control, value: canSend)
             .disabled(!isRunning && draft.isEmpty && !isRecording)
         }
         .padding(Theme.Space.m)
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+        // One step of lift when it has focus, and the ground when it does not. On a near-black
+        // interface a border alone leaves the field reading as an outline drawn on nothing.
+        .background(
+            focused ? Theme.Colors.surfaceAlt : Theme.Colors.surface,
+            in: .rect(cornerRadius: Theme.Radius.panel)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
+            RoundedRectangle(cornerRadius: Theme.Radius.panel)
                 .strokeBorder(borderColor, lineWidth: borderWidth)
         }
+        // The accent bleeds a little while it listens, so the state is legible from across the
+        // room rather than only at the border.
+        .shadow(
+            color: Theme.Colors.yellow.opacity(isRecording ? 0.22 : 0),
+            radius: isRecording ? 14 : 0
+        )
         .animation(Theme.Motion.control, value: conversation.composer.border)
         .animation(Theme.Motion.control, value: isRecording)
+        .animation(Theme.Motion.control, value: focused)
     }
 
     private var hints: some View {
@@ -96,11 +113,28 @@ struct Composer: View {
             Key("hold F")
             Text("talk").font(Theme.Text.micro).foregroundStyle(Theme.Colors.tertiary)
             Spacer()
-            Text("routing by task, not by turn")
+            Text(aside)
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
                 .foregroundStyle(Theme.Colors.tertiary)
+                .contentTransition(.opacity)
+                .animation(Theme.Motion.control, value: aside)
         }
+    }
+
+    /// The line on the right of the hints.
+    ///
+    /// It said the same thing whatever was happening, which is a slogan rather than a hint. It
+    /// says what the composer is doing now, and falls back to the standing note when idle.
+    private var aside: String {
+        if isRecording { return "listening on this Mac" }
+        if isRunning { return "working" }
+        return "routing by task, not by turn"
+    }
+
+    /// Whether pressing send would do anything. Drives the accent on the control.
+    private var canSend: Bool {
+        !isRunning && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var placeholder: String {

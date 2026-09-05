@@ -118,7 +118,7 @@ private struct Row: View {
             HStack(spacing: Theme.Space.s) {
                 Image(systemName: glyph)
                     .font(.system(size: 11))
-                    .foregroundStyle(selected ? Theme.Colors.primary : Theme.Colors.tertiary)
+                    .foregroundStyle(selected ? Theme.Colors.yellow : Theme.Colors.tertiary)
                     .frame(width: 14)
                 Text(label)
                     .font(Theme.Text.body)
@@ -140,9 +140,13 @@ private struct Row: View {
         .animation(Theme.Motion.control, value: selected)
     }
 
+    /// Selection is the accent at reading weight. Hover is one step of lift and nothing more.
+    ///
+    /// Both were shades of the ground before, which on a near-black interface is no signal at
+    /// all: a selected row and an idle one looked the same until you squinted.
     private var background: Color {
-        if selected { return Theme.Colors.background }
-        return hovering ? Theme.Colors.background.opacity(0.5) : .clear
+        if selected { return Theme.Colors.yellowSoft }
+        return hovering ? Theme.Colors.surfaceAlt : .clear
     }
 }
 

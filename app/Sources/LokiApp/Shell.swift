@@ -45,6 +45,15 @@ struct Shell: View {
 
                     centre
                         .frame(maxWidth: .infinity)
+                        // Keyed on the screen so switching is a crossfade with a little travel,
+                        // rather than one layout being replaced by another between frames.
+                        .id(screen)
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .offset(y: 8)),
+                                removal: .opacity
+                            )
+                        )
 
                     if rail && roomy && screen == .thread {
                         Divider().overlay(Theme.Colors.border)
@@ -60,6 +69,7 @@ struct Shell: View {
             .animation(Theme.Motion.panel, value: sidebar)
             .animation(Theme.Motion.panel, value: rail)
             .animation(Theme.Motion.panel, value: roomy)
+            .animation(Theme.Motion.disclose, value: screen)
             .onChange(of: roomy) { _, isRoomy in
                 if !isRoomy { rail = false }
             }
