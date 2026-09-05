@@ -45,6 +45,24 @@ cp "$BIN" "$BUNDLE/Contents/MacOS/Loki"
 # Package.swift, so the bundle and the bare binary cannot disagree about LSUIElement.
 cp "$ROOT/app/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 
+# The Dock icon, built from the same artwork the app draws its own mark from, so the two cannot
+# drift. `branding/logo/` is the only place the logo lives.
+ICON_SRC="$ROOT/branding/logo/logo.png"
+if [ -f "$ICON_SRC" ]; then
+  echo "==> app icon"
+  ICONSET="$(mktemp -d)/Loki.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 128 256 512; do
+    sips -z $size $size "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    sips -z $((size * 2)) $((size * 2)) "$ICON_SRC" \
+      --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$BUNDLE/Contents/Resources/Loki.icns"
+  rm -rf "$(dirname "$ICONSET")"
+else
+  echo "warning: $ICON_SRC is missing, so the app keeps the default icon" >&2
+fi
+
 echo "==> ad-hoc signing"
 codesign --force --sign - "$BUNDLE"
 

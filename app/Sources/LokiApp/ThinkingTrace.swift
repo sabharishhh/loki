@@ -35,7 +35,7 @@ struct ThinkingTrace: View {
                     )
             }
         }
-        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
         .overlay {
             RoundedRectangle(cornerRadius: Theme.Radius.panel)
                 .strokeBorder(open ? Theme.Colors.borderStrong : Theme.Colors.border, lineWidth: 1)

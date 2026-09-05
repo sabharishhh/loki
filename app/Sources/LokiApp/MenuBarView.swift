@@ -37,7 +37,7 @@ struct MenuBarView: View {
         }
         .padding(Theme.Space.l)
         .frame(width: 300, alignment: .leading)
-        .background(Theme.Colors.surface)
+        .background(Theme.Colors.background)
     }
 
     private var header: some View {

@@ -9,28 +9,23 @@ import SwiftUI
 /// Yellow is the one accent and it means Loki: the mark, the thing being answered, the control
 /// that acts. It is never used to decorate and never used for two meanings at once.
 enum Theme {
+    /// Reads straight from `Palette`. Nothing here invents a shade.
     enum Colors {
-        /// The window ground.
-        static let background = adaptive(light: 0xF6F5F2, dark: 0x070707)
-        /// Raised against the ground: sidebar, title bar, the composer.
-        static let surface = adaptive(light: 0xFCFCFA, dark: 0x101010)
-        /// Raised again: the user's own turn, a hovered row, a field.
-        static let surfaceAlt = adaptive(light: 0xFFFFFF, dark: 0x171717)
+        static let background = adaptive(light: Palette.Light.background, dark: Palette.Dark.background)
+        static let surface = adaptive(light: Palette.Light.surface, dark: Palette.Dark.surface)
+        static let surfaceAlt = adaptive(light: Palette.Light.surfaceAlt, dark: Palette.Dark.surfaceAlt)
 
-        static let primary = adaptive(light: 0x181817, dark: 0xF1F1EF)
-        static let secondary = adaptive(light: 0x62615D, dark: 0xA4A4A0)
-        static let tertiary = adaptive(light: 0x8D8C87, dark: 0x70706C)
+        static let primary = adaptive(light: Palette.Light.primary, dark: Palette.Dark.primary)
+        static let secondary = adaptive(light: Palette.Light.secondary, dark: Palette.Dark.secondary)
+        static let tertiary = adaptive(light: Palette.Light.tertiary, dark: Palette.Dark.tertiary)
 
-        /// The mark, and anything that acts.
-        static let yellow = adaptive(light: 0xFFF12F, dark: 0xFFF12F)
-        static let yellowHover = adaptive(light: 0xF2D900, dark: 0xE9DC00)
-        /// Yellow at reading weight, for a filled row that must not shout.
-        static let yellowSoft = adaptive(light: 0xFFF8B8, dark: 0x2A2918)
-        /// What sits on yellow. Always the dark ink, in both themes, because yellow is light in both.
-        static let onYellow = adaptive(light: 0x181817, dark: 0x181817)
+        static let yellow = adaptive(light: Palette.Light.yellow, dark: Palette.Dark.yellow)
+        static let yellowHover = adaptive(light: Palette.Light.yellowHover, dark: Palette.Dark.yellowHover)
+        static let yellowSoft = adaptive(light: Palette.Light.yellowSoft, dark: Palette.Dark.yellowSoft)
+        static let onYellow = adaptive(light: Palette.Light.onYellow, dark: Palette.Dark.onYellow)
 
-        static let border = adaptive(light: 0xE4E2DC, dark: 0x292929)
-        static let borderStrong = adaptive(light: 0xD5D2CA, dark: 0x3A3A38)
+        static let border = adaptive(light: Palette.Light.border, dark: Palette.Dark.border)
+        static let borderStrong = adaptive(light: Palette.Light.borderStrong, dark: Palette.Dark.borderStrong)
     }
 
     /// What the machine is doing, as a word, a glyph and an expression on the mark.
@@ -186,22 +181,4 @@ enum Theme {
 /// at a random phase looks broken rather than calm.
 extension EnvironmentValues {
     @Entry var reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-}
-
-private func adaptive(light: UInt32, dark: UInt32) -> Color {
-    Color(nsColor: NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        return NSColor(hex: isDark ? dark : light)
-    })
-}
-
-private extension NSColor {
-    convenience init(hex: UInt32) {
-        self.init(
-            srgbRed: Double((hex >> 16) & 0xFF) / 255,
-            green: Double((hex >> 8) & 0xFF) / 255,
-            blue: Double(hex & 0xFF) / 255,
-            alpha: 1
-        )
-    }
 }

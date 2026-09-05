@@ -37,7 +37,7 @@ struct Composer: View {
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.l)
         .frame(maxWidth: .infinity)
-        .background(.regularMaterial)
+        .background(Theme.Colors.background)
         .onAppear {
             focused = true
             watchForTalkKey()
@@ -78,7 +78,7 @@ struct Composer: View {
             .disabled(!isRunning && draft.isEmpty && !isRecording)
         }
         .padding(Theme.Space.m)
-        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
         .overlay {
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .strokeBorder(borderColor, lineWidth: borderWidth)

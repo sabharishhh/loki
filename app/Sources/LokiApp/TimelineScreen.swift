@@ -69,7 +69,7 @@ struct TimelineScreen: View {
             .padding(.vertical, Theme.Space.xxl)
             .frame(maxWidth: .infinity)
         }
-        .background(Theme.Colors.surface)
+        .background(Theme.Colors.background)
         .task {
             let known = conversation.knowledge()
             entities = known.entities

@@ -100,6 +100,8 @@ private struct TopBar: View {
             .toggleStyle(BarToggle())
             .help("Sessions")
 
+            MarkBadge(size: 19, animated: false)
+
             Text("Loki")
                 .font(Theme.Text.title)
                 .kerning(Theme.Text.titleTracking)
@@ -133,7 +135,9 @@ private struct TopBar: View {
         .padding(.leading, 78)
         .padding(.trailing, Theme.Space.l)
         .padding(.vertical, Theme.Space.m)
-        .background(.regularMaterial)
+        // The ground, not a slab. A bar three shades lighter than the app reads as a toolbar
+        // bolted on top; a hairline says the same thing and takes no light.
+        .background(Theme.Colors.background)
         .animation(Theme.Motion.control, value: screen)
     }
 }
