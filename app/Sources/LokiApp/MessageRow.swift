@@ -43,6 +43,10 @@ struct MessageRow: View {
                 footer
             }
         }
+        // Without this the row only registers a hover where it actually draws, so reaching for
+        // the controls crosses a gap, the row thinks the pointer left, and they vanish under the
+        // cursor. The whole rectangle is the row.
+        .contentShape(.rect)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.control, value: hovering)
         .animation(Theme.Motion.disclose, value: editing)
@@ -104,15 +108,15 @@ struct MessageRow: View {
 
     /// The time, and the controls, on one line under the turn.
     private var footer: some View {
-        HStack(spacing: Theme.Space.s) {
+        HStack(spacing: Theme.Space.xs + 2) {
             if isUser { Spacer(minLength: 0) }
 
             // Held back until the pointer arrives, like the controls beside it. A time on every
             // row is a column of numbers down the thread, and the thread is meant to read as
             // writing.
             Text(turn.at, format: .dateTime.hour().minute())
-                .font(Theme.Text.meta)
-                .kerning(Theme.Text.metaTracking)
+                .font(Theme.Text.micro)
+                .kerning(Theme.Text.microTracking)
                 .foregroundStyle(Theme.Colors.tertiary)
                 .opacity(revealed ? 1 : 0)
                 .animation(reduceMotion ? nil : Theme.Motion.control, value: revealed)
@@ -123,11 +127,11 @@ struct MessageRow: View {
 
             if !isUser { Spacer(minLength: 0) }
         }
-        .frame(height: 18)
+        .frame(height: 15)
     }
 
     private var actions: some View {
-        HStack(spacing: Theme.Space.xs) {
+        HStack(spacing: 1) {
             RowAction(
                 icon: copied ? "checkmark" : "square.on.square",
                 help: copied ? "Copied" : "Copy"
@@ -170,12 +174,12 @@ private struct RowAction: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(hovering ? Theme.Colors.primary : Theme.Colors.tertiary)
-                .frame(width: 18, height: 18)
+                .frame(width: 15, height: 15)
                 .background(
                     hovering ? Theme.Colors.surfaceAlt : .clear,
-                    in: .rect(cornerRadius: 5)
+                    in: .rect(cornerRadius: 4)
                 )
                 .contentTransition(.symbolEffect(.replace))
         }

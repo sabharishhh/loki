@@ -16,11 +16,7 @@ struct LokiApp: App {
             // The mark, not a generic glyph. Rendered rather than templated, because the menu
             // bar tints a template image to match the bar and the whole point of this one is that
             // it is yellow.
-            Image("loki-mark", bundle: .module)
-                .resizable()
-                .renderingMode(.original)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 18, height: 18)
+            MarkBadge(size: 18, animated: false)
         }
         .menuBarExtraStyle(.window)
     }

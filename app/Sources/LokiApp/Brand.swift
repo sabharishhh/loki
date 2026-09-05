@@ -22,4 +22,29 @@ enum Brand {
     static let artworkDirectory = "branding/logo"
     /// The file the app icon is generated from.
     static let iconFile = "logo.png"
+
+    /// The mark, loaded once.
+    ///
+    /// **By URL, not by name.** `Image("loki-mark", bundle:)` does an asset-catalog lookup, and a
+    /// loose PNG is not an asset, so it resolves to nothing and draws nothing: no crash, no
+    /// warning, just a hole where the logo should be. Asking the bundle for the file is
+    /// unambiguous, and the fallback below means a missing asset is loud rather than invisible.
+    static let image: NSImage? = {
+        let named = "loki-mark"
+        let candidates: [Bundle] = [.module, .main]
+        for bundle in candidates {
+            if let url = bundle.url(forResource: named, withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
+        }
+        // Some builds nest the resource bundle rather than flattening it.
+        if let nested = Bundle.main.url(forResource: "LokiApp_LokiApp", withExtension: "bundle"),
+           let bundle = Bundle(url: nested),
+           let url = bundle.url(forResource: named, withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+        return nil
+    }()
 }

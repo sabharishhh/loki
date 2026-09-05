@@ -2,10 +2,10 @@ import SwiftUI
 
 /// Loki's mark.
 ///
-/// **The artwork itself, not a redrawing of it.** `Resources/loki-mark.png` is a symlink to
-/// `branding/logo/logo.png`, so the thread, the title bar and the Dock icon are all the same file
-/// and none of them can drift. An earlier version drew the face from measured ratios, which was a
-/// worse idea than it sounded: at 22pt the eyes are two pixels wide and every rounding error shows.
+/// **The artwork itself, not a redrawing of it.** `Resources/loki-mark.png` is copied from
+/// `branding/logo/logo.png` on every build, so the thread, the title bar, the menu bar and the
+/// Dock icon are all one file. An earlier version drew the face from measured ratios, which was a
+/// worse idea than it sounded: at 22pt an eye is two pixels wide and every rounding error shows.
 ///
 /// What moves is the mark as a whole. The glow breathes while Loki is working, it leans a few
 /// degrees as it starts, and it settles when it stops, so the avatar carries the state without
@@ -24,9 +24,7 @@ struct Mark: View {
     private var working: Bool { state == .thinking || state == .reading }
 
     var body: some View {
-        Image("loki-mark", bundle: .module)
-            .resizable()
-            .interpolation(.high)
+        artwork
             .aspectRatio(contentMode: .fit)
             .scaleEffect(1 + pulse * 0.045)
             .rotationEffect(.degrees(lean ? 5 : 0))
@@ -38,6 +36,22 @@ struct Mark: View {
             .animation(Theme.Motion.control, value: state)
             .task(id: taskKey) { await breathe() }
             .accessibilityHidden(true)
+    }
+
+    /// The artwork, or something obviously wrong if it could not be found.
+    ///
+    /// A missing asset used to draw nothing at all, which is the worst outcome: the interface
+    /// looks merely empty and nobody goes looking. A filled disc says the layout is right and the
+    /// file is not there.
+    @ViewBuilder
+    private var artwork: some View {
+        if let image = Brand.image {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        } else {
+            Circle().fill(Theme.Colors.yellow)
+        }
     }
 
     /// Brighter while working, and steady rather than dark when it is not.
