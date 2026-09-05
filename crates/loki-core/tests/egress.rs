@@ -331,3 +331,283 @@ async fn every_byte_on_the_wire_is_a_byte_the_stream_accounted_for() {
         "one request, one event"
     );
 }
+
+// The delegated exit (§21.7). A browser composes its own requests, so the composed path cannot
+// cover it. What the exit still owns is the socket, and these say so against real ones.
+
+mod delegated {
+    use super::{Arc, Mutex};
+    use loki_core::adapters::egress::Http;
+    use loki_core::core::event::Event;
+    use loki_core::core::sink::EventSink;
+    use loki_core::ports::egress::{Delegate as _, DenyReason, EgressMode, Policy, ThirdParty};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<Event>>,
+    }
+
+    impl EventSink for Recorder {
+        fn emit(&self, event: &Event) {
+            self.seen
+                .lock()
+                .expect("recorder poisoned")
+                .push(event.clone());
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<Event> {
+            self.seen.lock().expect("recorder poisoned").clone()
+        }
+    }
+
+    /// A server that answers anything with a fixed body, so the tunnel has two ends.
+    async fn upstream(body: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 1024];
+                let _ = stream.read(&mut scratch).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+        port
+    }
+
+    /// Speaks just enough of a proxy client to open a tunnel and talk through it.
+    async fn through(
+        proxy: std::net::SocketAddr,
+        authority: &str,
+        send: &[u8],
+    ) -> (String, Vec<u8>) {
+        let mut stream = TcpStream::connect(proxy).await.expect("reach the exit");
+        stream
+            .write_all(
+                format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes(),
+            )
+            .await
+            .expect("write connect");
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => head.push(byte[0]),
+            }
+        }
+        let status = String::from_utf8_lossy(&head)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        let mut body = Vec::new();
+        if status.contains("200") && !send.is_empty() {
+            stream.write_all(send).await.expect("write through");
+            // Half-close, because a tunnel settles when both directions have. A client that holds
+            // its write side open forever is a tunnel that never reports its totals, which is
+            // correct behaviour and would hang this test.
+            stream.shutdown().await.expect("half close");
+            let _ = stream.read_to_end(&mut body).await;
+        }
+        (status, body)
+    }
+
+    /// The whole point: bytes cross a socket the exit opened, and the stream accounted for them.
+    #[tokio::test]
+    async fn a_tunnel_carries_bytes_and_the_stream_says_so() {
+        let port = upstream(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi").await;
+        let events = Arc::new(Recorder::default());
+        let http = Http::new(events.clone()).expect("client");
+        let exit = http
+            .delegate(Policy::for_target("127.0.0.1"))
+            .await
+            .expect("open the exit");
+
+        let (status, body) = through(
+            exit.address(),
+            &format!("127.0.0.1:{port}"),
+            b"GET / HTTP/1.1\r\n\r\n",
+        )
+        .await;
+        assert!(status.contains("200"), "the tunnel opened: {status}");
+        assert!(!body.is_empty(), "bytes came back through it");
+
+        let seen = events.events();
+        // Announced before anything moved, with no path, because a tunnel has none to know.
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                Event::Egress {
+                    path: None,
+                    bytes: 0,
+                    mode: EgressMode::Delegated,
+                    ..
+                }
+            )),
+            "the connect was announced before the send: {seen:?}"
+        );
+        let mut settled = None;
+        for _ in 0..50 {
+            settled = events.events().iter().find_map(|event| match event {
+                Event::EgressSettled {
+                    bytes_out,
+                    bytes_in,
+                    ..
+                } => Some((*bytes_out, *bytes_in)),
+                _ => None,
+            });
+            if settled.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (out, back) = settled.expect("the tunnel settled");
+        assert!(
+            out > 0 && back > 0,
+            "both directions counted: out={out} in={back}"
+        );
+    }
+
+    /// A refused host is an act, and the bytes never move.
+    #[tokio::test]
+    async fn a_blocked_host_is_refused_and_recorded() {
+        let port = upstream(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        let events = Arc::new(Recorder::default());
+        let http = Http::new(events.clone()).expect("client");
+        let exit = http
+            .delegate(Policy::for_target("example.com").blocking(["127.0.0.1".to_owned()]))
+            .await
+            .expect("open the exit");
+
+        let (status, _) = through(exit.address(), &format!("127.0.0.1:{port}"), b"").await;
+        assert!(status.contains("403"), "refused at the exit: {status}");
+
+        let seen = events.events();
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                Event::EgressDenied {
+                    reason: DenyReason::Blocked,
+                    ..
+                }
+            )),
+            "the refusal is in the stream: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::Egress { .. })),
+            "nothing was announced as leaving: {seen:?}"
+        );
+    }
+
+    /// **The handle is the lifetime.** §18.3's interrupt drops it, and if that does not close the
+    /// listener the exit outlives the turn that opened it and a browser can keep using it.
+    #[tokio::test]
+    async fn dropping_the_handle_closes_the_exit() {
+        let events = Arc::new(Recorder::default());
+        let http = Http::new(events).expect("client");
+        let exit = http
+            .delegate(Policy::for_target("example.com"))
+            .await
+            .expect("open");
+        let address = exit.address();
+
+        assert!(TcpStream::connect(address).await.is_ok(), "open while held");
+        drop(exit);
+
+        // The accept loop wakes on cancellation rather than on a timer, but the socket closing is
+        // still a scheduling step away.
+        let mut refused = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if TcpStream::connect(address).await.is_err() {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "the listener is gone once the handle is");
+    }
+
+    /// Plain HTTP is refused rather than rewritten, and visibly.
+    #[tokio::test]
+    async fn an_untunnelled_request_is_refused() {
+        let events = Arc::new(Recorder::default());
+        let http = Http::new(events.clone()).expect("client");
+        let exit = http
+            .delegate(Policy::for_target("example.com"))
+            .await
+            .expect("open");
+
+        let mut stream = TcpStream::connect(exit.address()).await.expect("reach");
+        stream
+            .write_all(b"GET http://example.com/thing HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .expect("write");
+        let mut head = Vec::new();
+        let _ = stream.read_to_end(&mut head).await;
+        assert!(String::from_utf8_lossy(&head).contains("403"));
+        assert!(
+            events.events().iter().any(|event| matches!(
+                event,
+                Event::EgressDenied { host, .. } if host == "example.com"
+            )),
+            "the host is named in the refusal"
+        );
+    }
+
+    // The policy itself, which is arithmetic and worth checking exhaustively rather than through
+    // a socket.
+
+    #[test]
+    fn a_target_and_its_subdomains_are_reachable() {
+        let policy = Policy::for_target("example.com").without_third_parties();
+        assert_eq!(policy.decide("example.com"), Ok(()));
+        assert_eq!(policy.decide("cdn.example.com"), Ok(()));
+        assert_eq!(policy.decide("EXAMPLE.COM"), Ok(()));
+        assert_eq!(policy.decide("example.com."), Ok(()));
+        assert_eq!(policy.decide("other.test"), Err(DenyReason::NotPermitted));
+    }
+
+    /// The classic way a blocklist stops blocking: suffix matching that ignores the dot.
+    #[test]
+    fn a_lookalike_domain_is_not_the_domain() {
+        let policy = Policy::for_target("example.com").without_third_parties();
+        for lookalike in [
+            "notexample.com",
+            "evil-example.com",
+            "example.com.attacker.test",
+        ] {
+            assert_eq!(
+                policy.decide(lookalike),
+                Err(DenyReason::NotPermitted),
+                "{lookalike} is not example.com"
+            );
+        }
+    }
+
+    /// **The blocklist wins over the target.** The blocklist is the safety rule and the target is
+    /// only the request, so a target that is itself blocked stays blocked rather than being waved
+    /// through by the thing that asked for it.
+    #[test]
+    fn the_blocklist_beats_the_target() {
+        let policy = Policy::for_target("tracker.test").blocking(["tracker.test".to_owned()]);
+        assert_eq!(policy.decide("tracker.test"), Err(DenyReason::Blocked));
+        assert_eq!(
+            policy.decide("pixel.tracker.test"),
+            Err(DenyReason::Blocked)
+        );
+    }
+
+    #[test]
+    fn third_parties_are_allowed_by_default_and_the_blocklist_does_the_work() {
+        let policy = Policy::for_target("example.com").blocking(["ads.test".to_owned()]);
+        assert_eq!(policy.third_party, ThirdParty::Allow);
+        assert_eq!(policy.decide("cdn.other.test"), Ok(()));
+        assert_eq!(policy.decide("ads.test"), Err(DenyReason::Blocked));
+    }
+}

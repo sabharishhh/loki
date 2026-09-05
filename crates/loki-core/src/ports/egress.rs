@@ -109,6 +109,153 @@ pub enum EgressError {
     Cancelled,
 }
 
+/// Who composed the request that left (§21.7).
+///
+/// The exit opens every socket either way. What differs is whether it also built what went down
+/// it, and that is the difference between knowing the path and not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    /// Loki built the request, so the event's byte count and the socket's cannot disagree.
+    Composed,
+    /// A browser built it and the exit tunnelled it. Host and bytes are known; the path is not.
+    Delegated,
+}
+
+/// Why the exit refused a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyReason {
+    /// Not the target and third parties are refused for this fetch.
+    NotPermitted,
+    /// On the blocklist: an ad, a tracker, or the browser's own telemetry.
+    Blocked,
+}
+
+/// Whether a fetch may reach hosts other than the one it asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThirdParty {
+    /// Ordinary pages, which load scripts and data from elsewhere.
+    Allow,
+    /// Nothing but the target. For a fetch that should touch one host and no other.
+    Deny,
+}
+
+/// What a delegated exit will let through.
+///
+/// Default deny is not the rule here and that is deliberate: a page that cannot reach a CDN is a
+/// page that did not load, which §21.5 would then have to distinguish from a page that was empty.
+/// The blocklist is what does the work, and every refusal is an event (§17.1).
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// Always reachable, whatever else says.
+    pub target: String,
+    /// Refused outright. Matched on the host and on any subdomain of it.
+    pub blocked: Vec<String>,
+    pub third_party: ThirdParty,
+}
+
+impl Policy {
+    /// A policy for one page, with nothing blocked.
+    #[must_use]
+    pub fn for_target(target: impl Into<String>) -> Self {
+        Self {
+            target: target.into(),
+            blocked: Vec::new(),
+            third_party: ThirdParty::Allow,
+        }
+    }
+
+    #[must_use]
+    pub fn blocking(mut self, hosts: impl IntoIterator<Item = String>) -> Self {
+        self.blocked.extend(hosts);
+        self
+    }
+
+    #[must_use]
+    pub const fn without_third_parties(mut self) -> Self {
+        self.third_party = ThirdParty::Deny;
+        self
+    }
+
+    /// Whether this host may be reached.
+    ///
+    /// The blocklist wins over the target, so a target that is itself blocked stays blocked. That
+    /// ordering matters: the blocklist is the safety rule and the target is the request.
+    ///
+    /// # Errors
+    /// Returns why the host was refused.
+    pub fn decide(&self, host: &str) -> Result<(), DenyReason> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if self.blocked.iter().any(|blocked| covers(blocked, &host)) {
+            return Err(DenyReason::Blocked);
+        }
+        if covers(&self.target, &host) || self.third_party == ThirdParty::Allow {
+            return Ok(());
+        }
+        Err(DenyReason::NotPermitted)
+    }
+}
+
+/// Whether `rule` covers `host`: the same name, or a subdomain of it.
+///
+/// Suffix matching alone would let `evil-example.com` through a rule for `example.com`, which is
+/// the classic way a blocklist stops blocking.
+fn covers(rule: &str, host: &str) -> bool {
+    let rule = rule.trim_end_matches('.').to_ascii_lowercase();
+    host == rule || host.ends_with(&format!(".{rule}"))
+}
+
+/// A running delegated exit, and the only way to reach one.
+///
+/// **Holding this is what makes a browser legal.** §21.7 requires every socket to be opened by the
+/// exit, and a browser opens its own, so the browser is launched pointing at this address and a
+/// browser session cannot be constructed without one of these. Dropping it cancels the proxy, so
+/// §18.3's interrupt closes the exit and the browser together rather than needing a second guard.
+#[derive(Debug)]
+pub struct Delegated {
+    address: std::net::SocketAddr,
+    cancel: CancellationToken,
+}
+
+impl Delegated {
+    /// Built by the adapter. Public so the adapter can construct it; nothing else should.
+    #[must_use]
+    pub const fn new(address: std::net::SocketAddr, cancel: CancellationToken) -> Self {
+        Self { address, cancel }
+    }
+
+    #[must_use]
+    pub const fn address(&self) -> std::net::SocketAddr {
+        self.address
+    }
+
+    /// What to hand a browser's `--proxy-server`.
+    #[must_use]
+    pub fn proxy_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+}
+
+impl Drop for Delegated {
+    fn drop(&mut self) {
+        // Cancellation, not a dropped join handle. Dropping a handle detaches the task and leaves
+        // the listener bound, which would outlive the turn that opened it.
+        self.cancel.cancel();
+    }
+}
+
+/// Opens an exit for a caller that composes its own requests.
+///
+/// Separate from [`Egress`] so a caller that only sends never sees it, and so the test doubles that
+/// implement `Egress` are not obliged to pretend they can open a socket. One exit, two capabilities.
+#[async_trait]
+pub trait Delegate: Send + Sync {
+    /// # Errors
+    /// Fails if the local listener cannot be bound.
+    async fn delegate(&self, policy: Policy) -> Result<Delegated, EgressError>;
+}
+
 /// Sends a request, and emits the event that says so before it does.
 ///
 /// # Errors

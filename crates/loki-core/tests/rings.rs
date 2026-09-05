@@ -136,10 +136,14 @@ fn the_check_can_actually_see_the_source() {
 /// somebody deletes.
 #[test]
 fn nothing_but_the_egress_adapter_builds_a_transport() {
-    const TRANSPORTS: [&str; 6] = [
+    const TRANSPORTS: [&str; 8] = [
         "reqwest::Client",
         "reqwest::get",
         "reqwest::blocking",
+        // A socket is a socket. The delegated exit binds a listener and dials upstream, and a
+        // second one of either anywhere else is the browser-shaped hole in §21.7's accounting.
+        "TcpListener::bind",
+        "TcpStream::connect",
         "TcpStream::connect",
         "hyper::Client",
         "ureq::",

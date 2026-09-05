@@ -98,7 +98,9 @@ pub fn plain(event: &Event) -> Option<String> {
         | Event::ModelCall { .. }
         // A request leaving is the trace's business and not the reader's. What the request was
         // *for* already has its own plain line.
-        | Event::Egress { .. } => return None,
+        | Event::Egress { .. }
+        | Event::EgressSettled { .. }
+        | Event::EgressDenied { .. } => return None,
     })
 }
 
@@ -182,9 +184,22 @@ pub fn trace(event: &Event) -> String {
             "ModelCall {provider} role={role:?} locality={locality:?} in={tokens_in} out={tokens_out} cost={}c",
             cost.charge(*tokens_in, *tokens_out).get()
         ),
-        Event::Egress { host, path, bytes } => {
-            format!("Egress {host}{path} {bytes}b")
+        Event::Egress {
+            host,
+            path,
+            bytes,
+            mode,
+        } => {
+            // A tunnel has no path to print, and printing an empty one would read as the root.
+            let where_to = path.as_deref().unwrap_or(" (tunnel)");
+            format!("Egress {host}{where_to} {bytes}b {mode:?}")
         }
+        Event::EgressSettled {
+            host,
+            bytes_out,
+            bytes_in,
+        } => format!("EgressSettled {host} out={bytes_out}b in={bytes_in}b"),
+        Event::EgressDenied { host, reason } => format!("EgressDenied {host} {reason:?}"),
         Event::BudgetWarning { spent, ceiling } => {
             format!("BudgetWarning {}c of {}c", spent.get(), ceiling.get())
         }

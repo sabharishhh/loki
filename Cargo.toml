@@ -11,7 +11,7 @@ authors = ["Sabharish"]
 
 [workspace.dependencies]
 loki-core = { path = "crates/loki-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

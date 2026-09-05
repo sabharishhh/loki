@@ -11,6 +11,7 @@ use super::vocab::{
     ActionKind, BlockReason, CallPath, Cents, CostModel, Lane, Locality, ModelRole, Rung,
     ScopeKind, TaskStatus, Tier, WriteOp,
 };
+use crate::ports::egress::{DenyReason, EgressMode};
 
 /// Something the system did.
 ///
@@ -109,8 +110,32 @@ pub enum Event {
     /// a log file, and a query string is where a credential ends up.
     Egress {
         host: String,
-        path: String,
+        /// Absent when the exit tunnelled a request it did not compose.
+        ///
+        /// A delegated connection is a TLS tunnel: the host is known before it opens and the path
+        /// never is. A field that cannot be filled honestly has to be able to be absent, or the
+        /// next person to touch this fills it with a guess.
+        path: Option<String>,
         bytes: usize,
+        mode: EgressMode,
+    },
+    /// What a tunnel actually carried, once it closed.
+    ///
+    /// The delegated exit emits `Egress` on the connect, before anything moves, because §21.7's
+    /// rule is that the event precedes the send. Neither byte count is knowable then, so the
+    /// totals arrive here. Composed egress needs no settlement: it counted exactly, up front.
+    EgressSettled {
+        host: String,
+        bytes_out: usize,
+        bytes_in: usize,
+    },
+    /// A host the exit refused to reach.
+    ///
+    /// Principle 7: a refusal is an act. It is also the only way §12.9 can say what a page tried
+    /// to reach rather than only what it was allowed to reach.
+    EgressDenied {
+        host: String,
+        reason: DenyReason,
     },
     BudgetWarning {
         spent: Cents,
