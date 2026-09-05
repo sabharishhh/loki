@@ -10,6 +10,9 @@ struct Turn: Identifiable {
     let id = UUID()
     let speaker: Speaker
     var text: String
+    /// When it landed. Shown on every turn, because a thread you come back to is a record and a
+    /// record without times is a transcript of nothing in particular.
+    var at = Date()
 }
 
 /// One step inside a scope, as the rail renders it.
@@ -257,6 +260,30 @@ final class Conversation {
                 streamer.accept(token)
             }
         }
+    }
+
+    /// Sends a turn again after an edit, dropping everything that followed it.
+    ///
+    /// The answer to an edited question is not the answer to the question as edited, and keeping
+    /// it would leave the thread reading as though Loki had replied to something nobody asked.
+    func resend(from id: Turn.ID, text: String) {
+        if let cut = entries.firstIndex(where: {
+            if case .turn(let turn) = $0 { return turn.id == id }
+            return false
+        }) {
+            entries.removeSubrange(cut...)
+        }
+        send(text)
+    }
+
+    /// Whether this turn is the one currently being written.
+    ///
+    /// Only ever the last assistant turn, and only while a turn is running. Asked per row rather
+    /// than stored on the turn, so nothing has to remember to clear a flag.
+    func isStreaming(_ turn: Turn) -> Bool {
+        guard composer == .running, turn.speaker == .assistant else { return false }
+        if case .turn(let last) = entries.last { return last.id == turn.id }
+        return false
     }
 
     func send(_ text: String) {

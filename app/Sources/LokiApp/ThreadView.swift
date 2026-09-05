@@ -14,8 +14,18 @@ struct ThreadView: View {
                 LazyVStack(alignment: .leading, spacing: Theme.Space.xl) {
                     ForEach(conversation.entries) { entry in
                         switch entry {
-                        case .turn(let turn): TurnView(turn: turn)
-                        case .scope(let scope): ScopeRail(scope: scope)
+                        case .turn(let turn):
+                            MessageRow(
+                                turn: turn,
+                                streaming: conversation.isStreaming(turn),
+                                onEdit: { text in
+                                    conversation.resend(from: turn.id, text: text)
+                                }
+                            )
+                            .id(turn.id)
+                        case .scope(let scope):
+                            ThinkingTrace(scope: scope, live: scope.state != .idle)
+                                .id(scope.id)
                         }
                     }
 
@@ -40,7 +50,7 @@ struct ThreadView: View {
                 withAnimation(Theme.Motion.control) { proxy.scrollTo(last.id, anchor: .bottom) }
             }
         }
-        .background(Theme.Colors.surface)
+        .background(Theme.Colors.background)
     }
 }
 
