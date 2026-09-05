@@ -4,7 +4,12 @@ import SwiftUI
 ///
 /// The parse is a pure function of the text so far, which is what makes it safe to run on every
 /// token. Blocks already emitted keep their shape as more arrives; only the last one changes.
-struct MarkdownText: View {
+///
+/// **Equatable, and used as `.equatable()`.** A turn arriving grows `entries`, which re-evaluates
+/// every visible row, which re-parsed the markdown of every answer on screen sixty times a second
+/// while one of them streamed. Only the streaming turn's text actually changes, and comparing one
+/// string is the cheapest possible way to say so.
+struct MarkdownText: View, Equatable {
     let text: String
 
     var body: some View {

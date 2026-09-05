@@ -79,6 +79,7 @@ struct MessageRow: View {
                 }
         } else {
             MarkdownText(text: turn.text)
+                .equatable()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

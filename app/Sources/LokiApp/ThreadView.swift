@@ -8,27 +8,45 @@ import SwiftUI
 struct ThreadView: View {
     let conversation: Conversation
 
-    /// Whether the app is tracking the end of the thread.
-    ///
-    /// **Set by sending, cleared only by scrolling up on purpose.** Gating the follow on "is the
-    /// end currently on screen" was wrong in both directions: sending a message from halfway up
-    /// the thread left the reader looking at an old answer with no sign anything had happened, and
-    /// the space this view opens under a new question puts the end off screen the instant it is
-    /// asked, which switched the follow off for the whole reply.
-    @State private var following = true
-    /// Whether the end of the thread is on screen. Drives the caret, nothing else.
+    /// Whether the end of the thread is on screen. Drives the caret, and nothing else.
     @State private var atBottom = true
-    /// The last geometry seen, so a scroll the reader performed can be told from content growing
-    /// underneath them.
-    @State private var seen = Geometry()
-    /// The viewport, for the room a new question needs under it.
+    /// The viewport, for the room a new question needs under it. Changes on resize, not on scroll.
     @State private var viewport: CGFloat = 0
+    /// Everything else the scroll needs to remember.
+    ///
+    /// **A reference type on purpose, and this is the whole reason the class exists.** Scroll
+    /// geometry changes on every frame that content grows, which during a reply is sixty times a
+    /// second. Writing that into `@State` invalidates the thread on every one of those frames, and
+    /// each invalidation re-parses the markdown of every visible turn and re-lays out the stack,
+    /// which then reports new geometry. The interface spent its entire main actor redrawing itself
+    /// and the drain, the timer and the token loop all crawled behind it (B-68). Mutating a class
+    /// held in `@State` publishes nothing, which is exactly right for bookkeeping no view reads.
+    @State private var scroll = ScrollState()
 
     /// What a scroll needs to know about itself.
     private struct Geometry: Equatable {
         var offset: CGFloat = 0
         var content: CGFloat = 0
         var container: CGFloat = 0
+    }
+
+    @MainActor
+    private final class ScrollState {
+        /// Tracking the end of the thread. Set by sending, cleared only by a deliberate scroll up.
+        ///
+        /// Gating the follow on "is the end currently on screen" was wrong in both directions:
+        /// sending from halfway up a thread left the reader looking at an old answer, and the room
+        /// this view opens under a new question puts the end off screen the instant it is asked.
+        var following = true
+        /// The last geometry seen, so a scroll the reader performed can be told from content
+        /// growing underneath them.
+        var seen = Geometry()
+        /// When the follow last moved the view.
+        ///
+        /// Throttled because a programmatic scroll forces the stack to place its rows, and content
+        /// grows on every frame of a reply. Twenty times a second is indistinguishable from sixty
+        /// for text arriving, and costs a sixth of the layout.
+        var followedAt = ContinuousClock.now - .seconds(1)
     }
 
     var body: some View {
@@ -104,7 +122,7 @@ struct ThreadView: View {
             .overlay(alignment: .bottom) {
                 if !atBottom {
                     ScrollDown {
-                        following = true
+                        scroll.following = true
                         withAnimation(Theme.Motion.panel) {
                             proxy.scrollTo(Self.tailID, anchor: .bottom)
                         }
@@ -144,25 +162,34 @@ struct ThreadView: View {
     /// while the content is the same size is the reader going back for something, and the follow
     /// should stop. Telling them apart is the whole of the logic.
     private func react(to now: Geometry, proxy: ScrollViewProxy) {
-        viewport = now.container
+        let seen = scroll.seen
+        scroll.seen = now
+
         // The room under the newest turn is not content, so reaching the last word counts as
         // reaching the end even with half a screen of nothing below it.
         let end = now.content - tailRoom
         let fold = now.offset + now.container
-        atBottom = fold >= end - 24
-        defer { seen = now }
+        let reachedEnd = fold >= end - 24
+
+        // Both of these are read by the body, so both are written only when they actually change.
+        // An assignment of the same value is still an invalidation.
+        if atBottom != reachedEnd { atBottom = reachedEnd }
+        if viewport != now.container { viewport = now.container }
 
         if now.content == seen.content, now.offset < seen.offset - 2 {
-            following = false
+            scroll.following = false
             return
         }
-        if atBottom {
-            following = true
+        if reachedEnd {
+            scroll.following = true
             return
         }
         // The answer has outgrown the room left for it. Keep its last line on the fold rather than
         // pinning the empty tail, which would push the question that was asked off the top.
-        if following, now.content > seen.content, let last = lastEntryID {
+        if scroll.following, now.content > seen.content, let last = lastEntryID {
+            let now = ContinuousClock.now
+            guard now - scroll.followedAt > .milliseconds(50) else { return }
+            scroll.followedAt = now
             proxy.scrollTo(last, anchor: .bottom)
         }
     }
@@ -174,48 +201,11 @@ struct ThreadView: View {
     /// reader is not looking.
     private func arrived(proxy: ScrollViewProxy) {
         guard case .turn(let turn) = conversation.entries.last, turn.speaker == .user else { return }
-        following = true
+        scroll.following = true
         // A tick later, because the row and the room under it do not exist until this update has
         // been laid out, and scrolling to a view that has not been placed yet does nothing.
         Task { @MainActor in
             withAnimation(Theme.Motion.panel) { proxy.scrollTo(turn.id, anchor: .top) }
-        }
-    }
-}
-
-private struct TurnView: View {
-    /// How much of the column a user turn leaves clear on its left. Sets where a long one wraps.
-    private static let userTurnGutter: CGFloat = 0.25
-
-    let turn: Turn
-
-    var body: some View {
-        switch turn.speaker {
-        case .user:
-            // A leading spacer, not a trailing frame. `frame(maxWidth:alignment:)` expands to
-            // its maximum and then aligns the text inside that box, so a short turn ended up a
-            // whole cap-width short of the right edge. A spacer lets the box hug its text and
-            // pushes it against the column edge, and its minimum is what makes a long turn wrap.
-            HStack(spacing: 0) {
-                Spacer(minLength: Theme.Size.measure * Self.userTurnGutter)
-                Text(turn.text)
-                    .font(Theme.Text.body)
-                    .lineSpacing(Theme.Text.bodyLineSpacing)
-                    .foregroundStyle(Theme.Colors.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, Theme.Space.l)
-                    .padding(.vertical, Theme.Space.m)
-                    .background(
-                        Theme.Colors.surfaceAlt,
-                        in: .rect(cornerRadius: Theme.Radius.bubble)
-                    )
-            }
-
-        case .assistant:
-            // Full measure, no container. Prose, because it is prose.
-            MarkdownText(text: turn.text)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
