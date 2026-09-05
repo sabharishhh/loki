@@ -13,7 +13,14 @@ struct LokiApp: App {
             let _ = uiTrace("2 MenuBarExtra content built")
             MenuBarView(conversation: delegate.conversation, onOpen: delegate.openThread)
         } label: {
-            Image(systemName: "square.fill")
+            // The mark, not a generic glyph. Rendered rather than templated, because the menu
+            // bar tints a template image to match the bar and the whole point of this one is that
+            // it is yellow.
+            Image("loki-mark", bundle: .module)
+                .resizable()
+                .renderingMode(.original)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 18, height: 18)
         }
         .menuBarExtraStyle(.window)
     }
