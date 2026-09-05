@@ -43,6 +43,15 @@ struct MessageRow: View {
                 footer
             }
         }
+        .padding(.horizontal, Theme.Space.s)
+        .padding(.vertical, Theme.Space.xs)
+        // R3: the row says which turn the controls belong to. Without it they fade in over a dense
+        // thread looking unattached to anything. One step of lift, no border, so it reads as a
+        // pointer following the reader rather than as a selection.
+        .background(
+            revealed ? Theme.Colors.surface : .clear,
+            in: .rect(cornerRadius: Theme.Radius.panel)
+        )
         // Without this the row only registers a hover where it actually draws, so reaching for
         // the controls crosses a gap, the row thinks the pointer left, and they vanish under the
         // cursor. The whole rectangle is the row.

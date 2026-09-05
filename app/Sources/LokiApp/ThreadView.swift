@@ -8,7 +8,21 @@ import SwiftUI
 struct ThreadView: View {
     let conversation: Conversation
 
+    /// Whether the newest turn is on screen. Only when it is not does the app follow the stream,
+    /// because yanking the view down while somebody is reading back is worse than a stale scroll.
+    @State private var atBottom = true
+
     var body: some View {
+        if conversation.entries.isEmpty && conversation.lastError == nil {
+            Opening()
+                .transition(.opacity)
+                .background(Theme.Colors.background)
+        } else {
+            thread
+        }
+    }
+
+    private var thread: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Theme.Space.xl) {
@@ -45,10 +59,31 @@ struct ThreadView: View {
                 .padding(.vertical, Theme.Space.xxl)
                 .frame(maxWidth: .infinity)
             }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                // Within a line of the end counts as being at the end, or the caret flickers on
+                // during the last few pixels of an ordinary scroll.
+                geometry.contentOffset.y + geometry.containerSize.height
+                    >= geometry.contentSize.height - 24
+            } action: { _, atBottom in
+                self.atBottom = atBottom
+            }
             .onChange(of: conversation.entries.last?.id) {
-                guard let last = conversation.entries.last else { return }
+                guard let last = conversation.entries.last, atBottom else { return }
                 withAnimation(Theme.Motion.control) { proxy.scrollTo(last.id, anchor: .bottom) }
             }
+            .overlay(alignment: .bottom) {
+                if !atBottom {
+                    ScrollDown {
+                        guard let last = conversation.entries.last else { return }
+                        withAnimation(Theme.Motion.panel) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                    .padding(.bottom, Theme.Space.l)
+                    .transition(.opacity.combined(with: .offset(y: 8)))
+                }
+            }
+            .animation(Theme.Motion.control, value: atBottom)
         }
         .background(Theme.Colors.background)
     }
@@ -148,5 +183,39 @@ struct SessionSummary: View {
         .opacity(shown ? 1 : 0)
         .offset(y: shown ? 0 : 8)
         .onAppear { withAnimation(Theme.Motion.panel) { shown = true } }
+    }
+}
+
+/// The way back to the newest turn.
+///
+/// Appears only when the end is off screen. A control that is always there is a control nobody
+/// reads, and this one has to be noticed the one time it matters.
+private struct ScrollDown: View {
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(hovering ? Theme.Colors.onYellow : Theme.Colors.secondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    hovering ? Theme.Colors.yellow : Theme.Colors.surface,
+                    in: .circle
+                )
+                .overlay {
+                    Circle().strokeBorder(
+                        hovering ? .clear : Theme.Colors.border,
+                        lineWidth: 1
+                    )
+                }
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Theme.Motion.control, value: hovering)
+        .help("Jump to the newest")
+        .accessibilityLabel("Jump to the newest message")
     }
 }
