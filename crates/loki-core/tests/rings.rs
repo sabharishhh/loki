@@ -154,7 +154,11 @@ fn nothing_but_the_egress_adapter_builds_a_transport() {
         for file in rust_files(&src(module)) {
             // The one place allowed to. `ports/egress.rs` is deliberately not exempt: Ring 1
             // naming a transport is the other half of the same rule.
-            if file.ends_with("adapters/egress.rs") {
+            // The protocol client dials a browser this process launched, on a loopback port it
+            // chose. That is a control channel, not a way out of the machine, and the distinction
+            // is enforced in `Cdp::connect` rather than trusted: it refuses any address that is
+            // not loopback. Exempt here, and checked there.
+            if file.ends_with("adapters/egress.rs") || file.ends_with("adapters/cdp.rs") {
                 continue;
             }
             for (number, line) in code_lines(&file) {
