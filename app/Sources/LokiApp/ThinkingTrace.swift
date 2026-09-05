@@ -54,7 +54,16 @@ struct ThinkingTrace: View {
             open.toggle()
         } label: {
             HStack(spacing: Theme.Space.s) {
-                MarkBadge(state: live ? .thinking : .idle, size: 15, animated: live)
+                // A trace, not the mark. The mark means Loki is speaking, and this block is
+                // the working underneath rather than the answer, so it stays in the neutral
+                // ramp: light enough to find, quiet enough not to compete with the reply.
+                // Deliberately not a sparkle or a lightbulb, which are the two icons every AI
+                // interface reaches for.
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(live ? Theme.Colors.secondary : Theme.Colors.tertiary)
+                    .symbolEffect(.pulse, isActive: live && !reduceMotion)
+                    .frame(width: 15)
                 Text(caption)
                     .font(Theme.Text.body)
                     .foregroundStyle(live ? Theme.Colors.primary : Theme.Colors.secondary)
