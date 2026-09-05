@@ -11,13 +11,16 @@ import SwiftUI
 /// degrees as it starts, and it settles when it stops, so the avatar carries the state without
 /// anything being drawn on top of the artwork.
 struct Mark: View {
+    /// The size it will be drawn at. The artwork is rendered for this size rather than resampled
+    /// into it, which is what keeps it crisp.
+    var size: CGFloat = Theme.Size.avatar
     var state: Theme.State = .idle
     /// Turns the ambient motion off, for a still context or a screenshot.
     var animated = true
     var glow = true
 
     @Environment(\.reduceMotion) private var reduceMotion
-    /// Rides from 0 to 1 and back while working. Drives the glow and the breath together.
+    /// Rides from 0 to 1 and back while working. Drives the glow.
     @State private var pulse: CGFloat = 0
     @State private var lean = false
 
@@ -25,12 +28,13 @@ struct Mark: View {
 
     var body: some View {
         artwork
-            .aspectRatio(contentMode: .fit)
-            .scaleEffect(1 + pulse * 0.045)
+            .frame(width: size, height: size)
             .rotationEffect(.degrees(lean ? 5 : 0))
+            // The glow alone, never a scale. `scaleEffect` rasterises the image at its layout
+            // size and then stretches the bitmap, which is what made the mark look pixelated.
             .shadow(
                 color: Theme.Colors.yellow.opacity(glowStrength),
-                radius: 5 + pulse * 7
+                radius: 4 + pulse * 6
             )
             .animation(Theme.Motion.arrive, value: lean)
             .animation(Theme.Motion.control, value: state)
@@ -45,10 +49,8 @@ struct Mark: View {
     /// file is not there.
     @ViewBuilder
     private var artwork: some View {
-        if let image = Brand.image {
+        if let image = Brand.mark(points: size) {
             Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
         } else {
             Circle().fill(Theme.Colors.yellow)
         }
@@ -57,8 +59,7 @@ struct Mark: View {
     /// Brighter while working, and steady rather than dark when it is not.
     private var glowStrength: CGFloat {
         guard glow else { return 0 }
-        let base = Palette.markGlow
-        return working ? base + pulse * 0.4 : base
+        return working ? Palette.markGlow + pulse * 0.4 : Palette.markGlow
     }
 
     /// Restarts the loop when either the state or the reader's motion preference changes.
@@ -82,7 +83,6 @@ struct Mark: View {
             }
             return
         }
-        // A small tilt as it starts, so the change registers even before the glow moves.
         withAnimation(Theme.Motion.arrive) { lean = true }
         try? await Task.sleep(for: .milliseconds(280))
         withAnimation(Theme.Motion.arrive) { lean = false }
@@ -105,8 +105,7 @@ struct MarkBadge: View {
     var animated = true
 
     var body: some View {
-        Mark(state: state, animated: animated, glow: size >= 18)
-            .frame(width: size, height: size)
+        Mark(size: size, state: state, animated: animated, glow: size >= 18)
     }
 }
 

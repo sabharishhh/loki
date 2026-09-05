@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 /// **Everything about the mark, in one place.**
 ///
@@ -23,22 +24,109 @@ enum Brand {
     /// The file the app icon is generated from.
     static let iconFile = "logo.png"
 
-    /// The mark, loaded once.
+    /// The mark, trimmed and sized, cached per point size.
+    ///
+    /// Three things were wrong with handing the raw file to SwiftUI, and they compounded.
+    ///
+    /// **The file is 2400px but reports 900pt**, because the DPI baked into it is 192 rather than
+    /// 72. AppKit therefore believed it was a 900 point image, which is why the menu bar tried to
+    /// lay out a logo the height of the screen.
+    ///
+    /// **Twelve percent of every side is transparent padding.** The circle fills 76% of the frame,
+    /// so a 22pt avatar was drawing a 16pt mark floating in a box, which reads as small and badly
+    /// aligned rather than as deliberate.
+    ///
+    /// **A resizable image inside `scaleEffect` rasterises at its layout size and then scales the
+    /// bitmap**, which is what made it look pixelated. Rendering at the size actually wanted, once,
+    /// fixes it at the source.
+    static func mark(points: CGFloat) -> NSImage? {
+        let key = Int(points.rounded())
+        if let cached = cache.withLock({ $0[key] }) { return cached }
+        guard let trimmed else { return nil }
+
+        let image = NSImage(size: NSSize(width: points, height: points))
+        image.addRepresentation({
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(points * 3),
+                pixelsHigh: Int(points * 3),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )!
+            // Three times, so it stays crisp on a Retina display and on a scaled one above it.
+            rep.size = NSSize(width: points, height: points)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSGraphicsContext.current?.imageInterpolation = .high
+            trimmed.draw(
+                in: NSRect(x: 0, y: 0, width: points, height: points),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+            NSGraphicsContext.restoreGraphicsState()
+            return rep
+        }())
+        cache.withLock { $0[key] = image }
+        return image
+    }
+
+    private static let cache = OSAllocatedUnfairLock(initialState: [Int: NSImage]())
+
+    /// The artwork with its transparent margin cropped away, so the circle fills whatever box it
+    /// is given.
+    private static let trimmed: NSImage? = {
+        guard let source = loaded,
+              let cg = source.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return nil }
+        let box = opaqueBounds(of: cg)
+        guard let cropped = cg.cropping(to: box) else { return nil }
+        return NSImage(cgImage: cropped, size: NSSize(width: box.width, height: box.height))
+    }()
+
+    /// The tightest rectangle containing every pixel that is not fully transparent.
+    private static func opaqueBounds(of image: CGImage) -> CGRect {
+        let w = image.width, h = image.height
+        guard let context = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return CGRect(x: 0, y: 0, width: w, height: h) }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = context.data else { return CGRect(x: 0, y: 0, width: w, height: h) }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+
+        var minX = w, minY = h, maxX = 0, maxY = 0
+        for y in 0..<h {
+            for x in 0..<w where pixels[(y * w + x) * 4 + 3] > 16 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard minX <= maxX, minY <= maxY else { return CGRect(x: 0, y: 0, width: w, height: h) }
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+
+    /// The file, straight off disk.
     ///
     /// **By URL, not by name.** `Image("loki-mark", bundle:)` does an asset-catalog lookup, and a
     /// loose PNG is not an asset, so it resolves to nothing and draws nothing: no crash, no
-    /// warning, just a hole where the logo should be. Asking the bundle for the file is
-    /// unambiguous, and the fallback below means a missing asset is loud rather than invisible.
-    static let image: NSImage? = {
+    /// warning, just a hole where the logo should be.
+    private static let loaded: NSImage? = {
         let named = "loki-mark"
-        let candidates: [Bundle] = [.module, .main]
-        for bundle in candidates {
+        for bundle in [Bundle.module, Bundle.main] {
             if let url = bundle.url(forResource: named, withExtension: "png"),
                let image = NSImage(contentsOf: url) {
                 return image
             }
         }
-        // Some builds nest the resource bundle rather than flattening it.
         if let nested = Bundle.main.url(forResource: "LokiApp_LokiApp", withExtension: "bundle"),
            let bundle = Bundle(url: nested),
            let url = bundle.url(forResource: named, withExtension: "png"),

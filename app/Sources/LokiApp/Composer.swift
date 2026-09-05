@@ -321,6 +321,15 @@ struct MicControl: View {
     private static let maxHeight: CGFloat = 16
     private static let minHeight: CGFloat = 3
 
+    /// The heights actually drawn, which chase the readings rather than tracking them.
+    ///
+    /// **A meter wired straight to the microphone is unreadable.** Speech peaks and drops many
+    /// times a second, so every bar twitched on every sample and the result read as noise rather
+    /// than as a voice. These ease toward each new reading and fall more slowly than they rise,
+    /// which is how a level meter has always worked and why it looks calm without lying about
+    /// what it heard.
+    @State private var eased: [CGFloat] = []
+
     var body: some View {
         Button(action: action) {
             Group {
@@ -351,18 +360,41 @@ struct MicControl: View {
             ForEach(0..<Self.bars, id: \.self) { index in
                 Capsule(style: .continuous)
                     .fill(Theme.Colors.yellow)
-                    .frame(width: Self.barWidth, height: height(at: index))
+                    .frame(width: Self.barWidth, height: eased.indices.contains(index)
+                        ? eased[index]
+                        : Self.minHeight)
             }
         }
-        .animation(.spring(response: 0.16, dampingFraction: 0.62), value: levels)
+        // Long enough to smooth the sample rate, short enough that a word still lands on the beat
+        // it was spoken.
+        .animation(.smooth(duration: 0.22), value: eased)
         .transition(.opacity.combined(with: .scale(scale: 0.7)))
+        .onChange(of: levels, initial: true) { _, new in settle(toward: new) }
+    }
+
+    /// Moves the drawn heights toward the latest reading.
+    ///
+    /// Rises quickly and falls slowly, so a loud syllable registers at once and the bar sinks back
+    /// rather than snapping to silence between words.
+    private func settle(toward readings: [Float]) {
+        var next = eased
+        if next.count != Self.bars {
+            next = Array(repeating: Self.minHeight, count: Self.bars)
+        }
+        for index in 0..<Self.bars {
+            let target = height(at: index, from: readings)
+            let rising = target > next[index]
+            let rate: CGFloat = rising ? 0.55 : 0.22
+            next[index] += (target - next[index]) * rate
+        }
+        eased = next
     }
 
     /// Loudest in the middle, falling away to either side.
     ///
     /// The newest reading drives the centre bar and the older ones spread outward, so the shape
     /// grows from the middle the way a voice does rather than scrolling past like a chart.
-    private func height(at index: Int) -> CGFloat {
+    private func height(at index: Int, from levels: [Float]) -> CGFloat {
         guard !levels.isEmpty else { return Self.minHeight }
         let centre = (Self.bars - 1) / 2
         let distance = abs(index - centre)

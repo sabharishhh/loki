@@ -162,6 +162,8 @@ private struct SplitCard: View {
 
 /// One entity and everything known about it.
 private struct EntityCard: View {
+    @State private var hovering = false
+
     let entity: KnownEntity
     let conversation: Conversation
     let reload: () -> Void
@@ -183,7 +185,10 @@ private struct EntityCard: View {
             }
         }
         .padding(Theme.Space.l)
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(
+            hovering ? Theme.Colors.surface : Theme.Colors.background,
+            in: .rect(cornerRadius: Theme.Radius.panel)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.panel)
                 .stroke(Theme.Colors.border, lineWidth: 1)
@@ -191,6 +196,8 @@ private struct EntityCard: View {
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 6)
         .onAppear { withAnimation(Theme.Motion.control) { appeared = true } }
+        .onHover { hovering = $0 }
+        .animation(Theme.Motion.control, value: hovering)
     }
 
     private var heading: some View {

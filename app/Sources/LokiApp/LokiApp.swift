@@ -16,7 +16,13 @@ struct LokiApp: App {
             // The mark, not a generic glyph. Rendered rather than templated, because the menu
             // bar tints a template image to match the bar and the whole point of this one is that
             // it is yellow.
-            MarkBadge(size: 18, animated: false)
+            // The raw file reports itself as 900 points, so handing it straight to the menu bar
+            // asked for a logo the height of the screen. This one is rendered at 18.
+            if let icon = Brand.mark(points: 18) {
+                Image(nsImage: icon)
+            } else {
+                Image(systemName: "circle.fill")
+            }
         }
         .menuBarExtraStyle(.window)
     }
