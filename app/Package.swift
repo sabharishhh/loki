@@ -49,5 +49,10 @@ let package = Package(
                 ])
             ]
         ),
+        // The Swift side had no tests at all until a crash shipped from a one-line change
+        // (B-66). Testing an executable target is supported and needs no shim; what it does not
+        // reach is anything that has to draw, so what is here is the logic that can be run
+        // without a window.
+        .testTarget(name: "LokiAppTests", dependencies: ["LokiApp"]),
     ]
 )

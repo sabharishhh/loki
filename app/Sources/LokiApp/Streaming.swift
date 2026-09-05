@@ -41,12 +41,12 @@ final class Streamer {
     ///
     /// Six is the one number worth tuning here. Lower reads as frantic on a short answer; higher
     /// leaves a long one visibly trailing the model.
-    private static let share = 6
+    private nonisolated static let share = 6
 
     /// The least a tick may release. Bounds the lag at `floor` characters per frame, which is
     /// 187 a second: faster than any provider streams, so the backlog is what decays and never
     /// the display.
-    private static let floor = 3
+    private nonisolated static let floor = 3
 
     private var pending: [Character] = []
     private var draining: Task<Void, Never>?
@@ -63,6 +63,20 @@ final class Streamer {
     init(emit: @escaping (String) -> Void) {
         self.emit = emit
     }
+
+    /// How many characters one frame releases from a backlog of `waiting`.
+    ///
+    /// Clamped to what is there. `prefix` tolerates being asked for more than a collection holds
+    /// and `removeFirst(_:)` traps, so the floor read as safe beside one and crashed against the
+    /// other on any backlog shorter than it, which is most of them (B-66).
+    ///
+    /// - Precondition: `waiting` is at least 1. Returns at least 1 and never more than `waiting`.
+    nonisolated static func release(from waiting: Int) -> Int {
+        min(waiting, max(floor, waiting / share))
+    }
+
+    /// Whether the loop is still running. For tests, which have nothing else to wait on.
+    var isDraining: Bool { draining != nil }
 
     /// Takes a token from the provider. Nothing reaches the view yet.
     func accept(_ token: String) {
@@ -132,11 +146,7 @@ final class Streamer {
 
         // Characters rather than bytes, so a grapheme is never cut in half. An emoji or a combined
         // mark rendered as a fragment for one frame is exactly the flicker this removes.
-        //
-        // Clamped to what is there. `prefix` tolerates being asked for more than the collection
-        // holds and `removeFirst(_:)` traps, so the floor read as safe next to one and crashed
-        // against the other on any backlog shorter than it, which is most of them (B-66).
-        let take = min(pending.count, max(Self.floor, pending.count / Self.share))
+        let take = Self.release(from: pending.count)
         emit(String(pending.prefix(take)))
         pending.removeFirst(take)
         return true

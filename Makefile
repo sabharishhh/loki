@@ -46,6 +46,9 @@ check:  ## Everything CI would run. Fails loudly on the first problem
 	@# how a missing zlib link stayed invisible for several commits.
 	rm -rf app/.build
 	cd app && swift build
+	@# The Swift side had no tests at all until a one-line change shipped a crash on almost every
+	@# turn (B-66). `swift test` builds the app target too, so this is the gate for both.
+	cd app && swift test
 	@echo "check passed"
 
 .PHONY: fmt
