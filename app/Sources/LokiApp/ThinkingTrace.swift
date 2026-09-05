@@ -11,19 +11,19 @@ import SwiftUI
 /// The line hugs its own text and the only feedback on hover is the text lifting a shade. Steps
 /// open underneath it with no container of their own.
 ///
-/// It opens itself while the model works and closes when it stops, which is the behaviour worth
-/// copying from the tools that do this well: you see the work happening without being asked to
-/// care, and it gets out of the way once there is an answer to read. Opening it again is one
-/// click and it stays open, because a block that keeps re-collapsing under you is infuriating.
+/// **Closed unless asked.** It used to open itself while the model worked and close when it
+/// stopped, which is the behaviour the larger tools have. At this size it is wrong: the line
+/// already says the work is happening, so opening a list under every turn is movement that carries
+/// nothing, and it means every finished answer has a block above it the reader has to collapse.
+/// One click opens it and one click closes it, and nothing else touches it.
 struct ThinkingTrace: View {
     let scope: Scope
     /// Still running. Drives the timer, the auto-open and the pulse on the icon.
     let live: Bool
 
     @Environment(\.reduceMotion) private var reduceMotion
+    /// Closed until it is asked for. Nothing else opens or closes it.
     @State private var open = false
-    /// Set once the reader has expressed a preference, after which nothing opens or closes it.
-    @State private var pinned = false
     @State private var elapsed: Duration = .zero
     /// Whether this view watched the wait rather than arriving after it. A trace that counted its
     /// own seconds keeps them; one rendered from a finished event takes the figure it was given.
@@ -52,16 +52,11 @@ struct ThinkingTrace: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(Theme.Motion.disclose, value: open)
-        .onChange(of: live, initial: true) { _, running in
-            guard !pinned else { return }
-            open = running
-        }
         .task(id: live) { await tick() }
     }
 
     private var header: some View {
         Button {
-            pinned = true
             open.toggle()
         } label: {
             HStack(spacing: Theme.Space.xs) {

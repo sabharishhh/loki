@@ -132,7 +132,11 @@ final class Streamer {
 
         // Characters rather than bytes, so a grapheme is never cut in half. An emoji or a combined
         // mark rendered as a fragment for one frame is exactly the flicker this removes.
-        let take = max(Self.floor, pending.count / Self.share)
+        //
+        // Clamped to what is there. `prefix` tolerates being asked for more than the collection
+        // holds and `removeFirst(_:)` traps, so the floor read as safe next to one and crashed
+        // against the other on any backlog shorter than it, which is most of them (B-66).
+        let take = min(pending.count, max(Self.floor, pending.count / Self.share))
         emit(String(pending.prefix(take)))
         pending.removeFirst(take)
         return true
