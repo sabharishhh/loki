@@ -31,7 +31,11 @@ struct MessageRow: View {
             if isUser {
                 Spacer(minLength: Theme.Space.xxl)
             } else {
-                MarkBadge(state: streaming ? .thinking : .idle, size: 22, animated: streaming)
+                MarkBadge(
+                    state: streaming ? .thinking : .idle,
+                    size: Theme.Size.avatar,
+                    animated: streaming
+                )
                     .padding(.top, 1)
             }
 

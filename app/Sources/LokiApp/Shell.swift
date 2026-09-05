@@ -112,7 +112,7 @@ private struct TopBar: View {
             .toggleStyle(BarToggle())
             .help("Sessions")
 
-            MarkBadge(size: 19, animated: false)
+            MarkBadge(size: Theme.Size.titleMark, animated: false)
 
             Text("Loki")
                 .font(Theme.Text.title)

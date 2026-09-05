@@ -151,7 +151,14 @@ enum Theme {
         static let narrow: CGFloat = 900
         /// The reading measure. Roughly 68 characters at the record size.
         static let measure: CGFloat = 640
-        static let avatar: CGFloat = 24
+        /// The mark on a turn in the thread.
+        ///
+        /// Twenty-eight rather than twenty-two, on Sabharish's call. The deciding fact is that his
+        /// daily driver is a 1x 2560x1080 ultrawide, where a point is a pixel: at 22 the eyes had
+        /// four pixels each and no amount of correct rendering makes that read.
+        static let avatar: CGFloat = 28
+        /// The mark in the title bar, where it sits beside 17pt text and should not out-weigh it.
+        static let titleMark: CGFloat = 18
         /// The hairline a scope or a quote is drawn against.
         static let rail: CGFloat = 2
     }
