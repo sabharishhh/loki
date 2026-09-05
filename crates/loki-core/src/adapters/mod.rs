@@ -10,6 +10,7 @@
 //! one appears (§21.7).
 
 pub mod anthropic;
+pub mod browser;
 pub mod clock;
 pub mod egress;
 pub mod journal;
