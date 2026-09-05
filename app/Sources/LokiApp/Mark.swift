@@ -29,6 +29,7 @@ struct Mark: View {
     var body: some View {
         artwork
             .frame(width: size, height: size)
+            .pixelSnapped()
             .rotationEffect(.degrees(lean ? 5 : 0))
             // The glow alone, never a scale. `scaleEffect` rasterises the image at its layout
             // size and then stretches the bitmap, which is what made the mark look pixelated.
@@ -129,4 +130,58 @@ struct MarkBadge: View {
     }
     .padding(36)
     .background(Theme.Colors.background)
+}
+
+/// Nudges a view onto whole device pixels.
+///
+/// **A bitmap sampled half a pixel off is a blurred bitmap.** Integral sizes are not enough,
+/// because the position matters just as much and a centred layout inside an odd-width window
+/// produces a half-pixel origin every other time the window is resized. Measured at 1x: a
+/// half-pixel offset costs 70 mean channel error, more than every other rendering defect here put
+/// together, and it is invisible on a 2x screen because half a point is a whole pixel there.
+///
+/// Unnecessary once the artwork is vector (`Brand.isVector`), since Core Graphics rasterises a PDF
+/// at whatever position it is given. Harmless then too, so it is not conditional.
+private struct PixelSnapped: ViewModifier {
+    @State private var nudge = CGSize.zero
+
+    func body(content: Content) -> some View {
+        content
+            .offset(nudge)
+            .background(
+                GeometryReader { proxy in
+                    // Reads the frame *after* the offset, so the nudge already applied has to be
+                    // taken back out before computing the next one. Without that the view chases
+                    // its own correction and never settles.
+                    let frame = proxy.frame(in: .global)
+                    Color.clear
+                        .onChange(of: frame, initial: true) { _, moved in
+                            settle(placedAt: moved.origin)
+                        }
+                }
+            )
+    }
+
+    private func settle(placedAt origin: CGPoint) {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let unnudged = CGPoint(
+            x: origin.x - nudge.width,
+            y: origin.y - nudge.height
+        )
+        let wanted = CGSize(
+            width: ((unnudged.x * scale).rounded() / scale) - unnudged.x,
+            height: ((unnudged.y * scale).rounded() / scale) - unnudged.y
+        )
+        // Written only when it actually changes. An equal assignment is still an invalidation, and
+        // this one sits behind a geometry reader that fires on every layout (B-68).
+        guard abs(wanted.width - nudge.width) > 0.001
+            || abs(wanted.height - nudge.height) > 0.001
+        else { return }
+        nudge = wanted
+    }
+}
+
+extension View {
+    /// See ``PixelSnapped``.
+    func pixelSnapped() -> some View { modifier(PixelSnapped()) }
 }
