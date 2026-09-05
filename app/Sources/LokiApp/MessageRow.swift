@@ -39,7 +39,9 @@ struct MessageRow: View {
                     .padding(.top, 1)
             }
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: Theme.Space.xs) {
+            // Laid out whether or not the controls are visible, so the thread never moves when
+            // the pointer arrives.
+            VStack(alignment: isUser ? .trailing : .leading, spacing: Theme.Space.s) {
                 if editing {
                     editor
                 } else {
@@ -54,9 +56,10 @@ struct MessageRow: View {
         // with the one the turn already draws, and it reads as a selection nobody made. What the
         // pointer reveals is the controls, and that is the whole of the feedback.
         //
-        // Without this the row only registers a hover where it actually draws, so reaching for
-        // the controls crosses a gap, the row thinks the pointer left, and they vanish under the
-        // cursor. The whole rectangle is the row.
+        // The whole rectangle is the row, including the gap above the controls. Without this it
+        // only registers a hover where it draws, so reaching for the controls crosses a hole, the
+        // row decides the pointer left, and they disappear under the cursor. Widening that gap
+        // widens the hole, which is why the two move together.
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.control, value: hovering)
