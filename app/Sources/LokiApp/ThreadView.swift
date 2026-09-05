@@ -37,10 +37,10 @@ struct ThreadView: View {
             }
             .onChange(of: conversation.entries.last?.id) {
                 guard let last = conversation.entries.last else { return }
-                withAnimation(Theme.Motion.standard) { proxy.scrollTo(last.id, anchor: .bottom) }
+                withAnimation(Theme.Motion.control) { proxy.scrollTo(last.id, anchor: .bottom) }
             }
         }
-        .background(Theme.Colors.raised)
+        .background(Theme.Colors.surface)
     }
 }
 
@@ -62,13 +62,13 @@ private struct TurnView: View {
                 Text(turn.text)
                     .font(Theme.Text.body)
                     .lineSpacing(Theme.Text.bodyLineSpacing)
-                    .foregroundStyle(Theme.Colors.onInverted)
+                    .foregroundStyle(Theme.Colors.primary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Theme.Space.l)
                     .padding(.vertical, Theme.Space.m)
                     .background(
-                        Theme.Colors.inverted,
+                        Theme.Colors.surfaceAlt,
                         in: .rect(cornerRadius: Theme.Radius.bubble)
                     )
             }
@@ -91,7 +91,7 @@ private struct ErrorRow: View {
                 .foregroundStyle(Theme.State.needsYou.color)
             Text(message)
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
         }
         .padding(Theme.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -114,24 +114,24 @@ struct SessionSummary: View {
             Text("Learned today")
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
 
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
                     .font(Theme.Text.body)
                     .lineSpacing(Theme.Text.bodyLineSpacing)
-                    .foregroundStyle(Theme.Colors.ink)
+                    .foregroundStyle(Theme.Colors.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Theme.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
         .overlay(alignment: .leading) {
             // The same rail the thread uses, so the card reads as part of the record rather than
             // as a notification arriving on top of it.
             Rectangle()
-                .fill(Theme.Colors.line)
+                .fill(Theme.Colors.border)
                 .frame(width: Theme.Size.rail)
         }
         .clipShape(.rect(cornerRadius: Theme.Radius.panel))

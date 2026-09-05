@@ -32,8 +32,8 @@ struct ScopeRail: View {
         }
         .padding(.leading, CGFloat(scope.depth) * Self.indent)
         .fixedSize(horizontal: false, vertical: true)
-        .animation(Theme.Motion.standard, value: scope.state)
-        .animation(Theme.Motion.standard, value: scope.steps.count)
+        .animation(Theme.Motion.control, value: scope.state)
+        .animation(Theme.Motion.control, value: scope.steps.count)
     }
 
     private var header: some View {
@@ -50,13 +50,13 @@ struct ScopeRail: View {
                 .background(scope.state.tint, in: .rect(cornerRadius: Theme.Radius.control))
             Text(scope.kind)
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
             Spacer(minLength: Theme.Space.m)
             if let elapsed = scope.elapsed {
                 Text(format(elapsed))
                     .font(Theme.Text.meta)
                     .monospacedDigit()
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .contentTransition(.numericText())
             }
         }
@@ -82,11 +82,11 @@ private struct StepRow: View {
                 Text(step.verb)
                     .font(Theme.Text.meta)
                     .kerning(Theme.Text.metaTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .frame(width: 48, alignment: .leading)
                 Text(step.detail)
                     .font(Theme.Text.body)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
 
                 if step.output != nil {
                     Button {
@@ -94,7 +94,7 @@ private struct StepRow: View {
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(Theme.Colors.faint)
+                            .foregroundStyle(Theme.Colors.tertiary)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .frame(width: 14, height: 14)
                             .contentShape(.rect)
@@ -109,17 +109,17 @@ private struct StepRow: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(output)
                         .font(Theme.Text.code)
-                        .foregroundStyle(Theme.Colors.muted)
+                        .foregroundStyle(Theme.Colors.secondary)
                         .textSelection(.enabled)
                         .padding(Theme.Space.s)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+                .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
                 .padding(.leading, 48 + Theme.Space.s)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .animation(Theme.Motion.standard, value: expanded)
+        .animation(Theme.Motion.control, value: expanded)
     }
 }
 
@@ -131,13 +131,13 @@ private struct CutMark: View {
     var body: some View {
         HStack(spacing: Theme.Space.s) {
             ZigZag()
-                .stroke(Theme.Colors.line, lineWidth: 1)
+                .stroke(Theme.Colors.border, lineWidth: 1)
                 .frame(height: 5)
                 .frame(maxWidth: 120)
             Text("stopped here")
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
             Spacer(minLength: 0)
         }
         .padding(.top, Theme.Space.xs)

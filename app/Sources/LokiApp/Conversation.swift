@@ -47,7 +47,7 @@ enum ComposerState {
         switch self {
         case .idle: nil
         case .listening: .reading
-        case .running: .holding
+        case .running: .thinking
         case .needsYou: .needsYou
         }
     }
@@ -193,7 +193,7 @@ final class Conversation {
     func markNotTrue(_ claim: RecalledClaim) {
         guard !claim.fromSession else { return }
         try? core?.notTrue(path: claim.path, ordinal: claim.ordinal)
-        withAnimation(Theme.Motion.standard) {
+        withAnimation(Theme.Motion.control) {
             recalled.removeAll { $0.id == claim.id }
         }
     }
@@ -216,7 +216,7 @@ final class Conversation {
     func endSession() async {
         guard let core else { return }
         let lines = await Task.detached { core.endSession() }.value
-        withAnimation(Theme.Motion.standard) { summary = lines }
+        withAnimation(Theme.Motion.control) { summary = lines }
     }
 
     /// Speaking during a task is an interrupt.
@@ -369,7 +369,7 @@ final class Conversation {
         case "scope_closed":
             guard let id = fields["id"] as? UInt64 else { return }
             updateScope(id) { scope in
-                scope.state = .released
+                scope.state = .idle
                 scope.elapsed = fields["ms"] as? UInt64
             }
 
@@ -445,7 +445,7 @@ final class Conversation {
     /// answer was actually built from, not what was on offer.
     private func refreshRecalled() {
         let found = core?.recalled ?? []
-        withAnimation(Theme.Motion.standard) { recalled = found }
+        withAnimation(Theme.Motion.control) { recalled = found }
     }
 
     /// Marks the cut, so the thread shows where the turn stopped rather than just stopping.
@@ -462,7 +462,7 @@ final class Conversation {
 
     private func markCut() {
         for index in entries.indices {
-            guard case .scope(var scope) = entries[index], scope.state != .released else { continue }
+            guard case .scope(var scope) = entries[index], scope.state != .idle else { continue }
             scope.interrupted = true
             entries[index] = .scope(scope)
         }
@@ -470,7 +470,7 @@ final class Conversation {
 
     private func markOpenScopesInterrupted() {
         for index in entries.indices {
-            guard case .scope(var scope) = entries[index], scope.state != .released else { continue }
+            guard case .scope(var scope) = entries[index], scope.state != .idle else { continue }
             scope.state = .needsYou
             entries[index] = .scope(scope)
         }

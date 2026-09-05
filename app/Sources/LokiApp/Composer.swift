@@ -62,7 +62,7 @@ struct Composer: View {
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Theme.Text.body)
-                    .foregroundStyle(Theme.Colors.ink)
+                    .foregroundStyle(Theme.Colors.primary)
                     .lineLimit(1...Self.visibleLines)
                     .focused($focused)
                     .onSubmit(submit)
@@ -74,32 +74,32 @@ struct Composer: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.borderless)
-            .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
             .disabled(!isRunning && draft.isEmpty && !isRecording)
         }
         .padding(Theme.Space.m)
-        .background(Theme.Colors.raised, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.control))
         .overlay {
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .strokeBorder(borderColor, lineWidth: borderWidth)
         }
-        .animation(Theme.Motion.standard, value: conversation.composer.border)
-        .animation(Theme.Motion.standard, value: isRecording)
+        .animation(Theme.Motion.control, value: conversation.composer.border)
+        .animation(Theme.Motion.control, value: isRecording)
     }
 
     private var hints: some View {
         HStack(spacing: Theme.Space.s) {
             if isRunning {
                 Key("esc")
-                Text("stop").font(Theme.Text.micro).foregroundStyle(Theme.Colors.faint)
+                Text("stop").font(Theme.Text.micro).foregroundStyle(Theme.Colors.tertiary)
             }
             Key("hold F")
-            Text("talk").font(Theme.Text.micro).foregroundStyle(Theme.Colors.faint)
+            Text("talk").font(Theme.Text.micro).foregroundStyle(Theme.Colors.tertiary)
             Spacer()
             Text("routing by task, not by turn")
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
         }
     }
 
@@ -119,7 +119,7 @@ struct Composer: View {
 
     private var borderColor: Color {
         if isRecording { return Theme.State.reading.color }
-        return conversation.composer.border?.color ?? Theme.Colors.line
+        return conversation.composer.border?.color ?? Theme.Colors.border
     }
 
     private var borderWidth: CGFloat {
@@ -294,7 +294,7 @@ struct MicControl: View {
                 } else {
                     Image(systemName: "mic")
                         .font(.system(size: 13))
-                        .foregroundStyle(Theme.Colors.faint)
+                        .foregroundStyle(Theme.Colors.tertiary)
                 }
             }
             .frame(width: 30, height: 22)
@@ -305,7 +305,7 @@ struct MicControl: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .animation(Theme.Motion.standard, value: recording)
+        .animation(Theme.Motion.control, value: recording)
         .help(recording ? "Stop dictating" : "Dictate. Or hold F")
         .accessibilityLabel(recording ? "Stop dictating" : "Start dictating")
     }
@@ -351,11 +351,11 @@ struct SpokenText: View {
         var out = AttributedString()
         if !committed.isEmpty {
             var typed = AttributedString(committed + " ")
-            typed.foregroundColor = Theme.Colors.ink
+            typed.foregroundColor = Theme.Colors.primary
             out.append(typed)
         }
         var spoken = AttributedString(heard.isEmpty ? "Listening" : heard)
-        spoken.foregroundColor = Theme.Colors.faint
+        spoken.foregroundColor = Theme.Colors.tertiary
         out.append(spoken)
         return out
     }
@@ -370,9 +370,9 @@ struct Key: View {
     var body: some View {
         Text(label)
             .font(Theme.Text.micro)
-            .foregroundStyle(Theme.Colors.muted)
+            .foregroundStyle(Theme.Colors.secondary)
             .padding(.horizontal, Theme.Space.xs)
             .padding(.vertical, 1)
-            .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
     }
 }

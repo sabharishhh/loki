@@ -69,18 +69,18 @@ struct TimelineScreen: View {
             .padding(.vertical, Theme.Space.xxl)
             .frame(maxWidth: .infinity)
         }
-        .background(Theme.Colors.raised)
+        .background(Theme.Colors.surface)
         .task {
             let known = conversation.knowledge()
             entities = known.entities
             duplicates = known.duplicates
-            withAnimation(Theme.Motion.standard) { loading = false }
+            withAnimation(Theme.Motion.control) { loading = false }
         }
     }
 
     private func reload() {
         let known = conversation.knowledge()
-        withAnimation(Theme.Motion.standard) {
+        withAnimation(Theme.Motion.control) {
             entities = known.entities
             duplicates = known.duplicates
         }
@@ -92,10 +92,10 @@ struct TimelineScreen: View {
                 Text("What Loki knows")
                     .font(Theme.Text.display)
                     .kerning(Theme.Text.displayTracking)
-                    .foregroundStyle(Theme.Colors.ink)
+                    .foregroundStyle(Theme.Colors.primary)
                 Text(subtitle)
                     .font(Theme.Text.body)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
             }
 
             // Search appears once there is enough here to need it. Before that it is a control
@@ -132,12 +132,12 @@ private struct SplitCard: View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             Text("Two entries answer to \"\(split.form)\"")
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
 
             ForEach(Array(split.paths.enumerated()), id: \.element) { at, path in
                 Text("\(split.names[at])  ·  \(path)")
                     .font(Theme.Text.micro)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
             }
 
             HStack(spacing: Theme.Space.m) {
@@ -151,11 +151,11 @@ private struct SplitCard: View {
                 }
                 Text("or leave them, if they are different")
                     .font(Theme.Text.micro)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
             }
         }
         .padding(Theme.Space.m)
-        .background(Theme.State.holding.tint, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(Theme.State.thinking.tint, in: .rect(cornerRadius: Theme.Radius.panel))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -183,14 +183,14 @@ private struct EntityCard: View {
             }
         }
         .padding(Theme.Space.l)
-        .background(Theme.Colors.canvas, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.panel)
-                .stroke(Theme.Colors.line, lineWidth: 1)
+                .stroke(Theme.Colors.border, lineWidth: 1)
         )
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 6)
-        .onAppear { withAnimation(Theme.Motion.standard) { appeared = true } }
+        .onAppear { withAnimation(Theme.Motion.control) { appeared = true } }
     }
 
     private var heading: some View {
@@ -198,25 +198,25 @@ private struct EntityCard: View {
             Text(entity.name)
                 .font(Theme.Text.title)
                 .kerning(Theme.Text.titleTracking)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
 
             Text(entity.kind)
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
 
             if entity.confirmed {
                 Text("you confirmed this")
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.State.released.color)
+                    .foregroundStyle(Theme.State.idle.color)
             } else if !entity.inUse {
                 // The consequence, not the state name: what matters is that Loki is holding this
                 // back, not that a field somewhere says `draft`.
                 Text("not in use yet")
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.State.holding.color)
+                    .foregroundStyle(Theme.State.thinking.color)
             }
 
             Spacer(minLength: 0)
@@ -227,7 +227,7 @@ private struct EntityCard: View {
                     .kerning(Theme.Text.microTracking)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.Colors.faint)
+            .foregroundStyle(Theme.Colors.tertiary)
             .help("Show \(entity.path) in Finder")
         }
     }
@@ -272,12 +272,12 @@ private struct Names: View {
             Text(label)
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 HStack(spacing: Theme.Space.s) {
                     Text(item.0)
                         .font(Theme.Text.body)
-                        .foregroundStyle(Theme.Colors.muted)
+                        .foregroundStyle(Theme.Colors.secondary)
                     Spacer(minLength: Theme.Space.m)
                     Quiet("not true") {
                         item.1()
@@ -302,7 +302,7 @@ private struct FactRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Space.m) {
             Rectangle()
-                .fill(Theme.Colors.line)
+                .fill(Theme.Colors.border)
                 .frame(width: Theme.Size.rail)
                 .frame(maxHeight: .infinity)
 
@@ -315,7 +315,7 @@ private struct FactRow: View {
                     Text(fact.text)
                         .font(Theme.Text.record)
                         .lineSpacing(Theme.Text.recordLineSpacing)
-                        .foregroundStyle(Theme.Colors.ink)
+                        .foregroundStyle(Theme.Colors.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -323,7 +323,7 @@ private struct FactRow: View {
                     Text(since)
                         .font(Theme.Text.meta)
                         .kerning(Theme.Text.metaTracking)
-                        .foregroundStyle(Theme.Colors.faint)
+                        .foregroundStyle(Theme.Colors.tertiary)
                 }
 
                 if let was = fact.was {
@@ -350,13 +350,13 @@ private struct FactRow: View {
                 Text(fact.attribute.replacingOccurrences(of: "_", with: " "))
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
             }
             if fact.fromElsewhere {
                 Text("I read this somewhere")
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.State.holding.color)
+                    .foregroundStyle(Theme.State.thinking.color)
             }
         }
     }
@@ -366,13 +366,13 @@ private struct FactRow: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(was.text)
                 .font(Theme.Text.body)
-                .strikethrough(true, color: Theme.Colors.faint)
-                .foregroundStyle(Theme.Colors.muted)
+                .strikethrough(true, color: Theme.Colors.tertiary)
+                .foregroundStyle(Theme.Colors.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(wrongLine(was))
                 .font(Theme.Text.meta)
                 .kerning(Theme.Text.metaTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
         }
         .padding(.top, Theme.Space.xs)
     }
@@ -387,9 +387,9 @@ private struct FactRow: View {
             TextField("", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(Theme.Text.record)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
                 .padding(Theme.Space.s)
-                .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+                .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
 
             HStack(spacing: Theme.Space.m) {
                 Quiet("save") {
@@ -413,13 +413,13 @@ private struct FactRow: View {
             Text("You also said")
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.State.holding.color)
+                .foregroundStyle(Theme.State.thinking.color)
 
             ForEach(fact.alsoSaid) { other in
                 HStack(alignment: .top, spacing: Theme.Space.s) {
                     Text(other.text)
                         .font(Theme.Text.body)
-                        .foregroundStyle(Theme.Colors.muted)
+                        .foregroundStyle(Theme.Colors.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: Theme.Space.m)
                     Quiet("use this instead") {
@@ -430,7 +430,7 @@ private struct FactRow: View {
             }
         }
         .padding(Theme.Space.s)
-        .background(Theme.State.holding.tint, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.State.thinking.tint, in: .rect(cornerRadius: Theme.Radius.control))
         .padding(.top, Theme.Space.xs)
     }
 
@@ -472,7 +472,7 @@ private struct Quiet: View {
                 .kerning(Theme.Text.microTracking)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Theme.Colors.faint)
+        .foregroundStyle(Theme.Colors.tertiary)
     }
 }
 
@@ -483,18 +483,18 @@ private struct SearchField: View {
         HStack(spacing: Theme.Space.s) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
             TextField("Search what Loki knows", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
         }
         .padding(.horizontal, Theme.Space.m)
         .padding(.vertical, Theme.Space.s)
-        .background(Theme.Colors.canvas, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
-                .stroke(Theme.Colors.line, lineWidth: 1)
+                .stroke(Theme.Colors.border, lineWidth: 1)
         )
     }
 }

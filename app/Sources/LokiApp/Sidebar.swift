@@ -60,12 +60,12 @@ struct Sidebar: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Theme.Colors.canvas)
+        .background(Theme.Colors.background)
         .task {
             sessions = conversation.sessions()
             // A store that answers instantly should not flash a skeleton, so the state changes
             // together with the content rather than a frame later.
-            withAnimation(Theme.Motion.standard) { loading = false }
+            withAnimation(Theme.Motion.control) { loading = false }
         }
     }
 
@@ -97,7 +97,7 @@ private struct Section<Content: View>: View {
             Text(title)
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
                 .padding(.horizontal, Theme.Space.s)
                 .padding(.bottom, Theme.Space.xs)
             content
@@ -118,11 +118,11 @@ private struct Row: View {
             HStack(spacing: Theme.Space.s) {
                 Image(systemName: glyph)
                     .font(.system(size: 11))
-                    .foregroundStyle(selected ? Theme.Colors.ink : Theme.Colors.faint)
+                    .foregroundStyle(selected ? Theme.Colors.primary : Theme.Colors.tertiary)
                     .frame(width: 14)
                 Text(label)
                     .font(Theme.Text.body)
-                    .foregroundStyle(selected ? Theme.Colors.ink : Theme.Colors.muted)
+                    .foregroundStyle(selected ? Theme.Colors.primary : Theme.Colors.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -136,13 +136,13 @@ private struct Row: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(Theme.Motion.standard, value: hovering)
-        .animation(Theme.Motion.standard, value: selected)
+        .animation(Theme.Motion.control, value: hovering)
+        .animation(Theme.Motion.control, value: selected)
     }
 
     private var background: Color {
-        if selected { return Theme.Colors.sunk }
-        return hovering ? Theme.Colors.sunk.opacity(0.5) : .clear
+        if selected { return Theme.Colors.background }
+        return hovering ? Theme.Colors.background.opacity(0.5) : .clear
     }
 }
 
@@ -160,10 +160,10 @@ struct Empty: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.muted)
+                .foregroundStyle(Theme.Colors.secondary)
             Text(detail)
                 .font(Theme.Text.micro)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, Theme.Space.s)
@@ -183,11 +183,11 @@ struct Skeleton: View {
     var body: some View {
         GeometryReader { geometry in
             RoundedRectangle(cornerRadius: 3)
-                .fill(Theme.Colors.sunk)
+                .fill(Theme.Colors.background)
                 .frame(width: geometry.size.width * width, height: height)
                 .overlay(alignment: .leading) {
                     LinearGradient(
-                        colors: [.clear, Theme.Colors.line.opacity(0.7), .clear],
+                        colors: [.clear, Theme.Colors.border.opacity(0.7), .clear],
                         startPoint: .leading,
                         endPoint: .trailing
                     )

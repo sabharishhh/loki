@@ -33,28 +33,28 @@ struct Shell: View {
                     screen: $screen,
                     roomy: roomy
                 )
-                Divider().overlay(Theme.Colors.line)
+                Divider().overlay(Theme.Colors.border)
 
                 HStack(spacing: 0) {
                     if sidebar {
                         Sidebar(conversation: conversation, screen: $screen)
                             .frame(width: Theme.Size.sidebar)
                             .transition(.move(edge: .leading).combined(with: .opacity))
-                        Divider().overlay(Theme.Colors.line)
+                        Divider().overlay(Theme.Colors.border)
                     }
 
                     centre
                         .frame(maxWidth: .infinity)
 
                     if rail && roomy && screen == .thread {
-                        Divider().overlay(Theme.Colors.line)
+                        Divider().overlay(Theme.Colors.border)
                         RightRail(conversation: conversation)
                             .frame(width: Theme.Size.inspector)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
             }
-            .background(Theme.Colors.canvas)
+            .background(Theme.Colors.background)
             // One animation for the whole layout, so a column opening and the thread narrowing
             // are the same movement rather than two that nearly agree.
             .animation(Theme.Motion.panel, value: sidebar)
@@ -103,16 +103,16 @@ private struct TopBar: View {
             Text("Loki")
                 .font(Theme.Text.title)
                 .kerning(Theme.Text.titleTracking)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
 
             if screen == .timeline {
                 Text("timeline")
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .padding(.horizontal, Theme.Space.xs)
                     .padding(.vertical, 1)
-                    .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+                    .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
 
@@ -134,7 +134,7 @@ private struct TopBar: View {
         .padding(.trailing, Theme.Space.l)
         .padding(.vertical, Theme.Space.m)
         .background(.regularMaterial)
-        .animation(Theme.Motion.standard, value: screen)
+        .animation(Theme.Motion.control, value: screen)
     }
 }
 
@@ -154,7 +154,7 @@ private struct Meters: View {
     var body: some View {
         HStack(spacing: Theme.Space.m) {
             reading(Money.short(conversation.spentToday), "today")
-            Divider().frame(height: 10).overlay(Theme.Colors.line)
+            Divider().frame(height: 10).overlay(Theme.Colors.border)
             reading(count(conversation.tokens.input), "in")
             reading(count(conversation.tokens.output), "out")
             reading(count(conversation.tokens.context), "ctx")
@@ -173,13 +173,13 @@ private struct Meters: View {
                 .font(Theme.Text.meta)
                 .kerning(Theme.Text.metaTracking)
                 .monospacedDigit()
-                .foregroundStyle(Theme.Colors.muted)
+                .foregroundStyle(Theme.Colors.secondary)
                 // Without this the whole bar shifts a pixel as digits change width.
                 .contentTransition(.numericText())
             Text(label)
                 .font(Theme.Text.micro)
                 .kerning(Theme.Text.microTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
         }
     }
 
@@ -200,15 +200,15 @@ private struct BarToggle: ToggleStyle {
         } label: {
             configuration.label
                 .font(.system(size: 12))
-                .foregroundStyle(configuration.isOn ? Theme.Colors.ink : Theme.Colors.faint)
+                .foregroundStyle(configuration.isOn ? Theme.Colors.primary : Theme.Colors.tertiary)
                 .frame(width: 24, height: 22)
                 .background(
-                    configuration.isOn ? Theme.Colors.sunk : .clear,
+                    configuration.isOn ? Theme.Colors.background : .clear,
                     in: .rect(cornerRadius: Theme.Radius.control)
                 )
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .animation(Theme.Motion.standard, value: configuration.isOn)
+        .animation(Theme.Motion.control, value: configuration.isOn)
     }
 }

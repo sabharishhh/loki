@@ -2,103 +2,132 @@ import SwiftUI
 
 /// Design tokens.
 ///
-/// Colour is state, never decoration. There is no brand accent: four state colours already carry
-/// meaning in the scope rail, and a fifth would make colour ambiguous. Selection uses the system
-/// accent, which is achromatic under Graphite.
+/// **Eleven colours per theme and no others.** Every value below comes from the supplied palette.
+/// Nothing here is mixed, tinted or interpolated into a twelfth colour, because the moment a
+/// surface is invented the set stops being a set.
+///
+/// Yellow is the one accent and it means Loki: the mark, the thing being answered, the control
+/// that acts. It is never used to decorate and never used for two meanings at once.
 enum Theme {
     enum Colors {
-        static let canvas = adaptive(light: 0xF1F2F4, dark: 0x101215)
-        static let raised = adaptive(light: 0xFAFBFC, dark: 0x171A1E)
-        static let sunk = adaptive(light: 0xE6E9ED, dark: 0x0B0D0F)
-        static let ink = adaptive(light: 0x16181C, dark: 0xE9EBEF)
-        static let muted = adaptive(light: 0x5A616B, dark: 0x98A0AB)
-        static let faint = adaptive(light: 0x8B929C, dark: 0x666E79)
-        static let line = adaptive(light: 0xDCE0E5, dark: 0x24282E)
-        /// Canvas inverted, carrying the user's own words. Light box in dark mode and
-        /// dark box in light mode, so the instruction reads as spoken input, not record.
-        static let inverted = adaptive(light: 0x1B1E23, dark: 0xE9EBEF)
-        static let onInverted = adaptive(light: 0xF1F2F4, dark: 0x16181C)
+        /// The window ground.
+        static let background = adaptive(light: 0xF6F5F2, dark: 0x070707)
+        /// Raised against the ground: sidebar, title bar, the composer.
+        static let surface = adaptive(light: 0xFCFCFA, dark: 0x101010)
+        /// Raised again: the user's own turn, a hovered row, a field.
+        static let surfaceAlt = adaptive(light: 0xFFFFFF, dark: 0x171717)
+
+        static let primary = adaptive(light: 0x181817, dark: 0xF1F1EF)
+        static let secondary = adaptive(light: 0x62615D, dark: 0xA4A4A0)
+        static let tertiary = adaptive(light: 0x8D8C87, dark: 0x70706C)
+
+        /// The mark, and anything that acts.
+        static let yellow = adaptive(light: 0xFFF12F, dark: 0xFFF12F)
+        static let yellowHover = adaptive(light: 0xF2D900, dark: 0xE9DC00)
+        /// Yellow at reading weight, for a filled row that must not shout.
+        static let yellowSoft = adaptive(light: 0xFFF8B8, dark: 0x2A2918)
+        /// What sits on yellow. Always the dark ink, in both themes, because yellow is light in both.
+        static let onYellow = adaptive(light: 0x181817, dark: 0x181817)
+
+        static let border = adaptive(light: 0xE4E2DC, dark: 0x292929)
+        static let borderStrong = adaptive(light: 0xD5D2CA, dark: 0x3A3A38)
     }
 
-    /// The four machine states. Each pairs with a glyph and a word, so colour is never the only cue.
+    /// What the machine is doing, as a word, a glyph and an expression on the mark.
+    ///
+    /// **Colour is not the carrier.** The mark's face changes, and the word is always present, so
+    /// the state survives greyscale, a colourblind reader and a screenshot. `released` is gone: a
+    /// finished step is not a state worth a colour, and what replaced it is the thinking trace,
+    /// which says how long it took instead of that it ended.
     enum State: String, CaseIterable {
-        case holding
+        case idle
+        case thinking
         case reading
-        case released
         case needsYou
 
         var label: String {
             switch self {
-            case .holding: "holding"
+            case .idle: "idle"
+            case .thinking: "thinking"
             case .reading: "reading"
-            case .released: "released"
             case .needsYou: "needs you"
             }
         }
 
         var glyph: String {
             switch self {
-            case .holding: "square.fill"
-            case .reading: "circle"
-            case .released: "checkmark"
-            case .needsYou: "square.lefthalf.filled"
+            case .idle: "circle"
+            case .thinking: "circle.dotted"
+            case .reading: "circle.lefthalf.filled"
+            case .needsYou: "exclamationmark"
             }
         }
 
-        var color: Color {
-            switch self {
-            case .holding: adaptive(light: 0xA96A00, dark: 0xE0A33C)
-            case .reading: adaptive(light: 0x1B6FA8, dark: 0x6BADDD)
-            case .released: adaptive(light: 0x3F6B4F, dark: 0x7CB791)
-            case .needsYou: adaptive(light: 0xB23A17, dark: 0xE88A63)
-            }
-        }
-
+        /// The same state as a background wash, for a filled row or an open trace.
         var tint: Color {
             switch self {
-            case .holding: adaptive(light: 0xF7EFE1, dark: 0x241C0E)
-            case .reading: adaptive(light: 0xE8F0F7, dark: 0x0E1A24)
-            case .released: adaptive(light: 0xEBF1ED, dark: 0x101C14)
-            case .needsYou: adaptive(light: 0xF8ECE7, dark: 0x24120C)
+            case .idle: Colors.surface
+            case .thinking, .reading: Colors.yellowSoft
+            case .needsYou: Colors.surfaceAlt
+            }
+        }
+
+        /// Yellow only where Loki is the subject. Everything else reads in the neutral ramp, or
+        /// the accent would stop meaning anything.
+        var color: Color {
+            switch self {
+            case .idle: Colors.tertiary
+            case .thinking, .reading: Colors.yellow
+            case .needsYou: Colors.primary
             }
         }
     }
 
-    /// Tracking changes with size, per Apple's typography guidance. One value everywhere is wrong
-    /// somewhere.
+    /// Helvetica Neue, with Inter behind it. Sans only, and nothing is monospaced: a timestamp set
+    /// in mono reads as machine output, and everything here is meant to read as writing.
     enum Text {
-        static let display = Font.system(size: 24, weight: .semibold)
-        static let title = Font.system(size: 17, weight: .semibold)
-        /// The record. Assistant prose and timeline rows.
-        static let record = Font.system(size: 15)
-        /// The instrument. UI, steps, sidebar.
-        static let body = Font.system(size: 13.5)
-        /// Headings inside a response, h1 to h6. The full range: an answer can carry its own
-        /// hierarchy, and flattening it loses the structure the model wrote.
+        static let display = face(24, .semibold)
+        static let title = face(17, .semibold)
+        /// The record. Assistant prose, memory rows.
+        static let record = face(14.5, .regular)
+        /// The instrument. Controls, sidebar, labels.
+        static let body = face(13.5, .regular)
+        static let bodyStrong = face(13.5, .semibold)
+        /// Timestamps, counts, the small print beside a control.
+        static let meta = face(11.5, .medium)
+        static let micro = face(10.5, .semibold)
+
+        /// Code keeps a monospaced face, because alignment is the whole point of it.
+        static let code = Font.system(size: 13, design: .monospaced)
+
         static func heading(_ level: Int) -> Font {
             switch level {
-            case 1: Font.system(size: 21, weight: .semibold)
-            case 2: Font.system(size: 17, weight: .semibold)
-            case 3: Font.system(size: 15, weight: .semibold)
-            case 4: Font.system(size: 14, weight: .semibold)
-            case 5: Font.system(size: 13.5, weight: .semibold)
-            default: Font.system(size: 13.5, weight: .medium)
+            case 1: face(21, .semibold)
+            case 2: face(17, .semibold)
+            case 3: face(15, .semibold)
+            case 4: face(14, .semibold)
+            case 5: face(13.5, .semibold)
+            default: face(13.5, .medium)
             }
         }
-        /// Body at emphasis weight. Table headers and inline strong text in instrument type.
-        static let bodyStrong = Font.system(size: 13.5, weight: .semibold)
-        /// Code, in prose and in a fenced block. Mono, and large enough to read a command in.
-        static let code = Font.system(size: 13, design: .monospaced)
-        static let meta = Font.system(size: 11.5, design: .monospaced)
-        static let micro = Font.system(size: 10.5, weight: .medium, design: .monospaced)
 
-        static let displayTracking = -0.021 * 24
-        static let titleTracking = -0.011 * 17
-        static let metaTracking = 0.012 * 11.5
+        static let displayTracking = -0.022 * 24
+        static let titleTracking = -0.012 * 17
+        static let metaTracking = 0.01 * 11.5
         static let microTracking = 0.03 * 10.5
 
-        static let recordLineSpacing = 15 * 0.7
-        static let bodyLineSpacing = 13.5 * 0.55
+        static let recordLineSpacing = 14.5 * 0.62
+        static let bodyLineSpacing = 13.5 * 0.5
+
+        /// Helvetica Neue where it exists, which on macOS is everywhere, and Inter for anyone who
+        /// has installed it and prefers it. The system face is the last resort rather than the
+        /// first, because it is what makes an app look like every other app.
+        private static func face(_ size: CGFloat, _ weight: Font.Weight) -> Font {
+            for name in ["Helvetica Neue", "Inter"] where NSFont(name: name, size: size) != nil {
+                return .custom(name, size: size).weight(weight)
+            }
+            return .system(size: size, weight: weight)
+        }
     }
 
     /// 4px base, 8px rhythm.
@@ -112,32 +141,51 @@ enum Theme {
         static let xxxl: CGFloat = 48
     }
 
-    /// One scale, no exceptions, no pills. A square-cornered badge reads as a readout.
+    /// Four steps and no pills. A pill reads as a tag, and nothing here is a tag.
     enum Radius {
-        static let control: CGFloat = 6
+        static let control: CGFloat = 7
         static let panel: CGFloat = 10
+        static let bubble: CGFloat = 12
         static let window: CGFloat = 14
-        /// The user's turn. The same 14px step as the window rather than a fourth value, so the
-        /// radius lock stays a three-value scale and the box stops short of being a pill.
-        static let bubble: CGFloat = 14
     }
 
     enum Size {
-        static let sidebar: CGFloat = 216
-        static let inspector: CGFloat = 264
+        static let sidebar: CGFloat = 220
+        static let inspector: CGFloat = 272
         /// Below this the inspector drops out and the timeline becomes a screen.
         static let narrow: CGFloat = 900
-        /// 68ch at the record size, near enough.
-        static let measure: CGFloat = 660
+        /// The reading measure. Roughly 68 characters at the record size.
+        static let measure: CGFloat = 640
+        static let avatar: CGFloat = 24
+        /// The hairline a scope or a quote is drawn against.
         static let rail: CGFloat = 2
     }
 
-    /// Springs on anything the user can grab. Nothing decorative.
+    /// One motion vocabulary, so two things that move together were told to move the same way.
+    ///
+    /// Everything sits between 0.18s and 0.45s. Below that a transition reads as a jump, above it
+    /// the interface feels like it is thinking about the request rather than answering it.
     enum Motion {
-        static let panel = Animation.spring(response: 0.35, dampingFraction: 1.0)
-        static let sheet = Animation.spring(response: 0.3, dampingFraction: 0.8)
-        static let standard = Animation.spring(response: 0.3, dampingFraction: 1.0)
+        /// A panel opening, a column appearing. Settles without overshoot.
+        static let panel = Animation.spring(response: 0.34, dampingFraction: 1.0)
+        /// Anything the pointer is on: hover, press, a control changing shape.
+        static let control = Animation.spring(response: 0.22, dampingFraction: 0.86)
+        /// A row arriving in a list, a message landing in the thread.
+        static let arrive = Animation.spring(response: 0.4, dampingFraction: 0.82)
+        /// A disclosure opening or closing.
+        static let disclose = Animation.spring(response: 0.3, dampingFraction: 0.9)
+        /// The slow ambient loops: the blink, the drift behind the mark.
+        static let ambient = Animation.easeInOut(duration: 2.4)
     }
+}
+
+/// Whether the reader has asked for less movement.
+///
+/// Read once and passed down rather than queried at every call site. Every looping animation in
+/// the app checks it and holds a still frame instead of stopping mid-cycle, because a loop frozen
+/// at a random phase looks broken rather than calm.
+extension EnvironmentValues {
+    @Entry var reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 }
 
 private func adaptive(light: UInt32, dark: UInt32) -> Color {

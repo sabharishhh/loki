@@ -15,13 +15,13 @@ struct MenuBarView: View {
             if let error = conversation.lastError, !conversation.isReady {
                 Text(error)
                     .font(Theme.Text.body)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 summary
             }
 
-            Divider().overlay(Theme.Colors.line)
+            Divider().overlay(Theme.Colors.border)
 
             Button("Open Loki") {
                 uiTrace("4 Open Loki button fired")
@@ -37,7 +37,7 @@ struct MenuBarView: View {
         }
         .padding(Theme.Space.l)
         .frame(width: 300, alignment: .leading)
-        .background(Theme.Colors.raised)
+        .background(Theme.Colors.surface)
     }
 
     private var header: some View {
@@ -48,12 +48,12 @@ struct MenuBarView: View {
             Text("Loki")
                 .font(Theme.Text.title)
                 .kerning(Theme.Text.titleTracking)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
             Spacer()
             Text(conversation.isReady ? state.label : "no key")
                 .font(Theme.Text.meta)
                 .kerning(Theme.Text.metaTracking)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
         }
     }
 
@@ -64,28 +64,28 @@ struct MenuBarView: View {
         if conversation.turns.isEmpty {
             Text("Nothing yet today.")
                 .font(Theme.Text.body)
-                .foregroundStyle(Theme.Colors.faint)
+                .foregroundStyle(Theme.Colors.tertiary)
         } else {
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 Text("This session")
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                 Text("\(conversation.turns.count) turns.")
                     .font(Theme.Text.record)
-                    .foregroundStyle(Theme.Colors.ink)
+                    .foregroundStyle(Theme.Colors.primary)
             }
             .padding(Theme.Space.m)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.panel))
+            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
         }
     }
 
     private var state: Theme.State {
         switch conversation.composer {
-        case .running: .holding
+        case .running: .thinking
         case .needsYou: .needsYou
-        default: .released
+        default: .idle
         }
     }
 }

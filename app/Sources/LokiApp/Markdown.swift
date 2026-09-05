@@ -48,14 +48,14 @@ private struct BlockView: View {
         switch block {
         case let .heading(level, text):
             Text(Markdown.inline(text, base: Theme.Text.heading(level)))
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, level <= 2 ? Theme.Space.s : 0)
 
         case let .paragraph(text):
             Text(Markdown.inline(text, base: Theme.Text.record))
                 .lineSpacing(Theme.Text.recordLineSpacing)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
         case let .code(language, lines):
@@ -71,10 +71,10 @@ private struct BlockView: View {
         case let .quote(blocks):
             HStack(alignment: .top, spacing: Theme.Space.m) {
                 Rectangle()
-                    .fill(Theme.Colors.line)
+                    .fill(Theme.Colors.border)
                     .frame(width: Theme.Size.rail)
                 Blocks(blocks: blocks)
-                    .foregroundStyle(Theme.Colors.muted)
+                    .foregroundStyle(Theme.Colors.secondary)
             }
 
         case let .table(header, rows, alignments):
@@ -82,7 +82,7 @@ private struct BlockView: View {
 
         case .rule:
             Rectangle()
-                .fill(Theme.Colors.line)
+                .fill(Theme.Colors.border)
                 .frame(height: 1)
                 .padding(.vertical, Theme.Space.s)
         }
@@ -99,11 +99,11 @@ private struct ListRow: View {
                 if let done = item.checked {
                     Image(systemName: done ? "checkmark.square.fill" : "square")
                         .font(.system(size: 11))
-                        .foregroundStyle(done ? Theme.State.released.color : Theme.Colors.faint)
+                        .foregroundStyle(done ? Theme.State.idle.color : Theme.Colors.tertiary)
                 } else {
                     Text(marker)
                         .font(Theme.Text.record)
-                        .foregroundStyle(Theme.Colors.faint)
+                        .foregroundStyle(Theme.Colors.tertiary)
                         .monospacedDigit()
                 }
             }
@@ -112,7 +112,7 @@ private struct ListRow: View {
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 Text(Markdown.inline(item.text, base: Theme.Text.record))
                     .lineSpacing(Theme.Text.recordLineSpacing)
-                    .foregroundStyle(Theme.Colors.ink)
+                    .foregroundStyle(Theme.Colors.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if !item.children.isEmpty {
@@ -134,7 +134,7 @@ private struct CodeBlock: View {
                 Text(language)
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .padding(.horizontal, Theme.Space.m)
                     .padding(.top, Theme.Space.s)
             }
@@ -145,7 +145,7 @@ private struct CodeBlock: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
     }
 }
 
@@ -160,12 +160,12 @@ private struct TableBlock: View {
             VStack(alignment: .leading, spacing: 0) {
                 row(header, isHeader: true)
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
-                    Rectangle().fill(Theme.Colors.line).frame(height: 1)
+                    Rectangle().fill(Theme.Colors.border).frame(height: 1)
                     row(cells, isHeader: false)
                 }
             }
         }
-        .background(Theme.Colors.sunk, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
     }
 
     private func alignment(_ column: Int) -> SwiftUI.Alignment {
@@ -180,7 +180,7 @@ private struct TableBlock: View {
         HStack(alignment: .top, spacing: Theme.Space.l) {
             ForEach(Array(cells.enumerated()), id: \.offset) { column, cell in
                 Text(Markdown.inline(cell, base: isHeader ? Theme.Text.bodyStrong : Theme.Text.body))
-                    .foregroundStyle(isHeader ? Theme.Colors.ink : Theme.Colors.muted)
+                    .foregroundStyle(isHeader ? Theme.Colors.primary : Theme.Colors.secondary)
                     .frame(minWidth: 80, alignment: alignment(column))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -395,11 +395,11 @@ enum Markdown {
         for run in out.runs {
             if run.inlinePresentationIntent?.contains(.code) == true {
                 out[run.range].font = Theme.Text.code
-                out[run.range].backgroundColor = Theme.Colors.sunk
+                out[run.range].backgroundColor = Theme.Colors.background
             }
             if run.inlinePresentationIntent?.contains(.strikethrough) == true {
                 out[run.range].strikethroughStyle = .single
-                out[run.range].foregroundColor = Theme.Colors.muted
+                out[run.range].foregroundColor = Theme.Colors.secondary
             }
             if run.link != nil {
                 out[run.range].foregroundColor = Theme.State.reading.color

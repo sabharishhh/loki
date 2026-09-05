@@ -14,7 +14,7 @@ enum Syntax {
         let dialect = Dialect(language)
         var out = AttributedString(code)
         out.font = Theme.Text.code
-        out.foregroundColor = Theme.Colors.ink
+        out.foregroundColor = Theme.Colors.primary
 
         for token in scan(code, dialect) {
             guard let range = Range(token.range, in: out) else { continue }
@@ -28,9 +28,9 @@ enum Syntax {
 
         var color: Color {
             switch self {
-            case .comment: Theme.Colors.faint
-            case .string: Theme.State.released.color
-            case .number: Theme.State.holding.color
+            case .comment: Theme.Colors.tertiary
+            case .string: Theme.State.idle.color
+            case .number: Theme.State.thinking.color
             case .keyword: Theme.State.reading.color
             }
         }

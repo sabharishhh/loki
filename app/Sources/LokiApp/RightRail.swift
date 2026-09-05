@@ -20,7 +20,7 @@ struct RightRail: View {
     var body: some View {
         VStack(spacing: 0) {
             Tabs(selection: $tab)
-            Divider().overlay(Theme.Colors.line)
+            Divider().overlay(Theme.Colors.border)
 
             ScrollView {
                 Group {
@@ -34,8 +34,8 @@ struct RightRail: View {
                 .padding(Theme.Space.m)
             }
         }
-        .background(Theme.Colors.canvas)
-        .animation(Theme.Motion.standard, value: tab)
+        .background(Theme.Colors.background)
+        .animation(Theme.Motion.control, value: tab)
     }
 }
 
@@ -53,14 +53,14 @@ private struct Tabs: View {
                         Text(tab.rawValue)
                             .font(Theme.Text.body)
                             .foregroundStyle(
-                                selection == tab ? Theme.Colors.ink : Theme.Colors.faint
+                                selection == tab ? Theme.Colors.primary : Theme.Colors.tertiary
                             )
                         // The underline slides between tabs rather than cutting, so the eye
                         // follows the selection instead of relocating it.
                         Group {
                             if selection == tab {
                                 Rectangle()
-                                    .fill(Theme.Colors.ink)
+                                    .fill(Theme.Colors.primary)
                                     .frame(height: 1.5)
                                     .matchedGeometryEffect(id: "underline", in: underline)
                             } else {
@@ -75,7 +75,7 @@ private struct Tabs: View {
                 .buttonStyle(.plain)
             }
         }
-        .animation(Theme.Motion.standard, value: selection)
+        .animation(Theme.Motion.control, value: selection)
     }
 }
 
@@ -103,7 +103,7 @@ private struct InPlay: View {
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
                     .monospacedDigit()
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .padding(.top, Theme.Space.xs)
             }
         }
@@ -121,7 +121,7 @@ private struct ClaimRow: View {
             Text(claim.text)
                 .font(Theme.Text.body)
                 .lineSpacing(Theme.Text.bodyLineSpacing)
-                .foregroundStyle(Theme.Colors.ink)
+                .foregroundStyle(Theme.Colors.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -129,7 +129,7 @@ private struct ClaimRow: View {
                 Text(claim.fromSession ? "this session" : claim.name)
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
-                    .foregroundStyle(Theme.Colors.faint)
+                    .foregroundStyle(Theme.Colors.tertiary)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
@@ -153,11 +153,11 @@ private struct ClaimRow: View {
         }
         .padding(Theme.Space.s)
         .background(
-            hovering ? Theme.Colors.sunk : Theme.Colors.raised,
+            hovering ? Theme.Colors.background : Theme.Colors.surface,
             in: .rect(cornerRadius: Theme.Radius.control)
         )
         .onHover { hovering = $0 }
-        .animation(Theme.Motion.standard, value: hovering)
+        .animation(Theme.Motion.control, value: hovering)
     }
 }
 
