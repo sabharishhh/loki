@@ -47,6 +47,10 @@ That folder is a git repository, so every time Loki consolidates what it learned
 and its history is the history of what it learned and when. You can read it, edit it, copy it to
 another Mac, or take it somewhere else entirely.
 
+## Building it
+
+`CONTRIBUTING.md` covers setup, running it, working in Xcode, testing and releasing.
+
 ## Not yet
 
 The web, actions on your files and calendar, connectors to accounts you already use, and running
