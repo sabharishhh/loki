@@ -26,12 +26,19 @@ enum Syntax {
     private enum Kind {
         case comment, string, number, keyword
 
+        /// Four values from the palette, and four that are actually different from each other.
+        ///
+        /// These were written as state colours, which worked while there were four states with
+        /// four hues. Dropping `released` left `thinking` and `reading` both on the accent, so a
+        /// keyword and a number became the same yellow and a string and a comment the same grey:
+        /// four token kinds rendering as two. A code well is not a state readout, so it takes
+        /// ordinary palette values rather than borrowing meanings that have since merged (B-69).
         var color: Color {
             switch self {
             case .comment: Theme.Colors.tertiary
-            case .string: Theme.State.idle.color
-            case .number: Theme.State.thinking.color
-            case .keyword: Theme.State.reading.color
+            case .string: Theme.Colors.secondary
+            case .number: Theme.Colors.yellowHover
+            case .keyword: Theme.Colors.yellow
             }
         }
     }
