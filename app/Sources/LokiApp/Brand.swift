@@ -40,12 +40,6 @@ enum Brand {
     /// bitmap**, which is what made it look pixelated. Rendering at the size actually wanted, once,
     /// fixes it at the source.
     static func mark(points: CGFloat) -> NSImage? {
-        // Vector needs none of the machinery below. Sizing a PDF is a resize of the page box, and
-        // Core Graphics draws it at whatever the device and the position actually are.
-        if isVector, let vector = loaded?.copy() as? NSImage {
-            vector.size = NSSize(width: points, height: points)
-            return vector
-        }
         let key = Int(points.rounded())
         if let cached = cache.withLock({ $0[key] }) { return cached }
         guard let trimmed else { return nil }
@@ -114,9 +108,7 @@ enum Brand {
     /// The artwork with its transparent margin cropped away, so the circle fills whatever box it
     /// is given.
     private static let trimmed: NSImage? = {
-        guard let source = loaded,
-              let cg = source.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        else { return nil }
+        guard let source = loaded, let cg = pixels(of: source) else { return nil }
         let box = opaqueBounds(of: cg)
         guard let cropped = cg.cropping(to: box) else { return nil }
         return NSImage(cgImage: cropped, size: NSSize(width: box.width, height: box.height))
@@ -188,8 +180,49 @@ enum Brand {
         return nil
     }
 
-    /// Whether the artwork is vector, in which case no trimming or caching is wanted.
-    static var isVector: Bool {
-        loaded?.representations.contains { $0 is NSPDFImageRep } ?? false
+    /// The artwork as pixels, whatever container it arrived in.
+    ///
+    /// **A PDF is passed through the same trim and the same per-scale rendering as a PNG, rather
+    /// than handed to the layout as a resizable page.** The tempting shortcut is to set a PDF's
+    /// size and let Core Graphics rasterise it analytically, which is genuinely better for a true
+    /// vector file. It is wrong for the file we have: `logo.pdf` is a 3752px bitmap in a PDF
+    /// wrapper, with 42 path operators that only place it, and its page box carries padding. Passed
+    /// through it would have drawn the mark smaller than its box, which is the bug the trim exists
+    /// to prevent, reintroduced by the fix for a different one.
+    ///
+    /// Rasterising at `sourcePixels` and trimming covers both cases: a real vector file gets a
+    /// sampling source far larger than any size drawn here, and a wrapped bitmap gets its own
+    /// pixels. Nothing has to know which it was given.
+    private static let sourcePixels = 2048
+
+    private static func pixels(of image: NSImage) -> CGImage? {
+        guard image.representations.contains(where: { $0 is NSPDFImageRep }) else {
+            return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        let side = CGFloat(sourcePixels)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: sourcePixels,
+            pixelsHigh: sourcePixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: side, height: side),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
     }
 }
