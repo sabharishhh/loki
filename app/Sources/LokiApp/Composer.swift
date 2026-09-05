@@ -317,6 +317,8 @@ struct MicControl: View {
     let levels: [Float]
     let action: () -> Void
 
+    @Environment(\.reduceMotion) private var reduceMotion
+
     private static let barWidth: CGFloat = 3
     private static let maxHeight: CGFloat = 16
     private static let minHeight: CGFloat = 3
@@ -367,7 +369,7 @@ struct MicControl: View {
         }
         // Long enough to smooth the sample rate, short enough that a word still lands on the beat
         // it was spoken.
-        .animation(.smooth(duration: 0.22), value: eased)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.22), value: eased)
         .transition(.opacity.combined(with: .scale(scale: 0.7)))
         .onChange(of: levels, initial: true) { _, new in settle(toward: new) }
     }

@@ -31,6 +31,7 @@ struct MenuBarView: View {
                 .font(Theme.Text.body)
 
             Button("Quit") { NSApplication.shared.terminate(nil) }
+                .accessibilityLabel("Quit Loki")
                 .buttonStyle(.borderless)
                 .font(Theme.Text.body)
                 .keyboardShortcut("q")

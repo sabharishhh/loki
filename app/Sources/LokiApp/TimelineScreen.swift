@@ -196,6 +196,8 @@ private struct EntityCard: View {
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 6)
         .onAppear { withAnimation(Theme.Motion.control) { appeared = true } }
+        // The whole card, not just where it happens to draw ink. Same reason as the message row.
+        .contentShape(.rect)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.control, value: hovering)
     }
@@ -348,6 +350,7 @@ private struct FactRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .fixedSize(horizontal: false, vertical: true)
+        .contentShape(.rect)
         .onHover { hovering = $0 }
     }
 

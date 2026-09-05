@@ -176,9 +176,36 @@ enum Theme {
 
 /// Whether the reader has asked for less movement.
 ///
-/// Read once and passed down rather than queried at every call site. Every looping animation in
-/// the app checks it and holds a still frame instead of stopping mid-cycle, because a loop frozen
-/// at a random phase looks broken rather than calm.
+/// Read from the environment rather than queried at each call site, so every loop in the app is
+/// answering the same question. Every ambient animation checks it and holds a still frame instead
+/// of stopping mid-cycle, because a loop frozen at a random phase looks broken rather than calm.
 extension EnvironmentValues {
     @Entry var reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+}
+
+/// Watches the system setting and republishes it.
+///
+/// The environment default is read once at launch, which is wrong the moment somebody changes the
+/// setting while the app is open. macOS posts a notification for exactly this and nothing was
+/// listening to it.
+@MainActor
+@Observable
+final class MotionPreference {
+    private(set) var reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    private var observer: (any NSObjectProtocol)?
+
+    init() {
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            }
+        }
+    }
+
+    // No `deinit`: the token is held for the life of the app, and a `deinit` cannot reach
+    // main-actor state to release it anyway.
 }

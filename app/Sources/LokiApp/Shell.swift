@@ -9,6 +9,7 @@ import SwiftUI
 struct Shell: View {
     let conversation: Conversation
 
+    @State private var motion = MotionPreference()
     @State private var sidebar = false
     @State private var rail = false
     @State private var screen: Screen = .thread
@@ -75,6 +76,7 @@ struct Shell: View {
             }
         }
         .frame(minWidth: 620, minHeight: 420)
+        .environment(\.reduceMotion, motion.reduced)
         .task { conversation.observe() }
     }
 
