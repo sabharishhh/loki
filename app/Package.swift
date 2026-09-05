@@ -37,6 +37,9 @@ let package = Package(
         .executableTarget(
             name: "LokiApp",
             dependencies: ["LokiCore"],
+            // A symlink to `branding/logo/logo.png`, so the artwork has exactly one home and the
+            // app, the Dock icon and the repository cannot drift apart.
+            resources: [.process("Resources")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",

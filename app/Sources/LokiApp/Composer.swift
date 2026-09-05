@@ -276,15 +276,16 @@ extension Composer {
 /// One control rather than a mic plus a separate meter: the thing you pressed is the thing that
 /// shows it is listening, and the composer stays free to show what was heard.
 struct MicControl: View {
-    static let bars = 5
+    /// Seven, so there is a true centre bar for the tallest reading to sit on.
+    static let bars = 7
 
     let recording: Bool
     let levels: [Float]
     let action: () -> Void
 
-    private static let barWidth: CGFloat = 2.5
-    private static let maxHeight: CGFloat = 14
-    private static let minHeight: CGFloat = 2.5
+    private static let barWidth: CGFloat = 3
+    private static let maxHeight: CGFloat = 16
+    private static let minHeight: CGFloat = 3
 
     var body: some View {
         Button(action: action) {
@@ -297,11 +298,7 @@ struct MicControl: View {
                         .foregroundStyle(Theme.Colors.tertiary)
                 }
             }
-            .frame(width: 30, height: 22)
-            .background(
-                recording ? Theme.State.reading.tint : .clear,
-                in: .rect(cornerRadius: Theme.Radius.control)
-            )
+            .frame(width: 38, height: 22)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -310,23 +307,37 @@ struct MicControl: View {
         .accessibilityLabel(recording ? "Stop dictating" : "Start dictating")
     }
 
+    /// Bars in the accent, on nothing.
+    ///
+    /// **No container.** A meter in a filled box reads as a control that has changed shape, and
+    /// what is wanted is the sound itself. Each bar is a full capsule rather than a rounded
+    /// rectangle, so a quiet moment leaves a row of dots instead of a row of stubs.
     private var meter: some View {
-        HStack(alignment: .center, spacing: 2) {
+        HStack(alignment: .center, spacing: 2.5) {
             ForEach(0..<Self.bars, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Theme.State.reading.color)
+                Capsule(style: .continuous)
+                    .fill(Theme.Colors.yellow)
                     .frame(width: Self.barWidth, height: height(at: index))
             }
         }
-        .animation(.linear(duration: 0.08), value: levels)
+        .animation(.spring(response: 0.16, dampingFraction: 0.62), value: levels)
+        .transition(.opacity.combined(with: .scale(scale: 0.7)))
     }
 
-    /// Newest at the right, so the meter reads left to right like the text beside it.
+    /// Loudest in the middle, falling away to either side.
+    ///
+    /// The newest reading drives the centre bar and the older ones spread outward, so the shape
+    /// grows from the middle the way a voice does rather than scrolling past like a chart.
     private func height(at index: Int) -> CGFloat {
-        let offset = Self.bars - levels.count
-        guard index >= offset, index - offset < levels.count else { return Self.minHeight }
-        let level = CGFloat(levels[index - offset])
-        return Self.minHeight + level * (Self.maxHeight - Self.minHeight)
+        guard !levels.isEmpty else { return Self.minHeight }
+        let centre = (Self.bars - 1) / 2
+        let distance = abs(index - centre)
+        let reading = levels[max(levels.count - 1 - distance, 0)]
+        // Shoulders sit lower than the centre even at the same reading, which is what gives the
+        // group its shape instead of leaving it a flat row.
+        let falloff = 1 - CGFloat(distance) * 0.22
+        let level = CGFloat(reading) * falloff
+        return Self.minHeight + max(level, 0) * (Self.maxHeight - Self.minHeight)
     }
 }
 

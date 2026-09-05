@@ -1,123 +1,86 @@
 import SwiftUI
 
-/// Loki's face, drawn to the measurements in `Brand.Geometry`.
+/// Loki's mark.
 ///
-/// **Drawn rather than loaded so it can move.** The mark is the status indicator: every assistant
-/// in this space signals thinking with a spinner, a shimmer or three bouncing dots, all of which
-/// say only that something is happening. A face says what is happening, and the same drawing works
-/// at 15pt in a trace header, at 22pt beside a response and at 512pt in the Dock. A raster cannot
-/// blink, and a raster scaled to 15pt turns to mush.
+/// **The artwork itself, not a redrawing of it.** `Resources/loki-mark.png` is a symlink to
+/// `branding/logo/logo.png`, so the thread, the title bar and the Dock icon are all the same file
+/// and none of them can drift. An earlier version drew the face from measured ratios, which was a
+/// worse idea than it sounded: at 22pt the eyes are two pixels wide and every rounding error shows.
 ///
-/// It is the same geometry as `branding/logo/logo.png`, which is what the app icon is built from,
-/// so the thing in the Dock and the thing in the thread are one mark.
+/// What moves is the mark as a whole. The glow breathes while Loki is working, it leans a few
+/// degrees as it starts, and it settles when it stops, so the avatar carries the state without
+/// anything being drawn on top of the artwork.
 struct Mark: View {
     var state: Theme.State = .idle
-    /// Turns the blink off, for a still context or a screenshot.
+    /// Turns the ambient motion off, for a still context or a screenshot.
     var animated = true
-    /// Draws the halo the artwork has. Off at small sizes, where it only muddies the edge.
     var glow = true
 
     @Environment(\.reduceMotion) private var reduceMotion
-    @State private var lidClosed = false
-    @State private var gaze: CGFloat = 0
+    /// Rides from 0 to 1 and back while working. Drives the glow and the breath together.
+    @State private var pulse: CGFloat = 0
+    @State private var lean = false
 
-    /// How open the eyes are, from shut to wide.
-    private var openness: CGFloat {
-        if lidClosed { return 0.08 }
-        switch state {
-        case .idle: return 1
-        case .thinking: return 0.66
-        case .reading: return 0.82
-        case .needsYou: return 1.14
-        }
-    }
+    private var working: Bool { state == .thinking || state == .reading }
 
     var body: some View {
-        Canvas { context, size in
-            let d = min(size.width, size.height)
-            let origin = CGPoint(x: (size.width - d) / 2, y: (size.height - d) / 2)
-            draw(in: &context, at: origin, diameter: d)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .shadow(
-            color: Theme.Colors.yellow.opacity(glow ? Palette.markGlow : 0),
-            radius: glow ? 7 : 0
-        )
-        .animation(Theme.Motion.control, value: state)
-        .animation(.easeInOut(duration: 0.085), value: lidClosed)
-        .animation(Theme.Motion.ambient, value: gaze)
-        .task(id: animated && !reduceMotion) {
-            guard animated, !reduceMotion else {
-                lidClosed = false
-                gaze = 0
-                return
-            }
-            await live()
-        }
-        .accessibilityHidden(true)
+        Image("loki-mark", bundle: .module)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .scaleEffect(1 + pulse * 0.045)
+            .rotationEffect(.degrees(lean ? 5 : 0))
+            .shadow(
+                color: Theme.Colors.yellow.opacity(glowStrength),
+                radius: 5 + pulse * 7
+            )
+            .animation(Theme.Motion.arrive, value: lean)
+            .animation(Theme.Motion.control, value: state)
+            .task(id: taskKey) { await breathe() }
+            .accessibilityHidden(true)
     }
 
-    private func draw(in context: inout GraphicsContext, at origin: CGPoint, diameter d: CGFloat) {
-        let face = CGRect(x: origin.x, y: origin.y, width: d, height: d)
-        let centre = CGPoint(x: face.midX, y: face.midY)
-
-        // The body carries the artwork's soft fall from the top left, which is what stops a flat
-        // yellow disc reading as a sticker.
-        context.fill(
-            Path(ellipseIn: face),
-            with: .radialGradient(
-                Gradient(colors: [Theme.Colors.yellow, Theme.Colors.yellowHover]),
-                center: CGPoint(x: face.minX + d * 0.34, y: face.minY + d * 0.3),
-                startRadius: 0,
-                endRadius: d * 0.78
-            )
-        )
-
-        let eyeW = d * Brand.Geometry.eyeWidth
-        let eyeH = d * Brand.Geometry.eyeHeight * openness
-        let half = d * Brand.Geometry.eyeGap / 2
-        let eyeY = centre.y - d * Brand.Geometry.eyeRise
-
-        for side in [-1.0, 1.0] as [CGFloat] {
-            let x = centre.x + side * (half + eyeW / 2)
-            let eye = CGRect(x: x - eyeW / 2, y: eyeY - eyeH / 2, width: eyeW, height: eyeH)
-            context.fill(Path(roundedRect: eye, cornerRadius: eyeW / 2), with: .color(.black))
-
-            // The highlight goes once the lid is most of the way down. A dot floating on a closed
-            // eye is the thing that makes a blink look wrong.
-            guard openness > 0.34 else { continue }
-            let pupil = d * Brand.Geometry.pupilDiameter
-            let inset = d * Brand.Geometry.eyeHeight * Brand.Geometry.pupilInset
-            let drift = gaze * eyeW * 0.1
-            let pupilRect = CGRect(
-                x: eye.midX - pupil / 2 + side * eyeW * Brand.Geometry.pupilShift + drift,
-                y: eye.minY + inset,
-                width: pupil,
-                height: pupil
-            )
-            context.fill(Path(ellipseIn: pupilRect), with: .color(Theme.Colors.yellow))
-        }
+    /// Brighter while working, and steady rather than dark when it is not.
+    private var glowStrength: CGFloat {
+        guard glow else { return 0 }
+        let base = Palette.markGlow
+        return working ? base + pulse * 0.4 : base
     }
 
-    /// The idle loop: a blink at a human interval, and a slow drift of the gaze.
+    /// Restarts the loop when either the state or the reader's motion preference changes.
+    private var taskKey: String { "\(state.rawValue)-\(animated && !reduceMotion)" }
+
+    /// The ambient loop.
     ///
-    /// Irregular on purpose. A blink on a fixed timer reads as a pulsing indicator, which is the
-    /// thing this exists instead of.
-    private func live() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(.random(in: 2.8...6.5)))
-            if Task.isCancelled { return }
-            gaze = .random(in: -1...1)
-            lidClosed = true
-            try? await Task.sleep(for: .milliseconds(92))
-            lidClosed = false
-            if Bool.random() {
-                try? await Task.sleep(for: .milliseconds(150))
-                lidClosed = true
-                try? await Task.sleep(for: .milliseconds(86))
-                lidClosed = false
-            }
+    /// A slow swell while working, and stillness otherwise. Deliberately not a spinner: the point
+    /// is that you can tell at a glance whether it is busy without a control that exists only to
+    /// say so, and a mark that pulses forever would be exactly that.
+    private func breathe() async {
+        guard animated, !reduceMotion else {
+            pulse = 0
+            lean = false
+            return
         }
+        guard working else {
+            withAnimation(Theme.Motion.panel) {
+                pulse = 0
+                lean = false
+            }
+            return
+        }
+        // A small tilt as it starts, so the change registers even before the glow moves.
+        withAnimation(Theme.Motion.arrive) { lean = true }
+        try? await Task.sleep(for: .milliseconds(280))
+        withAnimation(Theme.Motion.arrive) { lean = false }
+
+        while !Task.isCancelled {
+            withAnimation(.easeInOut(duration: 1.1)) { pulse = 1 }
+            try? await Task.sleep(for: .milliseconds(1100))
+            if Task.isCancelled { break }
+            withAnimation(.easeInOut(duration: 1.1)) { pulse = 0 }
+            try? await Task.sleep(for: .milliseconds(1100))
+        }
+        withAnimation(Theme.Motion.panel) { pulse = 0 }
     }
 }
 
@@ -128,7 +91,7 @@ struct MarkBadge: View {
     var animated = true
 
     var body: some View {
-        Mark(state: state, animated: animated, glow: size >= 20)
+        Mark(state: state, animated: animated, glow: size >= 18)
             .frame(width: size, height: size)
     }
 }

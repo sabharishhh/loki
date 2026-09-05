@@ -22,6 +22,8 @@ struct MessageRow: View {
     @FocusState private var editorFocused: Bool
 
     private var isUser: Bool { turn.speaker == .user }
+    /// Everything in the footer appears together, so the row gains one thing rather than two.
+    private var revealed: Bool { hovering && !streaming }
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Space.m) {
@@ -105,10 +107,15 @@ struct MessageRow: View {
         HStack(spacing: Theme.Space.s) {
             if isUser { Spacer(minLength: 0) }
 
+            // Held back until the pointer arrives, like the controls beside it. A time on every
+            // row is a column of numbers down the thread, and the thread is meant to read as
+            // writing.
             Text(turn.at, format: .dateTime.hour().minute())
                 .font(Theme.Text.meta)
                 .kerning(Theme.Text.metaTracking)
                 .foregroundStyle(Theme.Colors.tertiary)
+                .opacity(revealed ? 1 : 0)
+                .animation(reduceMotion ? nil : Theme.Motion.control, value: revealed)
 
             if !editing {
                 actions
@@ -145,9 +152,9 @@ struct MessageRow: View {
             }
         }
         // Laid out always, revealed on hover, so nothing below this row ever moves.
-        .opacity(hovering && !streaming ? 1 : 0)
-        .allowsHitTesting(hovering && !streaming)
-        .animation(reduceMotion ? nil : Theme.Motion.control, value: hovering)
+        .opacity(revealed ? 1 : 0)
+        .allowsHitTesting(revealed)
+        .animation(reduceMotion ? nil : Theme.Motion.control, value: revealed)
         .animation(Theme.Motion.control, value: copied)
     }
 }
