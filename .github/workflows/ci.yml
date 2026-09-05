@@ -70,7 +70,9 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Signing secrets not set. See readMe.md for the list. Skipping."
+            echo "::notice::Signing secrets not set, so notarization is skipped. Needs \
+            APPLE_CERTIFICATE_P12, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID, \
+            APPLE_TEAM_ID and APPLE_APP_PASSWORD."
           fi
 
       - name: Select Xcode
