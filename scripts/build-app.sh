@@ -24,6 +24,13 @@ esac
 # Match SwiftPM's deployment target so the linker does not warn about mismatched object files.
 export MACOSX_DEPLOYMENT_TARGET=26.0
 
+# The mark the app draws with, refreshed from the one place the artwork lives. SwiftPM will not
+# follow a symlink into a resource bundle, so this is a copy, and copying it on every build is what
+# stops it going stale.
+if [ -f "$ROOT/branding/logo/logo.png" ]; then
+  cp "$ROOT/branding/logo/logo.png" "$ROOT/app/Sources/LokiApp/Resources/loki-mark.png"
+fi
+
 echo "==> cargo build ($CONFIG)"
 cd "$ROOT"
 cargo build -p loki-ffi $CARGO_FLAGS
@@ -40,6 +47,15 @@ echo "==> assembling $BUNDLE"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$BIN" "$BUNDLE/Contents/MacOS/Loki"
+
+# SwiftPM emits resources as a sibling bundle beside the binary, and copying only the executable
+# leaves `Bundle.module` with nothing to find. That fails at runtime rather than at build time,
+# which is exactly the kind of silence this script exists to prevent elsewhere.
+BIN_DIR="$(dirname "$BIN")"
+for resource in "$BIN_DIR"/*.bundle; do
+  [ -e "$resource" ] || continue
+  cp -R "$resource" "$BUNDLE/Contents/Resources/"
+done
 
 # One source of truth. The same file is embedded into the executable at link time by
 # Package.swift, so the bundle and the bare binary cannot disagree about LSUIElement.
