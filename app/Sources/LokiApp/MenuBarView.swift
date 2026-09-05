@@ -78,7 +78,7 @@ struct MenuBarView: View {
             }
             .padding(Theme.Space.m)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
+            .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.panel))
         }
     }
 

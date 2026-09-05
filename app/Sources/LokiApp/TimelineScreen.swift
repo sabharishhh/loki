@@ -399,7 +399,7 @@ private struct FactRow: View {
                 .font(Theme.Text.record)
                 .foregroundStyle(Theme.Colors.primary)
                 .padding(Theme.Space.s)
-                .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+                .background(Theme.Colors.surfaceAlt, in: .rect(cornerRadius: Theme.Radius.control))
 
             HStack(spacing: Theme.Space.m) {
                 Quiet("save") {
@@ -501,7 +501,7 @@ private struct SearchField: View {
         }
         .padding(.horizontal, Theme.Space.m)
         .padding(.vertical, Theme.Space.s)
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.control))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .stroke(Theme.Colors.border, lineWidth: 1)

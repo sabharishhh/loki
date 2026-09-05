@@ -265,7 +265,7 @@ struct SessionSummary: View {
         }
         .padding(Theme.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.panel))
+        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.panel))
         .overlay(alignment: .leading) {
             // The same rail the thread uses, so the card reads as part of the record rather than
             // as a notification arriving on top of it.

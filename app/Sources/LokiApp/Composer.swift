@@ -455,6 +455,6 @@ struct Key: View {
             .foregroundStyle(Theme.Colors.secondary)
             .padding(.horizontal, Theme.Space.xs)
             .padding(.vertical, 1)
-            .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+            .background(Theme.Colors.surfaceAlt, in: .rect(cornerRadius: Theme.Radius.control))
     }
 }

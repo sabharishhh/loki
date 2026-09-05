@@ -114,7 +114,7 @@ private struct StepRow: View {
                         .padding(Theme.Space.s)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+                .background(Theme.Colors.surfaceAlt, in: .rect(cornerRadius: Theme.Radius.control))
                 .padding(.leading, 48 + Theme.Space.s)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }

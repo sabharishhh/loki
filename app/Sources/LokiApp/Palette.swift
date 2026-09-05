@@ -9,20 +9,33 @@ import SwiftUI
 /// The two ramps are deliberately close together. Separation comes from borders, hover and glow,
 /// not from stacking greys: a panel that is three shades lighter than its ground reads as a box
 /// sitting on top of the app rather than as part of it.
+///
+/// The dark ground is black. Everything above it was raised to match, because contrast is a
+/// difference and moving one end of it without the other quietly flattens the whole table.
 enum Palette {
     // MARK: - Dark. The default, and the one that is tuned.
 
     enum Dark {
         /// Everything sits on this. The window, the thread, the composer, the sidebar.
-        static let background: UInt32 = 0x070707
+        ///
+        /// Black, not near-black. Sabharish's call: as dark as the display will go. The cost is
+        /// that the ramp above it has to work harder, which is what the rest of this table does.
+        static let background: UInt32 = 0x000000
         /// Barely raised. Only for something that has to read as a distinct object.
-        static let surface: UInt32 = 0x0C0C0C
-        /// The user's own turn, a hovered row, a field with focus.
-        static let surfaceAlt: UInt32 = 0x141414
+        ///
+        /// Nothing fills a shape with `background` any more. It was a legitimate shade while the
+        /// ground was 0x070707, because a chip filled with it against a divider still read as one.
+        /// Against black it is not a fill at all, and eight shapes across the app were drawing
+        /// nothing: the toggle in the title bar, the code block, the search field, the key caps.
+        static let surface: UInt32 = 0x0B0B0B
+        /// The user's own turn, a field with focus.
+        static let surfaceAlt: UInt32 = 0x151515
 
-        static let primary: UInt32 = 0xF1F1EF
-        static let secondary: UInt32 = 0xA4A4A0
-        static let tertiary: UInt32 = 0x70706C
+        static let primary: UInt32 = 0xF2F2F0
+        static let secondary: UInt32 = 0xADADA9
+        /// Times, hints, step output. Lifted off the old value because a grey tuned against
+        /// 0x070707 goes muddy against black, and this is the ramp the small text lives in.
+        static let tertiary: UInt32 = 0x7C7C78
 
         static let yellow: UInt32 = 0xFFF12F
         static let yellowHover: UInt32 = 0xE9DC00
@@ -30,8 +43,12 @@ enum Palette {
         static let onYellow: UInt32 = 0x181817
 
         /// The workhorse. Almost every division in the app is one of these two hairlines.
-        static let border: UInt32 = 0x1E1E1E
-        static let borderStrong: UInt32 = 0x3A3A38
+        ///
+        /// Raised with the ground. A hairline is only ever a few steps above what it sits on, and
+        /// dropping the ground to black without moving these left every division fainter than it
+        /// was drawn to be.
+        static let border: UInt32 = 0x262626
+        static let borderStrong: UInt32 = 0x454542
     }
 
     // MARK: - Light.

@@ -153,7 +153,7 @@ private struct ClaimRow: View {
         }
         .padding(Theme.Space.s)
         .background(
-            hovering ? Theme.Colors.background : Theme.Colors.surface,
+            hovering ? Theme.Colors.surfaceAlt : Theme.Colors.surface,
             in: .rect(cornerRadius: Theme.Radius.control)
         )
         .onHover { hovering = $0 }

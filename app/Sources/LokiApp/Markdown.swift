@@ -145,7 +145,7 @@ private struct CodeBlock: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.control))
     }
 }
 
@@ -165,7 +165,7 @@ private struct TableBlock: View {
                 }
             }
         }
-        .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+        .background(Theme.Colors.surface, in: .rect(cornerRadius: Theme.Radius.control))
     }
 
     private func alignment(_ column: Int) -> SwiftUI.Alignment {
@@ -395,7 +395,7 @@ enum Markdown {
         for run in out.runs {
             if run.inlinePresentationIntent?.contains(.code) == true {
                 out[run.range].font = Theme.Text.code
-                out[run.range].backgroundColor = Theme.Colors.background
+                out[run.range].backgroundColor = Theme.Colors.surfaceAlt
             }
             if run.inlinePresentationIntent?.contains(.strikethrough) == true {
                 out[run.range].strikethroughStyle = .single

@@ -126,7 +126,7 @@ private struct TopBar: View {
                     .foregroundStyle(Theme.Colors.tertiary)
                     .padding(.horizontal, Theme.Space.xs)
                     .padding(.vertical, 1)
-                    .background(Theme.Colors.background, in: .rect(cornerRadius: Theme.Radius.control))
+                    .background(Theme.Colors.surfaceAlt, in: .rect(cornerRadius: Theme.Radius.control))
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
 
@@ -219,7 +219,7 @@ private struct BarToggle: ToggleStyle {
                 .foregroundStyle(configuration.isOn ? Theme.Colors.primary : Theme.Colors.tertiary)
                 .frame(width: 24, height: 22)
                 .background(
-                    configuration.isOn ? Theme.Colors.background : .clear,
+                    configuration.isOn ? Theme.Colors.surfaceAlt : .clear,
                     in: .rect(cornerRadius: Theme.Radius.control)
                 )
                 .contentShape(.rect)
