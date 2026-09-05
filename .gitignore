@@ -33,3 +33,5 @@ xcuserdata/
 *.xcworkspace/
 # Xcode scheme and workspace state for the SwiftPM package
 app/.swiftpm/
+
+graphify-out/
