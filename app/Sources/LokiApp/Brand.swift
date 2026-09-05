@@ -45,36 +45,63 @@ enum Brand {
         guard let trimmed else { return nil }
 
         let image = NSImage(size: NSSize(width: points, height: points))
-        image.addRepresentation({
-            let rep = NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: Int(points * 3),
-                pixelsHigh: Int(points * 3),
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-            )!
-            // Three times, so it stays crisp on a Retina display and on a scaled one above it.
-            rep.size = NSSize(width: points, height: points)
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            NSGraphicsContext.current?.imageInterpolation = .high
-            trimmed.draw(
-                in: NSRect(x: 0, y: 0, width: points, height: points),
-                from: .zero,
-                operation: .sourceOver,
-                fraction: 1
-            )
-            NSGraphicsContext.restoreGraphicsState()
-            return rep
-        }())
+        for scale in Self.scales {
+            image.addRepresentation(rasterise(trimmed, points: points, scale: scale))
+        }
         cache.withLock { $0[key] = image }
         return image
     }
+
+    /// The device scales a Mac actually asks for.
+    ///
+    /// **One representation per scale, and every one of them an exact integer.** An earlier version
+    /// carried a single 3x representation on the theory that more pixels is safer. It is not: a 2x
+    /// display then needs 44 pixels from a 66 pixel bitmap, and resampling by two thirds at draw
+    /// time is what put stair-steps on a circle that is clean in the source file. With a
+    /// representation per scale AppKit picks the matching one and never resamples, on either
+    /// display, including when a window is dragged from one to the other.
+    private static let scales: [CGFloat] = [1, 2, 3]
+
+    /// One representation, drawn at exactly `points * scale` pixels.
+    private static func rasterise(
+        _ source: NSImage,
+        points: CGFloat,
+        scale: CGFloat
+    ) -> NSBitmapImageRep {
+        let pixels = Int((points * scale).rounded())
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )!
+        rep.size = NSSize(width: points, height: points)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        source.draw(
+            in: NSRect(x: 0, y: 0, width: points, height: points),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    /// The mark at full resolution, for the Dock.
+    ///
+    /// **Set at launch, not left to the bundle.** `CFBundleIconFile` only applies to an assembled
+    /// `.app`, and the app is routinely run as the bare SwiftPM executable from Xcode, where there
+    /// is no `Resources/` for an `.icns` to sit in and the Dock falls back to the generic
+    /// executable icon. Assigning it at runtime covers both, and costs one line.
+    static func icon() -> NSImage? { trimmed }
 
     private static let cache = OSAllocatedUnfairLock(initialState: [Int: NSImage]())
 

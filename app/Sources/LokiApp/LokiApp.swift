@@ -47,6 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The thread is the product. It opens on launch rather than waiting to be found in the
     /// menu bar, which is a shortcut back to it, not the way in.
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The Dock icon, set here rather than left to `CFBundleIconFile`. That key only applies to
+        // an assembled `.app`, and running the SwiftPM executable from Xcode has no bundle to read
+        // it from, so the Dock shows the generic executable icon instead of the mark.
+        if let icon = Brand.icon() { NSApplication.shared.applicationIconImage = icon }
         uiTrace("3 didFinishLaunching policy=\(NSApp.activationPolicy().rawValue)")
 
         // A clash means another app already owns these keys. Not an error: the menu bar and the
