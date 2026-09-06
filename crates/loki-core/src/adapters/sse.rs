@@ -79,6 +79,7 @@ pub async fn check_status(response: Landed) -> Result<Landed, ModelError> {
     let Landed {
         status,
         retry_after,
+        location: _,
         mut body,
     } = response;
     let mut raw = Vec::new();

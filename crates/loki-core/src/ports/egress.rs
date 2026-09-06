@@ -140,6 +140,9 @@ pub struct Landed {
     pub status: u16,
     /// From `Retry-After`, when the far end sent one.
     pub retry_after: Option<Duration>,
+    /// From `Location`, when the far end sent one. Following it is the caller's business, so that
+    /// each hop is its own send with its own event (§21.7).
+    pub location: Option<String>,
     pub body: ByteStream,
 }
 

@@ -44,6 +44,11 @@ impl Http {
                 // One emulation for the whole process, so every request this app makes looks like
                 // the same browser. Rotating it per request is the thing that stands out.
                 .emulation(wreq_util::Emulation::Chrome142)
+                // **Redirects are followed here, not by the client.** A client that follows three
+                // hops internally makes four requests and lets the exit emit one event, and
+                // §21.7's byte accounting is then wrong by three requests with nothing to say so.
+                // Every hop is its own send, with its own event, through the same door.
+                .redirect(wreq::redirect::Policy::none())
                 .build()
                 .map_err(|e| EgressError::Transport(e.to_string()))?,
             events,
@@ -60,6 +65,41 @@ impl std::fmt::Debug for Http {
 #[async_trait]
 impl Egress for Http {
     async fn send(
+        &self,
+        request: Outbound,
+        cancel: CancellationToken,
+    ) -> Result<Landed, EgressError> {
+        // Ten, which is what browsers allow. A redirect loop is otherwise indistinguishable from a
+        // slow server, and measured on the live web this matters more than it sounds: Substack
+        // answers its own subdomain with a 301 to another host, and a client that does not follow
+        // reports every such site as unreadable.
+        const HOPS: usize = 10;
+
+        let mut request = request;
+        for _ in 0..HOPS {
+            let landed = self.once(request.clone(), cancel.clone()).await?;
+            let Some(next) = redirected_to(&request.url, &landed) else {
+                return Ok(landed);
+            };
+            // Only a GET is followed. Replaying a body against a location the caller did not choose
+            // is how a redirect becomes an unintended write.
+            if request.method != Method::Get {
+                return Ok(landed);
+            }
+            request = Outbound {
+                url: next,
+                ..request
+            };
+        }
+        Err(EgressError::Transport(format!(
+            "more than {HOPS} redirects"
+        )))
+    }
+}
+
+impl Http {
+    /// One request, one event, no following.
+    async fn once(
         &self,
         request: Outbound,
         cancel: CancellationToken,
@@ -97,6 +137,11 @@ impl Egress for Http {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse().ok())
             .map(std::time::Duration::from_secs);
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let status = response.status().as_u16();
         let body: ByteStream = Box::pin(response.bytes_stream().map(|chunk| {
             chunk
@@ -107,9 +152,43 @@ impl Egress for Http {
         Ok(Landed {
             status,
             retry_after,
+            location,
             body,
         })
     }
+}
+
+/// Where a response says to go next, resolved against where it came from.
+///
+/// `None` for anything that is not a redirect, which is how the caller knows it has arrived.
+fn redirected_to(from: &str, landed: &Landed) -> Option<String> {
+    if !matches!(landed.status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = landed.location.as_deref()?;
+    Some(resolve(from, location))
+}
+
+/// Resolves a `Location` against the page that sent it.
+fn resolve(from: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_owned();
+    }
+    let scheme = if from.starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    };
+    let rest = from.split_once("://").map_or(from, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if let Some(bare) = location.strip_prefix("//") {
+        return format!("{scheme}://{bare}");
+    }
+    if location.starts_with('/') {
+        return format!("{scheme}://{authority}{location}");
+    }
+    let parent = rest.rsplit_once('/').map_or(authority, |(head, _)| head);
+    format!("{scheme}://{parent}/{location}")
 }
 
 /// The delegated exit: a local proxy that is this adapter (§21.7).
@@ -279,4 +358,58 @@ fn authority_of(target: &str) -> String {
     let rest = target.split_once("://").map_or(target, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     split_authority(authority).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_location_resolves_against_the_page_that_sent_it() {
+        for (from, location, want) in [
+            // The case measured on the live web: one host redirecting to another.
+            (
+                "https://astralcodexten.substack.com/",
+                "https://www.astralcodexten.com/",
+                "https://www.astralcodexten.com/",
+            ),
+            ("https://example.com/a/b", "/c", "https://example.com/c"),
+            ("https://example.com/a/b", "c", "https://example.com/a/c"),
+            (
+                "https://example.com/a/b",
+                "//cdn.test/x",
+                "https://cdn.test/x",
+            ),
+            ("http://example.com/a", "/b", "http://example.com/b"),
+        ] {
+            assert_eq!(resolve(from, location), want, "{from} -> {location}");
+        }
+    }
+
+    fn landed(status: u16, location: Option<&str>) -> Landed {
+        Landed {
+            status,
+            retry_after: None,
+            location: location.map(str::to_owned),
+            body: Box::pin(futures_util::stream::empty()),
+        }
+    }
+
+    #[test]
+    fn only_a_redirect_with_somewhere_to_go_is_followed() {
+        for status in [301, 302, 303, 307, 308] {
+            assert!(
+                redirected_to("https://example.com", &landed(status, Some("/next"))).is_some(),
+                "{status} is a redirect"
+            );
+            // A redirect with no `Location` is a dead end, not a loop.
+            assert!(redirected_to("https://example.com", &landed(status, None)).is_none());
+        }
+        for status in [200, 204, 404, 429, 500] {
+            assert!(
+                redirected_to("https://example.com", &landed(status, Some("/next"))).is_none(),
+                "{status} has arrived, whatever headers it carries"
+            );
+        }
+    }
 }
