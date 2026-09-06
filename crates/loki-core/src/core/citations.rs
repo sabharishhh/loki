@@ -180,6 +180,7 @@ mod tests {
                 title: format!("t{n}"),
                 text: String::new(),
                 icon: None,
+                icon_hash: None,
                 read: true,
             })
             .collect()

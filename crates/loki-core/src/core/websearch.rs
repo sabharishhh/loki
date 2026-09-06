@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use crate::core::attempt::{self, Budget, Ending};
 use crate::core::vocab::Verdict;
+use crate::memory::evidence::Evidence;
 use crate::ports::clock::Clock;
+use crate::ports::egress::{Egress, Outbound};
 use crate::ports::search::{CancelToken, Discover, Extract, Hit, Page, SearchError};
 
 /// What a search turned up, ready to be cited.
@@ -38,6 +40,8 @@ pub struct Cited {
     /// The span the answer may quote. A snippet when that sufficed, the article when it did not.
     pub text: String,
     pub icon: Option<String>,
+    /// The icon's bytes, once fetched and stored. What the interface actually draws.
+    pub icon_hash: Option<String>,
     /// Whether this came from the engine's summary or from reading the page.
     pub read: bool,
 }
@@ -81,6 +85,10 @@ pub struct Search {
     pub budget: Budget,
     /// Pages worth reading when the snippets do not answer it.
     pub reads: usize,
+    /// Where fetched bytes are cached, when there is a store (§12.7).
+    pub evidence: Option<Arc<Evidence>>,
+    /// The one exit, for the icons. Never a favicon service (§21.7).
+    pub egress: Option<Arc<dyn Egress>>,
 }
 
 impl Search {
@@ -106,17 +114,20 @@ impl Search {
                 title: hit.title.clone(),
                 text: hit.snippet.clone(),
                 icon: None,
+                icon_hash: None,
                 read: false,
             })
             .collect();
 
         if answered_by_snippets(question, &sources) {
+            self.fetch_icons(&mut sources, cancel.clone()).await;
             return Ok(Found {
                 sources,
                 complete: true,
             });
         }
 
+        let cancel_for_icons = cancel.clone();
         let plan = Reading {
             hits,
             rungs: self.rungs.clone(),
@@ -135,11 +146,71 @@ impl Search {
         }
         sources.truncate(self.reads.max(1) * 2);
 
+        self.fetch_icons(&mut sources, cancel_for_icons).await;
         Ok(Found {
             sources,
             complete: outcome.ending == Ending::Stopped,
         })
     }
+
+    /// Fetches each site's own icon through the exit and stores it (§12.7).
+    ///
+    /// **From the page that was already read, and through the same door as everything else.** A
+    /// favicon service would be told every site the user reads, and a fetch from the interface
+    /// would be a second way out of the process. One icon per host, because a search that returned
+    /// four pages from one site should not ask it for the same file four times.
+    ///
+    /// Never fails a search. An answer with a letter where an icon would be is an answer; an answer
+    /// withheld because an icon did not load is not.
+    async fn fetch_icons(&self, sources: &mut [Cited], cancel: CancelToken) {
+        let (Some(evidence), Some(egress)) = (self.evidence.as_ref(), self.egress.as_ref()) else {
+            return;
+        };
+        let mut seen: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for source in sources.iter_mut() {
+            let Some(url) = source.icon.clone() else {
+                continue;
+            };
+            if let Some(known) = seen.get(&url) {
+                source.icon_hash.clone_from(known);
+                continue;
+            }
+            let hash = fetch_icon(egress.as_ref(), evidence, &url, cancel.clone()).await;
+            seen.insert(url, hash.clone());
+            source.icon_hash = hash;
+        }
+    }
+}
+
+/// One icon, fetched and stored, or `None` if anything went wrong.
+async fn fetch_icon(
+    egress: &dyn Egress,
+    evidence: &Evidence,
+    url: &str,
+    cancel: CancelToken,
+) -> Option<String> {
+    use futures_util::StreamExt as _;
+    let mut landed = egress
+        .send(Outbound::get(url).as_browser(), cancel)
+        .await
+        .ok()?;
+    if !(200..300).contains(&landed.status) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(Ok(chunk)) = landed.body.next().await {
+        bytes.extend_from_slice(&chunk);
+        // An icon is small. A host answering a favicon request with a megabyte is either wrong or
+        // hostile, and either way it is not going in the store.
+        if bytes.len() > 256 * 1024 {
+            return None;
+        }
+    }
+    (!bytes.is_empty())
+        .then(|| evidence.put(&bytes).ok())
+        .flatten()
+        .map(|hash| hash.as_str().to_owned())
 }
 
 /// Whether the engine's summaries already answer the question.
@@ -254,6 +325,7 @@ impl Cited {
             title,
             text: lines.next().unwrap_or_default().to_owned(),
             icon: (!icon.is_empty()).then(|| icon.to_owned()),
+            icon_hash: None,
             read: true,
         })
     }
@@ -269,6 +341,7 @@ mod tests {
             title: "t".to_owned(),
             text: text.to_owned(),
             icon: None,
+            icon_hash: None,
             read: false,
         }
     }

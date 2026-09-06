@@ -137,6 +137,13 @@ pub struct Loop {
     /// The web, when it is configured. `None` is a working assistant that cannot reach it, which
     /// is what every test that is not about search wants, and what a build with no engine has.
     web: Option<Arc<crate::core::websearch::Search>>,
+    /// What the last turn put in play and what it cited, for the rails.
+    ///
+    /// **Kept here because the rails ask after the turn has ended.** Both are computed inside a
+    /// turn and neither survived it, so `loki_recalled` has been returning an empty list since it
+    /// was written and the in-play rail has never had anything to draw (B-73).
+    last_recalled: Vec<crate::memory::index::Recalled>,
+    last_cited: Vec<crate::core::websearch::Cited>,
 }
 
 impl Loop {
@@ -169,6 +176,8 @@ impl Loop {
             clock,
             last_spoke: None,
             web: None,
+            last_recalled: Vec::new(),
+            last_cited: Vec::new(),
         }
     }
 
@@ -178,6 +187,18 @@ impl Loop {
     /// an assistant that cannot search, not one that will not start.
     pub fn attach_web(&mut self, web: Arc<crate::core::websearch::Search>) {
         self.web = Some(web);
+    }
+
+    /// What the last turn put in play (§9.2's rail).
+    #[must_use]
+    pub fn last_recalled(&self) -> &[crate::memory::index::Recalled] {
+        &self.last_recalled
+    }
+
+    /// What the last turn cited (§12.7).
+    #[must_use]
+    pub fn last_cited(&self) -> &[crate::core::websearch::Cited] {
+        &self.last_cited
     }
 
     /// The clock this loop reads. Principle 9: callers resolve time, the model never does.
@@ -333,6 +354,10 @@ impl Loop {
             summary: summarize(&message),
         });
         self.checkpoint = Checkpoint::new(task);
+        // Cleared per turn. A rail showing the previous turn's sources beside this turn's answer
+        // is worse than an empty one, because it looks like provenance.
+        self.last_recalled.clear();
+        self.last_cited.clear();
 
         // Pre-fetch runs on the user's message, before the model call, not as a tool call after
         // it (§10.1). A round trip on every turn where memory matters is most of where the sense
@@ -357,6 +382,7 @@ impl Loop {
             memory.record(Speaker::User, &message).await?;
             let recalled = memory.recall(&message, self.window_keeps, today)?;
             best = recalled.first().map(|hit| hit.score.value());
+            self.last_recalled.clone_from(&recalled);
             let texts: Vec<String> = recalled.iter().map(|hit| hit.text.clone()).collect();
             if recalled.is_empty() {
                 self.turn.set_recall("");
@@ -630,6 +656,7 @@ impl Loop {
                         cost: vocab::CostModel::Free,
                     });
                 }
+                self.last_cited.clone_from(&found.sources);
                 self.turn.set_web(found.brief());
             }
             // §12.4: an unreadable web is reported, never returned as an empty one. The model is

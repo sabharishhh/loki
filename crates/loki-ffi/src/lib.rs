@@ -102,7 +102,12 @@ pub struct LokiCore {
     /// Held alongside the loop so the memory screens can read the store without a turn running.
     memory: Option<Arc<Memory>>,
     /// What pre-fetch surfaced on the last turn, for the `In play` rail (§9.2 of the design).
-    recalled: std::sync::Mutex<Vec<Recalled>>,
+    recalled_slot: std::sync::Arc<std::sync::Mutex<Vec<Recalled>>>,
+    /// What the last turn cited (§12.7). Same shape and the same reason as `recalled`: the rail
+    /// asks after the turn, and the turn is long gone by then.
+    cited_slot: std::sync::Arc<std::sync::Mutex<Vec<loki_core::core::websearch::Cited>>>,
+    /// Where fetched bytes live, so an icon can be read back by hash.
+    evidence: Option<std::sync::Arc<loki_core::memory::evidence::Evidence>>,
     /// The same clock the loop reads, so a screen and a turn never disagree about today.
     clock: Arc<dyn loki_core::ports::clock::Clock>,
     /// The session transcript, and the session's token counters behind it.
@@ -257,7 +262,13 @@ pub unsafe extern "C" fn loki_core_new(
         cancel: std::sync::Mutex::new(CancellationToken::new()),
         ledger,
         memory,
-        recalled: std::sync::Mutex::new(Vec::new()),
+        recalled_slot: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        cited_slot: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        // The store is optional for the same reason memory is: a build that cannot open it is an
+        // assistant whose citations have no icons, not one that will not start.
+        evidence: loki_core::memory::evidence::Evidence::default_location()
+            .ok()
+            .map(std::sync::Arc::new),
         clock,
         journal,
     }))
@@ -301,9 +312,20 @@ pub unsafe extern "C" fn loki_send_message(core: *mut LokiCore, text: *const c_c
     let text = text.to_owned();
     let handle = Arc::clone(&core.core);
 
+    // The rails read these after the turn has ended, so they are copied out of the loop while it
+    // is still holding them. Without this `loki_recalled` returns an empty list forever, which is
+    // what it did from the day it was written (B-73).
+    let recalled_slot = std::sync::Arc::clone(&core.recalled_slot);
+    let cited_slot = std::sync::Arc::clone(&core.cited_slot);
     core.runtime.spawn(async move {
         let mut core = handle.lock().await;
         let _ = core.turn_with(text, cancel).await;
+        if let Ok(mut held) = recalled_slot.lock() {
+            *held = core.last_recalled().to_vec();
+        }
+        if let Ok(mut held) = cited_slot.lock() {
+            *held = core.last_cited().to_vec();
+        }
     });
 
     LokiStatus::Ok
@@ -671,6 +693,86 @@ pub unsafe extern "C" fn loki_string_free(ptr: *mut c_char) {
 /// # Safety
 /// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
 /// [`loki_string_free`].
+/// What pre-fetch surfaced for the last turn, as JSON, for the `In play` rail.
+///
+/// A rail that shows what memory contributed is how the user can tell precision is working, and
+/// it is where `not true` lives. Returns `[]` when memory is off or nothing was recalled.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+/// What the last turn cited, as JSON (§12.7).
+///
+/// The icon travels as base64 rather than a path, because the interface has no business reading the
+/// evidence store and a path it could read would be a second way in. Absent when the site offered
+/// none or it could not be fetched, and the interface falls back to a letter (§9.4 of the design).
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loki_cited(core: *mut LokiCore) -> *mut c_char {
+    // SAFETY: contract above.
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return json_string("[]");
+    };
+    let cited = core
+        .cited_slot
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default();
+    let rows: Vec<_> = cited
+        .iter()
+        .enumerate()
+        .map(|(at, source)| {
+            let icon = source
+                .icon_hash
+                .as_ref()
+                .zip(core.evidence.as_ref())
+                .and_then(|(hash, store)| {
+                    store.get(&loki_core::core::ids::ContentHash::new(hash.clone()))
+                })
+                .map(|bytes| base64(&bytes));
+            serde_json::json!({
+                "id": at + 1,
+                "url": source.url,
+                "title": source.title,
+                "excerpt": source.text.chars().take(280).collect::<String>(),
+                "icon": icon,
+                "read": source.read,
+            })
+        })
+        .collect();
+    json_string(&serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Standard base64, for handing bytes to Swift through a C string.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let mut buffer = [0_u8; 3];
+        buffer[..group.len()].copy_from_slice(group);
+        let packed = u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+        for slot in 0..4 {
+            if slot <= group.len() {
+                out.push(ALPHABET[((packed >> (18 - 6 * slot)) & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// What pre-fetch surfaced for the last turn, as JSON, for the `In play` rail.
+///
+/// A rail that shows what memory contributed is how the user can tell precision is working, and
+/// it is where `not true` lives. Returns `[]` when memory is off or nothing was recalled.
+///
+/// # Safety
+/// `core` must be null or a valid pointer from [`loki_core_new`]. Free the result with
+/// [`loki_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loki_recalled(core: *mut LokiCore) -> *mut c_char {
     // SAFETY: contract above.
@@ -678,7 +780,7 @@ pub unsafe extern "C" fn loki_recalled(core: *mut LokiCore) -> *mut c_char {
         return json_string("[]");
     };
     let recalled = core
-        .recalled
+        .recalled_slot
         .lock()
         .map(|held| held.clone())
         .unwrap_or_default();

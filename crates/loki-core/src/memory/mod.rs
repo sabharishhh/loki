@@ -7,6 +7,7 @@ pub mod cardinality;
 pub mod claim;
 pub mod concept;
 pub mod consolidate;
+pub mod evidence;
 pub mod gate;
 pub mod handle;
 pub mod history;
