@@ -46,6 +46,14 @@ pub fn evidence() -> Result<PathBuf, Error> {
     Ok(root()?.join("evidence"))
 }
 
+/// Loki's own browser profile, never the user's (§12.3).
+///
+/// # Errors
+/// Fails if the directory cannot be found.
+pub fn browser_profile() -> Result<PathBuf, Error> {
+    Ok(root()?.join("browser"))
+}
+
 /// The undo journal and its staged originals.
 ///
 /// # Errors

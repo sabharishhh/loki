@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 
 use super::politeness::{Shared as Politeness, host_of};
+use super::readability::{icon_url, readable};
 use crate::core::vocab::{Rung, Verdict};
 use crate::ports::egress::{Egress, Outbound};
 use crate::ports::search::{CancelToken, Extract, Page, SearchError};
@@ -127,76 +128,10 @@ fn looks_like_a_challenge(html: &str) -> bool {
     .any(|marker| lowered.contains(marker))
 }
 
-/// The main content, as markdown, with its title.
-fn readable(url: &str, html: &str) -> (String, String) {
-    let Ok(mut readability) = dom_smoothie::Readability::new(html, Some(url), None) else {
-        return (String::new(), String::new());
-    };
-    let Ok(article) = readability.parse() else {
-        return (String::new(), String::new());
-    };
-    let markdown = html2md::rewrite_html(&article.content, false);
-    (article.title.to_string(), markdown.trim().to_owned())
-}
-
-/// Where the site says its icon is.
-///
-/// **Read off the page that was already fetched.** Fetching it from a favicon service would tell
-/// that service every site the user reads, and fetching it from the interface would open a second
-/// way out of the process (§21.7). The URL is resolved here; the bytes are fetched through the same
-/// exit as everything else.
-fn icon_url(page: &str, html: &str) -> Option<String> {
-    let lowered = html.to_lowercase();
-    for rel in [
-        "rel=\"icon\"",
-        "rel=\"shortcut icon\"",
-        "rel=\"apple-touch-icon\"",
-    ] {
-        let Some(at) = lowered.find(rel) else {
-            continue;
-        };
-        let tag_start = lowered[..at].rfind('<')?;
-        let tag_end = lowered[tag_start..].find('>')? + tag_start;
-        let tag = &html[tag_start..tag_end];
-        if let Some(href) = attribute(tag, "href") {
-            return Some(absolute(page, &href));
-        }
-    }
-    // Every site has one here whether it says so or not.
-    Some(absolute(page, "/favicon.ico"))
-}
-
-fn attribute(tag: &str, name: &str) -> Option<String> {
-    let lowered = tag.to_lowercase();
-    let key = format!("{name}=\"");
-    let at = lowered.find(&key)? + key.len();
-    let end = tag[at..].find('"')? + at;
-    Some(tag[at..end].to_owned())
-}
-
-/// Resolves a page-relative reference against the page it came from.
-fn absolute(page: &str, href: &str) -> String {
-    if href.starts_with("http") {
-        return href.to_owned();
-    }
-    let scheme = if page.starts_with("http://") {
-        "http"
-    } else {
-        "https"
-    };
-    let host = host_of(page);
-    if let Some(rest) = href.strip_prefix("//") {
-        return format!("{scheme}://{rest}");
-    }
-    if href.starts_with('/') {
-        return format!("{scheme}://{host}{href}");
-    }
-    format!("{scheme}://{host}/{href}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::readability::absolute;
 
     const ARTICLE: &str = r#"<html><head><title>A Real Page</title>
         <link rel="icon" href="/static/fav.png"></head><body>

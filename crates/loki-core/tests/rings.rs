@@ -87,7 +87,9 @@ fn ring_two_never_talks_to_ring_two() {
     // `politeness` joins them: it is a shared rate gate, not a provider, and every adapter that
     // reaches the network has to consult the *same* one. Two limiters that do not know about each
     // other are one limiter with twice the rate, which is the thing it exists to prevent.
-    let shared = ["sse", "pricing", "politeness", "mod", "*"];
+    // `readability` joins them for the same reason: turning markup into the text a person would
+    // read is what every rung does with what it got, and two copies of that judgement would drift.
+    let shared = ["sse", "pricing", "politeness", "readability", "mod", "*"];
 
     for file in rust_files(&adapters) {
         let own = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -160,11 +162,12 @@ fn nothing_but_the_egress_adapter_builds_a_transport() {
         for file in rust_files(&src(module)) {
             // The one place allowed to. `ports/egress.rs` is deliberately not exempt: Ring 1
             // naming a transport is the other half of the same rule.
-            // The protocol client dials a browser this process launched, on a loopback port it
+            // The browser adapter dials a browser this process launched, on a loopback port it
             // chose. That is a control channel, not a way out of the machine, and the distinction
             // is enforced in `Cdp::connect` rather than trusted: it refuses any address that is
-            // not loopback. Exempt here, and checked there.
-            if file.ends_with("adapters/egress.rs") || file.ends_with("adapters/cdp.rs") {
+            // not loopback. Exempt here, and checked there. (Was `adapters/cdp.rs` until launching
+            // and driving were merged into one module, which the ring rule required.)
+            if file.ends_with("adapters/egress.rs") || file.ends_with("adapters/browser.rs") {
                 continue;
             }
             for (number, line) in code_lines(&file) {

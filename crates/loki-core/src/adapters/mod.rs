@@ -11,7 +11,6 @@
 
 pub mod anthropic;
 pub mod browser;
-pub mod cdp;
 pub mod clock;
 pub mod duckduckgo;
 pub mod egress;
@@ -19,5 +18,6 @@ pub mod journal;
 pub mod openai;
 pub mod politeness;
 pub mod pricing;
+pub mod readability;
 pub mod reader;
 pub mod sse;
