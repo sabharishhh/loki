@@ -20,6 +20,9 @@ use git2::{ObjectType, Oid};
 
 use crate::core::ids::ContentHash;
 
+/// Where the URL pointers live, kept out of the content shards.
+const BY_URL: &str = "by-url";
+
 /// The content store.
 #[derive(Debug, Clone)]
 pub struct Evidence {
@@ -109,6 +112,12 @@ impl Evidence {
         let shards =
             std::fs::read_dir(&self.root).map_err(|e| EvidenceError::Unusable(e.to_string()))?;
         for shard in shards.flatten() {
+            // Pointers are not content and are not cited by anything. They expire by age, which is
+            // the cache's business, not the citation sweep's. A body the sweep does drop is a
+            // silent cache miss and one extra fetch, never a wrong answer.
+            if shard.file_name() == std::ffi::OsStr::new(BY_URL) {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(shard.path()) else {
                 continue;
             };
@@ -129,7 +138,60 @@ impl Evidence {
 
     /// Two characters of the hash as a directory, the rest as the name.
     ///
-    /// A flat directory of tens of thousands of files is slow to list on every filesystem that
+    /// A flat directory of tens of thousands of files is slow to list on every filesystem that    /// Remembers that a URL was fetched and what it yielded.
+    ///
+    /// **The content stays content-addressed and only a pointer is keyed by URL.** Two URLs that
+    /// serve the same bytes still share one file, and a page whose bytes changed is a new hash
+    /// rather than an overwrite, so a citation can never come to point at content it was not
+    /// written against. What is added here is the one thing a cache needs and content addressing
+    /// cannot answer: "have I fetched *this address* lately".
+    ///
+    /// # Errors
+    /// Fails if the content or the pointer cannot be written.
+    pub fn remember(&self, url: &str, content: &[u8]) -> Result<ContentHash, EvidenceError> {
+        let hash = self.put(content)?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let pointer = self.pointer_for(url);
+        if let Some(parent) = pointer.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| EvidenceError::Write(e.to_string()))?;
+        }
+        std::fs::write(&pointer, format!("{} {at}", hash.as_str()))
+            .map_err(|e| EvidenceError::Write(e.to_string()))?;
+        Ok(hash)
+    }
+
+    /// What this URL yielded, if it was fetched inside `fresh_for` and the content is still held.
+    ///
+    /// **A miss is silent and always safe.** Every failure here, an unreadable pointer, a swept
+    /// body, a clock that went backwards, comes back as `None` and costs one fetch. A cache that
+    /// returned something doubtful would be worse than no cache at all, because §21.5's whole
+    /// argument is that stale content is indistinguishable from fresh once it is in a prompt.
+    #[must_use]
+    pub fn recall(&self, url: &str, fresh_for: std::time::Duration) -> Option<Vec<u8>> {
+        let pointer = std::fs::read_to_string(self.pointer_for(url)).ok()?;
+        let (hash, at) = pointer.split_once(' ')?;
+        let at: u64 = at.trim().parse().ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        // A pointer from the future is a clock that moved, not a fresh page.
+        let age = now.checked_sub(at)?;
+        // Strictly inside the window. A zero-length window has to mean "never from cache", and
+        // `<=` served a page written the same second.
+        (age < fresh_for.as_secs()).then(|| self.get(&ContentHash::new(hash)))?
+    }
+
+    /// Where the pointer for a URL lives. Hashed so a URL's own characters never become a path.
+    fn pointer_for(&self, url: &str) -> PathBuf {
+        let hash = hash_of(url.as_bytes());
+        let hex = hash.as_str();
+        let (shard, rest) = hex.split_at(2.min(hex.len()));
+        self.root.join(BY_URL).join(shard).join(rest)
+    }
+
     /// matters, and git has used this shape for the same reason for twenty years.
     fn path_for(&self, hash: &ContentHash) -> PathBuf {
         let hex = hash.as_str();
@@ -156,6 +218,8 @@ pub fn hash_of(content: &[u8]) -> ContentHash {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     struct Scratch(PathBuf);
@@ -177,6 +241,75 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_page_fetched_lately_comes_back_without_fetching_it() {
+        let dir = Scratch::new("cache");
+        let store = dir.store();
+        store
+            .remember("https://example.com/a", b"<html>a</html>")
+            .expect("remember");
+        assert_eq!(
+            store.recall("https://example.com/a", Duration::from_secs(900)),
+            Some(b"<html>a</html>".to_vec())
+        );
+    }
+
+    /// The whole point of the TTL: yesterday's page must not answer today's question.
+    #[test]
+    fn a_page_older_than_the_window_is_a_miss() {
+        let dir = Scratch::new("cache-stale");
+        let store = dir.store();
+        store
+            .remember("https://example.com/b", b"old")
+            .expect("remember");
+        assert_eq!(store.recall("https://example.com/b", Duration::ZERO), None);
+    }
+
+    #[test]
+    fn a_url_never_fetched_is_a_miss_and_not_an_error() {
+        let dir = Scratch::new("cache-cold");
+        assert_eq!(
+            dir.store()
+                .recall("https://example.com/never", Duration::from_secs(900)),
+            None
+        );
+    }
+
+    /// A URL whose body the sweep dropped reads as never fetched, which costs one fetch and
+    /// never a wrong answer.
+    #[test]
+    fn a_pointer_to_swept_content_is_a_miss() {
+        let dir = Scratch::new("cache-swept");
+        let store = dir.store();
+        store
+            .remember("https://example.com/c", b"body")
+            .expect("remember");
+        store.sweep(&[]).expect("sweep");
+        assert_eq!(
+            store.recall("https://example.com/c", Duration::from_secs(900)),
+            None
+        );
+    }
+
+    /// Two addresses serving identical bytes still share one file, which is what content
+    /// addressing is for and what a URL-keyed cache must not undo.
+    #[test]
+    fn two_urls_with_the_same_body_store_it_once() {
+        let dir = Scratch::new("cache-shared");
+        let store = dir.store();
+        let first = store
+            .remember("https://a.example/", b"same")
+            .expect("remember");
+        let second = store
+            .remember("https://b.example/", b"same")
+            .expect("remember");
+        assert_eq!(first.as_str(), second.as_str());
+        assert_eq!(
+            store.recall("https://b.example/", Duration::from_secs(900)),
+            Some(b"same".to_vec())
+        );
     }
 
     #[test]

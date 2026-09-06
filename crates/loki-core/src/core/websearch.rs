@@ -15,6 +15,7 @@
 //! URL it came from. Fetching first and reading afterwards is the expensive habit this avoids.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::attempt::{self, Budget, Ending};
 use crate::core::vocab::Verdict;
@@ -77,6 +78,15 @@ impl Found {
         out
     }
 }
+
+/// How long a fetched page answers for (§12.7).
+///
+/// **Short on purpose, because the risk is asymmetric.** A cache hit saves a few seconds; a stale
+/// hit answers "what happened today" with yesterday and reads exactly like a fresh answer, which is
+/// the failure §21.5 exists to catch and the one B-72 already cost once. Fifteen minutes covers
+/// what caching is actually for here, a follow-up question and a refinement loop re-reading the
+/// same page, and cannot serve yesterday's news.
+const FRESH_FOR: Duration = Duration::from_secs(900);
 
 /// Everything the loop needs from the outside.
 pub struct Search {
@@ -143,6 +153,10 @@ impl Search {
     /// missing source, not a failed search (§12.4).
     pub async fn run(&self, question: &str, cancel: CancelToken) -> Result<Found, SearchError> {
         let (engine, hits) = self.find(question, cancel.clone()).await?;
+        // **Between finding and reading, because reading is what costs.** The budget reads three
+        // of these and the engine ordered them for its own reasons, so which three is most of the
+        // answer's quality (§12.7).
+        let hits = crate::core::rank::best_first(question, hits);
 
         // The engine's own summaries, which are free and already carry their URLs.
         let mut sources: Vec<Cited> = hits
@@ -172,6 +186,7 @@ impl Search {
             hits,
             rungs: self.rungs.clone(),
             cancel,
+            evidence: self.evidence.clone(),
         };
         let outcome = attempt::run(&plan, self.budget, self.clock.as_ref())
             .await
@@ -293,6 +308,8 @@ struct Reading {
     hits: Vec<Hit>,
     rungs: Vec<Arc<dyn Extract>>,
     cancel: CancelToken,
+    /// Where a page read lately is found again (§12.7).
+    evidence: Option<Arc<Evidence>>,
 }
 
 #[async_trait::async_trait]
@@ -313,13 +330,28 @@ impl attempt::Steps for Reading {
     }
 
     async fn run(&self, step: &Hit) -> Result<String, SearchError> {
+        // **Before the ladder, not inside it.** A page read minutes ago is the cheapest rung there
+        // is, and the expensive part of a search is reading pages rather than finding them.
+        if let Some(evidence) = &self.evidence
+            && let Some(held) = evidence.recall(&step.url, FRESH_FOR)
+            && let Ok(record) = String::from_utf8(held)
+        {
+            return Ok(record);
+        }
+
         let mut last = None;
         for rung in &self.rungs {
             let page = rung.read(&step.url, self.cancel.clone()).await?;
             // The ladder stops climbing on a page that does not exist or a host asking to be left
             // alone. Trying harder there is what turns a soft flag into a ban (§12.2).
             if page.verdict == Verdict::Ok {
-                return Ok(record(&page));
+                let record = record(&page);
+                // Never fails a search. A page that could not be cached is a page that will be
+                // fetched again, which is slower and not wrong.
+                if let Some(evidence) = &self.evidence {
+                    let _ = evidence.remember(&step.url, record.as_bytes());
+                }
+                return Ok(record);
             }
             if !page.verdict.should_escalate() {
                 return Err(SearchError::Unreadable(format!(
