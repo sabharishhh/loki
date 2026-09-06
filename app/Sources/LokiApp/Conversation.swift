@@ -13,6 +13,8 @@ struct Turn: Identifiable {
     /// When it landed. Shown on every turn, because a thread you come back to is a record and a
     /// record without times is a transcript of nothing in particular.
     var at = Date()
+    /// The pages this answer was built from (§12.7). Empty when nothing was fetched.
+    var sources: [Source] = []
 }
 
 /// One step inside a scope, as the rail renders it.
@@ -93,6 +95,11 @@ final class Conversation {
     private(set) var recalled: [RecalledClaim] = []
     /// Up to three lines at session close, and nothing when nothing happened (§17.4).
     private(set) var summary: [String] = []
+    /// The sources the reader asked to see, which the rail shows.
+    ///
+    /// Held here rather than in either view because the thread raises the question and the rail
+    /// answers it, and a value passed between two siblings has to live above both.
+    private(set) var showingSources: [Source] = []
     /// Whether the turn now running asked Loki to remember something (§8.1).
     private var captureWhenDone = false
     /// Set while a capture is in flight, so two turns cannot consolidate at once.
@@ -341,6 +348,11 @@ final class Conversation {
             "for future reference", "from now on", "make a note",
         ]
         return phrases.contains { lowered.contains($0) }
+    }
+
+    /// Asks the rail to show these. Called when a source stack is clicked.
+    func showSources(_ sources: [Source]) {
+        withAnimation(Theme.Motion.control) { showingSources = sources }
     }
 
     func interrupt() {

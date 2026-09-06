@@ -14,6 +14,8 @@ struct MessageRow: View {
     /// something finished to copy.
     var streaming = false
     var onEdit: ((String) -> Void)?
+    /// Opens the sources of this turn in the rail.
+    var onShowSources: (([Source]) -> Void)?
 
     @Environment(\.reduceMotion) private var reduceMotion
     @State private var hovering = false
@@ -85,9 +87,22 @@ struct MessageRow: View {
                         .strokeBorder(Theme.Colors.border, lineWidth: 1)
                 }
         } else {
-            MarkdownText(text: turn.text)
-                .equatable()
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: Theme.Space.m) {
+                MarkdownText(text: turn.text)
+                    .equatable()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                // Under the answer rather than inside it. An inline citation says where one claim
+                // came from; this says what the whole answer rests on, and the two questions are
+                // asked at different moments.
+                if !turn.sources.isEmpty, !streaming {
+                    SourceStack(sources: turn.sources) {
+                        onShowSources?(turn.sources)
+                    }
+                    .transition(.opacity.combined(with: .offset(y: -4)))
+                }
+            }
+            .animation(Theme.Motion.arrive, value: turn.sources.count)
         }
     }
 

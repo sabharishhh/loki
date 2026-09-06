@@ -58,7 +58,10 @@ struct Shell: View {
 
                     if rail && roomy && screen == .thread {
                         Divider().overlay(Theme.Colors.border)
-                        RightRail(conversation: conversation)
+                        RightRail(
+                            conversation: conversation,
+                            showing: conversation.showingSources
+                        )
                             .frame(width: Theme.Size.inspector)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }

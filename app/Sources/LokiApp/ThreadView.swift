@@ -71,7 +71,8 @@ struct ThreadView: View {
                                 streaming: conversation.isStreaming(turn),
                                 onEdit: { text in
                                     conversation.resend(from: turn.id, text: text)
-                                }
+                                },
+                                onShowSources: conversation.showSources
                             )
                             .id(turn.id)
                         case .scope(let scope):

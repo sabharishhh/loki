@@ -7,11 +7,14 @@ import SwiftUI
 /// what did you use, and what did you do. Showing both at once makes neither readable.
 struct RightRail: View {
     let conversation: Conversation
+    /// The sources the reader last asked to see. Empty until a stack is clicked.
+    var showing: [Source] = []
 
     @State private var tab: Tab = .inPlay
 
     enum Tab: String, CaseIterable, Identifiable {
         case inPlay = "In play"
+        case sources = "Sources"
         case trace = "Trace"
 
         var id: String { rawValue }
@@ -27,6 +30,8 @@ struct RightRail: View {
                     switch tab {
                     case .inPlay:
                         InPlay(conversation: conversation)
+                    case .sources:
+                        Sources(sources: showing)
                     case .trace:
                         Trace(conversation: conversation)
                     }
@@ -36,6 +41,30 @@ struct RightRail: View {
         }
         .background(Theme.Colors.background)
         .animation(Theme.Motion.control, value: tab)
+        // Asking to see the sources is the same gesture as opening the tab, so the click does not
+        // land on a rail showing something else.
+        .onChange(of: showing) { _, latest in
+            if !latest.isEmpty { tab = .sources }
+        }
+    }
+}
+
+/// What the answer was built from (§12.7).
+private struct Sources: View {
+    let sources: [Source]
+
+    var body: some View {
+        if sources.isEmpty {
+            Empty(
+                "Nothing fetched yet",
+                detail: "When an answer needs the web, the pages it read are listed here."
+            )
+        } else {
+            SourceList(sources: sources) { source in
+                // The page a person can open, never the endpoint the content came from.
+                if let url = URL(string: source.url) { NSWorkspace.shared.open(url) }
+            }
+        }
     }
 }
 
