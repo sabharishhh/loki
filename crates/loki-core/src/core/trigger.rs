@@ -49,17 +49,29 @@ pub fn decide(message: &str, situation: Situation) -> Reach {
         return Reach::No;
     }
 
+    let now = depends_on_now(message);
+    let mine = about_the_user(message);
+
+    // **Row 3 before row 1, and the order is the whole point.** Reading them the other way round
+    // let a stored fact answer a question about a changing thing: told once that a price was four
+    // thousand, Loki would answer "four thousand" to "what is it today" with a high recall score
+    // and never look. A stored fact about something that moves is exactly the stale answer this
+    // section exists to avoid, so what the world is doing now outranks what memory remembers.
+    if now && !mine {
+        return Reach::Yes;
+    }
+
     // Row 1. Memory already answered, and §12.6 says that is the end of it. The threshold is the
-    // same one lane 1 uses for its own confidence, so the two cannot disagree about what "answered"
-    // means.
+    // same one lane 1 uses for its own confidence, so the two cannot disagree about what
+    // "answered" means. Reached only for questions about the user, where a remembered answer is
+    // the point rather than a risk.
     if situation.recall.is_some_and(|score| score >= 0.6) {
         return Reach::No;
     }
 
-    // Row 3. Whether the answer depends on the present, which is a question about the question and
-    // not about the model's training date. §9.14 is the evidence that a model cannot reason about
-    // its own cutoff, so it is never asked to.
-    if depends_on_now(message) {
+    // A present-tense question about the user that memory could not answer. The web does not know
+    // where you work either, but the host has nothing left to decide with.
+    if now {
         return Reach::Yes;
     }
 
@@ -121,6 +133,22 @@ fn is_stable(message: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_digit() || " +-*/=?.,()^%x".contains(c));
     arithmetic && expression.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Whether the question is about the user rather than about the world.
+///
+/// **The line memory sits on.** "Where do I work now" and "what is the price now" both name the
+/// present, and only one of them is memory's. Without this, moving the present-tense check above
+/// the memory check would send every question about the user to the web, which is the trust cost
+/// §12.6 opens by naming: an assistant that searches for something you told it last week reads as
+/// not knowing you.
+fn about_the_user(message: &str) -> bool {
+    let lowered = format!(" {} ", message.to_lowercase());
+    [
+        " my ", " i ", " me ", " mine ", " our ", " we ", " i'm ", " im ",
+    ]
+    .iter()
+    .any(|word| lowered.contains(word))
 }
 
 /// Whether the answer depends on the present.
@@ -188,6 +216,48 @@ mod tests {
             ),
             Reach::Yes
         );
+    }
+
+    /// The bug this ordering exists to fix, and the reason it is worth a test of its own.
+    ///
+    /// Told once what a price was, memory scores highly on a question about the price today. Read
+    /// in the old order that ended the turn and Loki answered with last month's number, confidently
+    /// and without looking. A stored fact about a thing that moves is the stale answer §12.6 is
+    /// written against.
+    #[test]
+    fn a_strong_memory_does_not_answer_a_question_about_now() {
+        let remembered = Situation {
+            recall: Some(0.95),
+            asked: false,
+        };
+        for question in [
+            "what is the price of the pixel today",
+            "what is the latest rust version",
+            "any news about the launch",
+            "what is the current score",
+        ] {
+            assert_eq!(decide(question, remembered), Reach::Yes, "{question}");
+        }
+    }
+
+    /// And the other half, which is why the fix is not simply "the present always wins".
+    ///
+    /// "Where do I work now" names the present too, and it is memory's question. Sending it to the
+    /// web is the trust cost §12.6 opens by naming.
+    #[test]
+    fn a_question_about_the_user_stays_with_memory_even_in_the_present_tense() {
+        let remembered = Situation {
+            recall: Some(0.95),
+            asked: false,
+        };
+        for question in [
+            "where do i work now",
+            "what is my current address",
+            "who is my manager today",
+            "what are our latest plans",
+        ] {
+            assert_eq!(decide(question, remembered), Reach::No, "{question}");
+        }
     }
 
     #[test]
