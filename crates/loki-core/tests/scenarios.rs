@@ -930,6 +930,7 @@ mod lane_two {
                 &Route::to("computer science"),
                 today(),
                 &SystemClock,
+                None,
             )
             .await
             .expect("lane 2");
@@ -955,6 +956,7 @@ mod lane_two {
                 &Route::to("sister phone number"),
                 today(),
                 &SystemClock,
+                None,
             )
             .await
             .expect("lane 2");
@@ -982,6 +984,7 @@ mod lane_two {
                 &Wandering(AtomicUsize::new(0)),
                 today(),
                 &SystemClock,
+                None,
             )
             .await
             .expect("lane 2");
@@ -1004,7 +1007,7 @@ mod lane_two {
 
         let found = app
             .memory
-            .search_deeply("anything", &Endless, today(), &SystemClock)
+            .search_deeply("anything", &Endless, today(), &SystemClock, None)
             .await
             .expect("lane 2");
 
@@ -1040,6 +1043,7 @@ mod lane_two {
                 &Alternating(AtomicUsize::new(0)),
                 today(),
                 &SystemClock,
+                None,
             )
             .await
             .expect("lane 2");
@@ -1065,6 +1069,7 @@ mod lane_two {
                 },
                 today(),
                 &SystemClock,
+                None,
             )
             .await
             .expect("lane 2");

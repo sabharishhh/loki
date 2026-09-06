@@ -294,6 +294,27 @@ impl Memory {
         Ok(())
     }
 
+    /// Records where an answer's citations pointed, in the episode alone (§12.7).
+    ///
+    /// **A transcript carrying `[1]` and no list is a record nobody can check.** The episode is
+    /// what §11.3 imports from and what lane 2 reads, so an answer written from six sources has to
+    /// name them there or its provenance ends when the window closes. The ladder's own attempts
+    /// stay out: they are already in the event log, and the permanent record wants what the answer
+    /// was built on rather than how the fetching went.
+    ///
+    /// Never reaches the buffer, for §9.8's reason: this is Loki's own output.
+    ///
+    /// # Errors
+    /// Fails if the episode cannot be appended to.
+    pub async fn note_sources(&self, lines: &[String]) -> Result<(), MemoryError> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let block = format!("\n_sources_\n{}\n", lines.join("\n"));
+        self.bundle.writer().await.append(&self.episode, &block)?;
+        Ok(())
+    }
+
     /// Pre-fetch for one message (§10.1).
     ///
     /// Runs before the model call, not as a tool call after it, because a round trip on every turn
@@ -344,6 +365,9 @@ impl Memory {
     /// score lane 1 already returned. Nothing here decides, because a model deciding whether to
     /// search is a step it will sometimes skip.
     ///
+    /// `events` receives one `MemoryConsulted` per step. Pass it whenever somebody is waiting:
+    /// this is a model call per step and it is the one retrieval the reader watches happen.
+    ///
     /// # Errors
     /// Fails if the bundle or index cannot be reached.
     pub async fn search_deeply(
@@ -352,9 +376,10 @@ impl Memory {
         navigator: &dyn runtime::Navigator,
         today: Date,
         clock: &dyn crate::ports::clock::Clock,
+        events: Option<&dyn crate::core::sink::EventSink>,
     ) -> Result<runtime::Found, runtime::RuntimeError> {
         let rt = runtime::Runtime::new(&self.bundle, &self.index, self.scope);
-        runtime::search(question, &rt, navigator, today, clock).await
+        runtime::search(question, &rt, navigator, today, clock, events).await
     }
 
     /// The memory runtime, for a caller that wants one primitive rather than a whole search.

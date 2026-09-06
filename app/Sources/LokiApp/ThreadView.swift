@@ -79,10 +79,11 @@ struct ThreadView: View {
                             // A search reads differently from thinking: it names pages and says
                             // how each answered, so it gets the surface built for that rather
                             // than a list of steps (§12.9).
-                            if scope.kind == "search" {
+                            if scope.kind == "search" || scope.kind == "memory" {
                                 SearchTrace(
                                     steps: scope.search,
                                     live: conversation.isLive(scope),
+                                    subject: scope.kind == "memory" ? .memory : .web,
                                     elapsed: .milliseconds(scope.elapsed ?? 0)
                                 )
                                 .id(scope.id)

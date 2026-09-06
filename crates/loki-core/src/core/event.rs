@@ -85,6 +85,20 @@ pub enum Event {
         lane: Lane,
         query_hash: QueryHash,
     },
+    /// One step of lane 2's search, as it happens (§10.8).
+    ///
+    /// **Per step, not at the end.** Lane 2 spends a model call per step and takes seconds, and
+    /// until this existed it said nothing at all until it was over: a question that reached memory
+    /// deeply left the reader watching an empty screen for seven of them. §12.9 fixed exactly this
+    /// for the web ladder and the same silence was left standing here.
+    MemoryConsulted {
+        /// The navigator's own line, as it asked for it: `CATALOG`, `GREP kerala`,
+        /// `READ people/you.md 1-40`. What was looked for is the only part worth reading.
+        step: String,
+        /// Whether the step came back with anything. A search that found nothing is still a step
+        /// the reader waited through, and hiding it makes the gaps unexplained.
+        found: bool,
+    },
     MemoryWritten {
         op: WriteOp,
         concept_id: ConceptId,
@@ -230,6 +244,10 @@ mod tests {
                 claim_ids: vec![ClaimId::new(ConceptId::new("people/meera.md"), 0)],
                 lane: Lane::Automatic,
                 query_hash: QueryHash::new("0f1e2d3c4b5a6978"),
+            },
+            Event::MemoryConsulted {
+                step: "GREP palakkad".into(),
+                found: true,
             },
             Event::MemoryWritten {
                 op: WriteOp::Invalidated,

@@ -439,14 +439,13 @@ final class Conversation {
     ///
     /// A search reports what it did after each piece is done, so the row that was live becomes the
     /// row that is settled the moment the next one arrives.
-    private func appendSearchStep(_ step: SearchStep) {
+    private func appendSearchStep(_ step: SearchStep, to kind: String = "search") {
         let index = entries.indices.dropFirst(turnFloor).last {
-            if case let .scope(scope) = entries[$0] { return scope.kind == "search" }
+            if case let .scope(scope) = entries[$0] { return scope.kind == kind }
             return false
         }
         guard let index, case .scope(var scope) = entries[index] else { return }
-        for at in scope.search.indices { scope.search[at].done = true }
-        scope.search.append(step)
+        scope.search.advance(with: step)
         entries[index] = .scope(scope)
     }
 
@@ -533,7 +532,9 @@ final class Conversation {
             // a row of its own rather than being folded into the one above it.
             appendSearchStep(
                 SearchStep(
-                    kind: verdict == "ok" ? .reading(host: host) : .rung(number: rungNumber(fields), verdict: verdict),
+                    kind: verdict == "ok"
+                        ? .reading(host: host)
+                        : .rung(host: host, number: rungNumber(fields), verdict: verdict),
                     done: true
                 )
             )
@@ -549,16 +550,49 @@ final class Conversation {
             let summary = fields["summary"] as? String
             attachOutput(summary)
 
+        // Lane 2's steps, as they happen. Without these the memory scope opens, sits for as long
+        // as a model call per step takes, and closes with nothing having been said.
+        case "memory_consulted":
+            guard let step = fields["step"] as? String else { return }
+            appendSearchStep(
+                SearchStep(
+                    kind: .consulting(step: step, found: fields["found"] as? Bool ?? false),
+                    done: true
+                ),
+                to: "memory"
+            )
+
         case "memory_recalled":
             // `claim_ids`, and each one is an object rather than a string. Reading the wrong key
             // made every turn say it recalled nothing, whatever it had actually found (B-46).
-            let count = (fields["claim_ids"] as? [Any])?.count ?? 0
+            let claims = (fields["claim_ids"] as? [[String: Any]]) ?? []
+            let count = claims.count
+            // **What it recalled, not just how many.** "3 facts" says nothing a reader can check;
+            // the concepts behind them are the part worth showing, and they are already in the
+            // event.
+            let from = Set(
+                claims.compactMap { claim -> String? in
+                    guard let concept = claim["concept"] as? String else { return nil }
+                    return concept.split(separator: "/").last.map {
+                        $0.replacingOccurrences(of: ".md", with: "")
+                    }
+                }
+            ).sorted()
             // Lane 2 returns file lines rather than addressed claims, so it never has ids to
             // count. Saying "0 facts" for a search that found plenty would be worse than silence.
             if fields["lane"] as? String == "deliberate" {
-                appendStep(Step(verb: "search", detail: "memory"))
+                // The steps themselves are already on the memory trace. Repeating "search memory"
+                // as a thinking step said less than the rows above it and read as the whole of what
+                // lane 2 had done.
+                return
             } else {
-                appendStep(Step(verb: "recall", detail: count == 1 ? "1 fact" : "\(count) facts"))
+                let what = count == 1 ? "1 fact" : "\(count) facts"
+                appendStep(
+                    Step(
+                        verb: "recall",
+                        detail: from.isEmpty ? what : "\(what) from \(from.joined(separator: ", "))"
+                    )
+                )
             }
 
         case "budget_warning":

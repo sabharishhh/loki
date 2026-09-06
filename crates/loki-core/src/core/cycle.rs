@@ -568,6 +568,22 @@ impl Loop {
             self.turn.push(Message::assistant(&outcome.text));
             if let Some(memory) = self.memory.clone() {
                 memory.record(Speaker::Loki, &outcome.text).await?;
+                // The markers in that answer point at a list only this turn could see. Written
+                // beside it so the episode stays checkable once the session is over.
+                let sources: Vec<String> = self
+                    .last_cited
+                    .iter()
+                    .enumerate()
+                    .map(|(at, source)| {
+                        let opened = if source.text.trim().is_empty() {
+                            "not opened"
+                        } else {
+                            "read"
+                        };
+                        format!("[{}] {} ({opened}) {}", at + 1, source.title, source.url)
+                    })
+                    .collect();
+                memory.note_sources(&sources).await?;
             }
         }
 
@@ -647,10 +663,31 @@ impl Loop {
         today: Date,
         cancel: CancellationToken,
     ) {
+        // **A scope, for the same reason `search_the_web` opens one, and it was missing here.**
+        // Lane 2 is a model call per step and runs before the answer starts, so without a scope the
+        // interface has nothing to show for however long it takes: measured at seven seconds of a
+        // blank screen on "what do you know about me", with the trace only appearing once it was
+        // already over. `ScopeKind::Memory` had existed since the vocabulary was written and had
+        // never been emitted by anything.
+        let scope = self.ids.scope();
+        self.events.emit(&Event::ScopeOpened {
+            id: scope,
+            parent: None,
+            kind: ScopeKind::Memory,
+        });
+        self.checkpoint.open_scope(scope);
+        let started = std::time::Instant::now();
+
         let provider = Arc::clone(&self.provider);
         let navigator = runtime::ModelNavigator::new(provider.as_ref(), cancel);
         let found = memory
-            .search_deeply(question, &navigator, today, self.clock.as_ref())
+            .search_deeply(
+                question,
+                &navigator,
+                today,
+                self.clock.as_ref(),
+                Some(self.events.as_ref()),
+            )
             .await;
         // Charged whether or not the search worked. Tokens spent on a failed search are still
         // spent, and a ledger that only counts successes is not a ledger. A navigator that never
@@ -684,6 +721,12 @@ impl Loop {
                 self.turn.set_search(runtime::Found::failed().brief());
             }
         }
+
+        self.events.emit(&Event::ScopeClosed {
+            id: scope,
+            ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+        self.checkpoint.close_scope(scope);
     }
 
     /// Runs one web search and puts what it found into the turn (§12.7).

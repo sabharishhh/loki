@@ -47,18 +47,34 @@ struct Shimmer: View {
     }
 }
 
-/// One thing the search did.
+/// One thing a search did, on the web or through memory.
 struct SearchStep: Identifiable, Equatable {
     enum Kind: Equatable {
         case searching(query: String)
         case reading(host: String)
-        case rung(number: Int, verdict: String)
+        /// A page the ladder reached and could not read, and how far it got.
+        ///
+        /// **The host is the point.** These arrived as "Rung 1 said blocked" with nothing naming
+        /// the page, one row per rung, so three unreadable pages read as six identical lines of
+        /// noise and said nothing about what had actually happened.
+        case rung(host: String, number: Int, verdict: String)
+        /// One step of a memory search, as the navigator asked for it.
+        case consulting(step: String, found: Bool)
 
         var glyph: String {
             switch self {
             case .searching: "magnifyingglass"
             case .reading: "doc.text"
             case .rung: "arrow.turn.up.right"
+            case .consulting: "brain"
+            }
+        }
+
+        /// The host a page step is about, so two rungs on one page can share a row.
+        var host: String? {
+            switch self {
+            case .reading(let host), .rung(let host, _, _): host
+            default: nil
             }
         }
 
@@ -66,7 +82,22 @@ struct SearchStep: Identifiable, Equatable {
             switch self {
             case .searching(let query): "Searching for \(query)"
             case .reading(let host): "Reading \(host)"
-            case .rung(let number, let verdict): "Rung \(number) said \(verdict)"
+            case .rung(let host, let number, let verdict):
+                "\(host): \(Self.plainly(verdict)) at rung \(number)"
+            case .consulting(let step, let found):
+                found ? step : "\(step), nothing there"
+            }
+        }
+
+        /// The core's verdict vocabulary in words a reader has met before (§12.2).
+        static func plainly(_ verdict: String) -> String {
+            switch verdict {
+            case "js_required": "needs JavaScript"
+            case "rate_limited": "rate limited"
+            case "not_found": "not found"
+            case "interaction_required": "needs a click"
+            case "exhausted": "nothing readable"
+            default: verdict
             }
         }
     }
@@ -74,6 +105,28 @@ struct SearchStep: Identifiable, Equatable {
     let id = UUID()
     let kind: Kind
     var done = false
+}
+
+extension Array where Element == SearchStep {
+    /// Adds a step, and marks everything before it finished.
+    ///
+    /// **One row per page, not one per rung.** The ladder tries each rung in turn and reports every
+    /// attempt, so an unreadable page wrote "Rung 1 said blocked" and then "Rung 2 said blocked"
+    /// and three of them filled the trace with six lines that named nothing. A further attempt on
+    /// the same page replaces the row the last one left, so the row says how far the ladder got
+    /// rather than how many times it tried.
+    ///
+    /// Pulled out of the conversation so it can be tested without a running core.
+    mutating func advance(with step: SearchStep) {
+        for at in indices { self[at].done = true }
+        if case .rung = step.kind, let host = step.kind.host, let last = indices.last,
+            case .rung = self[last].kind, self[last].kind.host == host
+        {
+            self[last] = step
+        } else {
+            append(step)
+        }
+    }
 }
 
 /// What a web search did, while it is doing it.
@@ -86,8 +139,33 @@ struct SearchStep: Identifiable, Equatable {
 /// Live, the current step shimmers and the finished ones are stated plainly. That is the whole
 /// distinction the interface has to carry: what is happening now, and what already did.
 struct SearchTrace: View {
+    /// Which retrieval this is. The surface is the same; only the words and the icon differ.
+    ///
+    /// **Memory used to get a bare step list and the web got this**, so the one retrieval that runs
+    /// before the answer with a model call per step was also the one that showed nothing while it
+    /// ran.
+    enum Subject {
+        case web
+        case memory
+
+        var glyph: String {
+            switch self {
+            case .web: "globe"
+            case .memory: "brain"
+            }
+        }
+
+        var whileWaiting: String {
+            switch self {
+            case .web: "Searching the web"
+            case .memory: "Looking through my memory"
+            }
+        }
+    }
+
     let steps: [SearchStep]
     let live: Bool
+    var subject: Subject = .web
     var elapsed: Duration = .zero
 
     @Environment(\.reduceMotion) private var reduceMotion
@@ -128,7 +206,7 @@ struct SearchTrace: View {
     private var header: some View {
         Button { open.toggle() } label: {
             HStack(spacing: Theme.Space.s) {
-                Image(systemName: "globe")
+                Image(systemName: subject.glyph)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(live ? Theme.Colors.yellow : Theme.Colors.tertiary)
                     .symbolEffect(.pulse, isActive: live && !reduceMotion)
@@ -140,7 +218,7 @@ struct SearchTrace: View {
                 // there is no step to name. Saying so beats falling through to a summary that
                 // reads "0 pages" while the work is still going on.
                 if live {
-                    Shimmer(text: current?.kind.sentence ?? "Searching the web")
+                    Shimmer(text: current?.kind.sentence ?? subject.whileWaiting)
                         .transition(.opacity)
                     Text(waited)
                         .font(Theme.Text.micro)
@@ -186,12 +264,19 @@ struct SearchTrace: View {
     }
 
     private var summary: String {
-        let read = steps.filter { if case .reading = $0.kind { true } else { false } }.count
         let seconds = Int(
             (Double(showing.components.seconds)
                 + Double(showing.components.attoseconds) / 1e18).rounded())
-        let pages = read == 1 ? "1 page" : "\(read) pages"
-        return seconds >= 1 ? "Searched the web, \(pages), \(seconds)s" : "Searched the web, \(pages)"
+        let opened: String
+        switch subject {
+        case .web:
+            let read = steps.filter { if case .reading = $0.kind { true } else { false } }.count
+            opened = "Searched the web, " + (read == 1 ? "1 page" : "\(read) pages")
+        case .memory:
+            let looked = steps.filter { if case .consulting = $0.kind { true } else { false } }.count
+            opened = "Searched my memory, " + (looked == 1 ? "1 step" : "\(looked) steps")
+        }
+        return seconds >= 1 ? "\(opened), \(seconds)s" : opened
     }
 
     @ViewBuilder

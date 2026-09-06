@@ -575,12 +575,14 @@ pub async fn search(
     navigator: &dyn Navigator,
     today: Date,
     clock: &dyn Clock,
+    events: Option<&dyn crate::core::sink::EventSink>,
 ) -> Result<Found, RuntimeError> {
     let steps = Reading {
         question,
         runtime,
         navigator,
         today,
+        events,
     };
     let outcome = attempt::run(&steps, attempt::Budget::of_steps(SEARCH_BUDGET), clock).await?;
     Ok(Found {
@@ -596,6 +598,8 @@ struct Reading<'a> {
     runtime: &'a Runtime<'a>,
     navigator: &'a dyn Navigator,
     today: Date,
+    /// Where each step is reported as it runs. `None` outside the loop, in tests and in the CLI.
+    events: Option<&'a dyn crate::core::sink::EventSink>,
 }
 
 #[async_trait]
@@ -612,7 +616,17 @@ impl attempt::Steps for Reading<'_> {
     }
 
     async fn run(&self, step: &Op) -> Result<String, RuntimeError> {
-        self.runtime.run(step, self.today).await
+        let outcome = self.runtime.run(step, self.today).await;
+        // **Said from inside the loop, not after it.** A step reported once the search is over is
+        // a step nobody watched happen, which is the whole of the complaint that memory felt dead
+        // while the web felt live.
+        if let Some(events) = self.events {
+            events.emit(&crate::core::event::Event::MemoryConsulted {
+                step: step.line(),
+                found: outcome.as_ref().is_ok_and(|text| !text.trim().is_empty()),
+            });
+        }
+        outcome
     }
 }
 

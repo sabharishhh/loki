@@ -16,7 +16,7 @@ use loki_core::core::event::Event;
 use loki_core::core::prompt::Prefix;
 use loki_core::core::sink::Broadcast;
 use loki_core::core::sink::EventSink;
-use loki_core::core::vocab::{Cents, CostModel, Lane, Locality, ModelRole};
+use loki_core::core::vocab::{Cents, CostModel, Lane, Locality, ModelRole, ScopeKind};
 use loki_core::memory::claim::Origin;
 use loki_core::memory::consolidate::{Candidate, ConsolidateError, Extractor, Unbounded};
 use loki_core::memory::gate::TierScope;
@@ -793,6 +793,79 @@ mod living_together {
                 .expect("recall")
                 .is_empty(),
             "what the user actually said survives"
+        );
+    }
+
+    /// B-90, and the seven seconds of blank screen it was.
+    ///
+    /// Lane 2 spends a model call per step and runs before the answer starts. It opened no scope
+    /// and emitted nothing until it was finished, so a question that reached memory deeply showed
+    /// the reader an empty window for the whole search and then a trace of one word.
+    #[tokio::test]
+    async fn a_memory_search_is_reported_while_it_is_running() {
+        let mut app = Fixture::open(
+            "live-memory",
+            &["Here is what I found."],
+            &["CATALOG", "GREP computer", "DONE"],
+        )
+        .await;
+        app.ask("search my memory for what i studied").await;
+
+        let events = app.events.all();
+        let opened = events.iter().position(|event| {
+            matches!(
+                event,
+                Event::ScopeOpened {
+                    kind: ScopeKind::Memory,
+                    ..
+                }
+            )
+        });
+        let first_step = events
+            .iter()
+            .position(|event| matches!(event, Event::MemoryConsulted { .. }));
+
+        assert!(opened.is_some(), "lane 2 has to open a scope to be watched");
+        assert!(
+            opened < first_step,
+            "the scope opens before the work, or there is nowhere to put it"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::MemoryConsulted { .. }))
+                .count(),
+            2,
+            "one event per step, not one summary at the end"
+        );
+    }
+
+    /// A transcript with `[1]` in it and no list is a record nobody can check.
+    ///
+    /// The numbered sources live for one turn inside the prompt. The episode is what §11.3 imports
+    /// from and what lane 2 later reads, so the markers there resolved to nothing at all.
+    #[tokio::test]
+    async fn the_episode_keeps_the_sources_an_answer_cited() {
+        let engine = FakeEngine::returning(&[(
+            "https://example.com/degrees",
+            "Degrees",
+            "A computer science degree covers algorithms.",
+        )]);
+        let mut app =
+            Fixture::with_web("episode-sources", &["Algorithms, then. [1]"], engine).await;
+
+        app.ask("check the web for what a computer science degree covers")
+            .await;
+
+        let episode = std::fs::read_to_string(app.dir.join("episodes/2026-09-03.md"))
+            .expect("the episode file");
+        assert!(
+            episode.contains("_sources_"),
+            "the answer's sources are written beside it: {episode}"
+        );
+        assert!(
+            episode.contains("https://example.com/degrees"),
+            "and they name the page: {episode}"
         );
     }
 
