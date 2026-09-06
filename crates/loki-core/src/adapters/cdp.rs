@@ -122,18 +122,55 @@ impl Cdp {
         }
     }
 
+    /// The next event, or `None` if none arrives in time.
+    ///
+    /// **The primitive a page reader is built on.** Waiting for one named event is not enough once
+    /// the browser expects answers: an intercepted request that is never failed or continued hangs
+    /// the page, and counting requests in flight means seeing all of them. So the caller drives the
+    /// loop, inspects whatever turns up, and issues commands in response.
+    ///
+    /// Anything buffered by an earlier `call` comes out first, because the event a caller is about
+    /// to look for has very often already arrived while a command was being answered.
+    ///
+    /// # Errors
+    /// Fails on a transport error. A timeout is `Ok(None)`, since waiting and finding nothing is an
+    /// answer rather than a failure.
+    pub async fn next_event(&mut self, within: Duration) -> Result<Option<Value>, CdpError> {
+        if let Some(event) = self.seen.pop_front() {
+            return Ok(Some(event));
+        }
+        loop {
+            match tokio::time::timeout(within, self.read_message()).await {
+                Err(_) => return Ok(None),
+                Ok(message) => {
+                    let message = message?;
+                    if message.get("method").is_some() {
+                        return Ok(Some(message));
+                    }
+                }
+            }
+        }
+    }
+
     async fn read_message(&mut self) -> Result<Value, CdpError> {
         let text = receive_text(&mut self.stream).await?;
         serde_json::from_str(&text).map_err(|e| CdpError::Protocol(e.to_string()))
     }
 }
 
-/// The commands rung 2 actually uses.
+/// The commands rung 2 actually uses, and what it does with them.
 ///
-/// Thin on purpose. Each one is a name and a shape, so the call sites read as intent and the
-/// protocol stays in one place. Adding a sixth is four lines.
+/// **Reading a page lives with the protocol rather than beside it.** It was briefly its own
+/// adapter and `tests/rings.rs` was right to reject that: one Ring 2 adapter importing another is
+/// a coupling the architecture does not allow, and the boundary was a file-organisation
+/// preference rather than a real seam. Rung 2 is one adapter. When §12's extraction port lands it
+/// is what this sits behind, and that is where the seam actually is.
 pub mod page {
-    use super::{Cdp, CdpError, Duration, Value, json};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+
+    use super::{Cdp, CdpError};
 
     /// Turns on the page domain, which is what makes load events arrive at all.
     ///
@@ -184,6 +221,246 @@ pub mod page {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| CdpError::Protocol("evaluate returned no string".to_owned()))
+    }
+
+    /// When a page counts as ready, and when it counts as readable.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Readiness {
+        /// How long the network must stay quiet before the page is settled.
+        pub quiet: Duration,
+        /// The whole budget for one page, load and settle together.
+        pub budget: Duration,
+        /// Characters of visible text below which this was not a page (§21.5).
+        pub minimum_text: usize,
+    }
+
+    impl Default for Readiness {
+        fn default() -> Self {
+            Self {
+                // Half a second of silence is the figure every headless stack converges on: long
+                // enough that one late XHR does not read as settled, short enough not to be felt.
+                quiet: Duration::from_millis(500),
+                budget: Duration::from_secs(20),
+                // Roughly a short paragraph. Below it, a page that returned 200 gave back a shell.
+                minimum_text: 200,
+            }
+        }
+    }
+
+    /// What a page turned out to be.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Rendered {
+        pub html: String,
+        /// Visible text length, which is what the threshold was judged on.
+        pub text: usize,
+        pub settled: bool,
+    }
+
+    /// Resource types worth never fetching.
+    ///
+    /// Chrome's own names, since they go over the wire as-is. `Stylesheet` is deliberately absent and
+    /// `Script` doubly so: blocking scripts on the rung whose entire purpose is running them would be
+    /// a page that renders to nothing.
+    const NEVER_FETCH: [&str; 5] = ["Image", "Font", "Media", "Ping", "CSPViolationReport"];
+
+    /// Loads a URL and reads what it turned into.
+    ///
+    /// # Errors
+    /// Fails on a protocol error. A page that loads but says nothing is not an error here: it comes
+    /// back with `settled` and a text count, and the caller decides the verdict.
+    pub async fn read(cdp: &mut Cdp, url: &str, want: Readiness) -> Result<Rendered, CdpError> {
+        cdp.call("Page.enable", json!({})).await?;
+        cdp.call("Network.enable", json!({})).await?;
+        block_unread_resources(cdp).await?;
+        navigate(cdp, url).await?;
+
+        let settled = settle(cdp, want).await?;
+        let html = html(cdp).await?;
+        let text = visible_text(cdp).await?;
+        Ok(Rendered {
+            html,
+            text,
+            settled,
+        })
+    }
+
+    /// Turns off the fetches nobody reads.
+    ///
+    /// Interception rather than a URL pattern list, because the thing being matched is what a resource
+    /// *is*, and a CDN image with no extension is still an image. Only the blocked types are
+    /// intercepted, so nothing else pays for the pause.
+    async fn block_unread_resources(cdp: &mut Cdp) -> Result<(), CdpError> {
+        let patterns: Vec<Value> = NEVER_FETCH
+            .iter()
+            .map(|kind| json!({ "urlPattern": "*", "resourceType": kind, "requestStage": "Request" }))
+            .collect();
+        cdp.call("Fetch.enable", json!({ "patterns": patterns }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Waits for the document, then for the network to go quiet.
+    ///
+    /// Returns whether it settled inside the budget. A page that never settles is not an error: it is
+    /// a page, and §12.2's verdict is the caller's to draw.
+    async fn settle(cdp: &mut Cdp, want: Readiness) -> Result<bool, CdpError> {
+        let deadline = Instant::now() + want.budget;
+        let mut inflight = 0_i64;
+        let mut loaded = false;
+        // `None` while requests are outstanding; the moment the last one finished otherwise.
+        let mut quiet_since: Option<Instant> = None;
+
+        loop {
+            if loaded
+                && let Some(since) = quiet_since
+                && since.elapsed() >= want.quiet
+            {
+                return Ok(true);
+            }
+            let Some(remaining) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                return Ok(false);
+            };
+            // Never wait longer than the quiet period, or a page that fell silent would sit here until
+            // something else happened to arrive.
+            let Some(event) = cdp.next_event(remaining.min(want.quiet)).await? else {
+                continue;
+            };
+
+            match event.get("method").and_then(Value::as_str) {
+                Some("Page.loadEventFired" | "Page.domContentEventFired") => loaded = true,
+                Some("Network.requestWillBeSent") => {
+                    inflight += 1;
+                    quiet_since = None;
+                }
+                Some("Network.loadingFinished" | "Network.loadingFailed") => {
+                    inflight = (inflight - 1).max(0);
+                    if inflight == 0 {
+                        quiet_since = Some(Instant::now());
+                    }
+                }
+                // An intercepted request that is never answered hangs the page, so this is the one
+                // event that must be handled rather than counted.
+                Some("Fetch.requestPaused") => refuse(cdp, &event).await?,
+                _ => {}
+            }
+        }
+    }
+
+    /// Fails one intercepted request.
+    async fn refuse(cdp: &mut Cdp, event: &Value) -> Result<(), CdpError> {
+        let Some(id) = event.pointer("/params/requestId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        // A refusal the page can recognise. Aborting without a reason shows up as a network error in
+        // the console and some scripts retry it, which is the opposite of saving the fetch.
+        cdp.call(
+            "Fetch.failRequest",
+            json!({ "requestId": id, "errorReason": "BlockedByClient" }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// How much text a reader would actually see.
+    ///
+    /// `innerText`, not the markup length: a page can be a hundred kilobytes of script and empty divs.
+    /// Asked of the browser because the browser is the only thing that knows what is displayed.
+    async fn visible_text(cdp: &mut Cdp) -> Result<usize, CdpError> {
+        let result = cdp
+            .call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(document.body && document.body.innerText || '').length",
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        Ok(result
+            .pointer("/result/value")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0))
+    }
+
+    impl Rendered {
+        /// Whether this cleared §21.5's bar.
+        ///
+        /// Both halves matter and for different reasons. A page that never settled was cut off, so
+        /// what is here is partial. A page that settled and still said nothing returned a shell, which
+        /// is the silent empty that makes a memory system record silence as fact.
+        #[must_use]
+        pub const fn is_readable(&self, want: Readiness) -> bool {
+            self.settled && self.text >= want.minimum_text
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn stylesheets_and_scripts_are_never_in_the_block_list() {
+            // Blocking either is how a speed optimisation becomes the thin-content failure this
+            // module exists to catch. Scripts especially: rung 2 exists to run them.
+            assert!(!NEVER_FETCH.contains(&"Stylesheet"));
+            assert!(!NEVER_FETCH.contains(&"Script"));
+            assert!(!NEVER_FETCH.contains(&"XHR"));
+            assert!(!NEVER_FETCH.contains(&"Fetch"));
+            assert!(!NEVER_FETCH.contains(&"Document"));
+        }
+
+        #[test]
+        fn the_bytes_nobody_reads_are_all_in_it() {
+            for kind in ["Image", "Font", "Media"] {
+                assert!(NEVER_FETCH.contains(&kind), "{kind} is never read");
+            }
+        }
+
+        #[test]
+        fn a_page_that_did_not_settle_is_not_readable_however_much_it_said() {
+            let want = Readiness::default();
+            let cut_off = Rendered {
+                html: String::new(),
+                text: 100_000,
+                settled: false,
+            };
+            assert!(
+                !cut_off.is_readable(want),
+                "a page cut off mid-load is partial, whatever arrived first"
+            );
+        }
+
+        /// The §21.5 case: a 200 that settled and still said nothing.
+        #[test]
+        fn a_shell_that_settled_is_not_readable_either() {
+            let want = Readiness::default();
+            let shell = Rendered {
+                html: "<html><body><div id=root></div></body></html>".to_owned(),
+                text: 12,
+                settled: true,
+            };
+            assert!(!shell.is_readable(want));
+
+            let real = Rendered {
+                text: want.minimum_text,
+                settled: true,
+                ..shell
+            };
+            assert!(real.is_readable(want), "exactly at the threshold counts");
+        }
+
+        #[test]
+        fn the_defaults_are_the_ones_that_were_reasoned_about() {
+            let want = Readiness::default();
+            assert_eq!(want.quiet, Duration::from_millis(500));
+            assert!(
+                want.quiet < want.budget,
+                "a quiet period longer than the budget can never be observed"
+            );
+        }
     }
 }
 

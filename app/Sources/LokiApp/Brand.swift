@@ -40,6 +40,14 @@ enum Brand {
     /// bitmap**, which is what made it look pixelated. Rendering at the size actually wanted, once,
     /// fixes it at the source.
     static func mark(points: CGFloat) -> NSImage? {
+        // **Vector goes straight through, and that is the whole point of it.** Everything below
+        // this line exists to make an unavoidable resample as good as it can be: trim the padding,
+        // one representation per device scale, never scale after the fact. Core Graphics
+        // rasterises a PDF at the size *and the subpixel position* it is actually drawn at, so
+        // there is no resample to improve. No cache either: caching would put a bitmap back in the
+        // path and take the position back out of it.
+        if let vector = vector(points: points) { return vector }
+
         let key = Int(points.rounded())
         if let cached = cache.withLock({ $0[key] }) { return cached }
         guard let trimmed else { return nil }
@@ -101,7 +109,11 @@ enum Brand {
     /// `.app`, and the app is routinely run as the bare SwiftPM executable from Xcode, where there
     /// is no `Resources/` for an `.icns` to sit in and the Dock falls back to the generic
     /// executable icon. Assigning it at runtime covers both, and costs one line.
-    static func icon() -> NSImage? { trimmed }
+    static func icon() -> NSImage? {
+        // Large, because the Dock asks for sizes up to 1024 and a vector page has no natural one
+        // to give it.
+        vector(points: 1024) ?? trimmed
+    }
 
     private static let cache = OSAllocatedUnfairLock(initialState: [Int: NSImage]())
 
@@ -180,6 +192,43 @@ enum Brand {
         return nil
     }
 
+    /// The artwork sized for drawing, if it is vector.
+    ///
+    /// Returns `nil` for a raster asset, and for a PDF that is really a bitmap in a wrapper: that
+    /// file draws no better as a page than as pixels, and its page box carries padding the raster
+    /// path would trim and this one would not.
+    private static func vector(points: CGFloat) -> NSImage? {
+        guard let loaded, isVector, let sized = loaded.copy() as? NSImage else { return nil }
+        sized.size = NSSize(width: points, height: points)
+        return sized
+    }
+
+    /// Whether the artwork is genuinely vector rather than a bitmap in a PDF wrapper.
+    ///
+    /// A wrapped bitmap presents as an `NSPDFImageRep` like any other PDF, so the container is not
+    /// the question. What separates them is whether the page draws from pixels: a real vector page
+    /// has no image in it at all.
+    static var isVector: Bool {
+        guard let page = loaded?.representations.first(where: { $0 is NSPDFImageRep })
+                as? NSPDFImageRep
+        else { return false }
+        return !containsBitmap(page.pdfRepresentation)
+    }
+
+    /// Whether a PDF's bytes declare an image XObject.
+    ///
+    /// A byte scan rather than a parse. It is looking for one token in an uncompressed object
+    /// dictionary, which is where a page's resources are declared even when its content stream is
+    /// compressed, and being wrong in the safe direction costs a fallback to the raster path.
+    private static func containsBitmap(_ pdf: Data) -> Bool {
+        for marker in ["/Subtype /Image", "/Subtype/Image"] {
+            if let needle = marker.data(using: .ascii), pdf.range(of: needle) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     /// The artwork as pixels, whatever container it arrived in.
     ///
     /// **A PDF is passed through the same trim and the same per-scale rendering as a PNG, rather
@@ -226,3 +275,35 @@ enum Brand {
         return rep.cgImage
     }
 }
+
+#if DEBUG
+extension Brand {
+    /// What the shipped artwork actually is, for the checks below and for a preview to report.
+    enum Kind: Equatable {
+        case vector
+        case raster(fills: CGFloat)
+        case missing
+    }
+
+    /// Rasterises the shipped asset and measures how much of its own box it occupies.
+    ///
+    /// **The assumption the vector path rests on.** A vector page is drawn straight into the frame
+    /// it is given, with no trim, so artwork inset inside its own page box would draw small. The
+    /// PNG path trims and does not care; this one does. Dropping in a padded asset would be a
+    /// silent regression of exactly the defect the trim was written for, so it is measured rather
+    /// than assumed.
+    static func audit() -> Kind {
+        guard let loaded else { return .missing }
+        guard isVector else {
+            return .raster(fills: coverage(of: loaded))
+        }
+        return .vector
+    }
+
+    static func coverage(of image: NSImage) -> CGFloat {
+        guard let cg = pixels(of: image) else { return 0 }
+        let box = opaqueBounds(of: cg)
+        return box.width / CGFloat(cg.width)
+    }
+}
+#endif

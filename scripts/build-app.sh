@@ -27,9 +27,16 @@ export MACOSX_DEPLOYMENT_TARGET=26.0
 # The mark the app draws with, refreshed from the one place the artwork lives. SwiftPM will not
 # follow a symlink into a resource bundle, so this is a copy, and copying it on every build is what
 # stops it going stale.
-if [ -f "$ROOT/branding/logo/logo.png" ]; then
-  cp "$ROOT/branding/logo/logo.png" "$ROOT/app/Sources/LokiApp/Resources/loki-mark.png"
-fi
+#
+# The PDF is the one that matters: it is vector, so Core Graphics rasterises it at the size and the
+# subpixel position it is actually drawn at, and every resampling defect this app had disappears
+# rather than being minimised. The PNG stays beside it as the fallback for a build where the vector
+# is missing.
+for asset in pdf png; do
+  if [ -f "$ROOT/branding/logo/logo.$asset" ]; then
+    cp "$ROOT/branding/logo/logo.$asset" "$ROOT/app/Sources/LokiApp/Resources/loki-mark.$asset"
+  fi
+done
 
 echo "==> cargo build ($CONFIG)"
 cd "$ROOT"
@@ -63,20 +70,48 @@ cp "$ROOT/app/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 
 # The Dock icon, built from the same artwork the app draws its own mark from, so the two cannot
 # drift. `branding/logo/` is the only place the logo lives.
-ICON_SRC="$ROOT/branding/logo/logo.png"
+ICON_SRC="$ROOT/branding/logo/logo.pdf"
+[ -f "$ICON_SRC" ] || ICON_SRC="$ROOT/branding/logo/logo.png"
 if [ -f "$ICON_SRC" ]; then
   echo "==> app icon"
-  ICONSET="$(mktemp -d)/Loki.iconset"
+  WORK="$(mktemp -d)"
+  ICONSET="$WORK/Loki.iconset"
   mkdir -p "$ICONSET"
+
+  # Each icon size is rasterised from the source at that size, rather than one large raster being
+  # scaled down to the rest. For a vector source that is the difference between an analytic render
+  # at 16 points and a resample of a 1024 point bitmap, and 16 is the size where it shows.
+  # `sips` cannot read PDF, so this goes through AppKit, which is also what the app itself uses.
+  cat > "$WORK/rasterise.swift" <<'RASTERISE'
+import AppKit
+let source = URL(fileURLWithPath: CommandLine.arguments[1])
+let pixels = Int(CommandLine.arguments[2])!
+let out = URL(fileURLWithPath: CommandLine.arguments[3])
+guard let art = NSImage(contentsOf: source) else { exit(1) }
+art.size = NSSize(width: pixels, height: pixels)
+guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+) else { exit(1) }
+rep.size = NSSize(width: pixels, height: pixels)
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+NSGraphicsContext.current?.imageInterpolation = .high
+art.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+NSGraphicsContext.restoreGraphicsState()
+try! rep.representation(using: .png, properties: [:])!.write(to: out)
+RASTERISE
+
   for size in 16 32 128 256 512; do
-    sips -z $size $size "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-    sips -z $((size * 2)) $((size * 2)) "$ICON_SRC" \
-      --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+    swift "$WORK/rasterise.swift" "$ICON_SRC" "$size" "$ICONSET/icon_${size}x${size}.png"
+    swift "$WORK/rasterise.swift" "$ICON_SRC" "$((size * 2))" \
+      "$ICONSET/icon_${size}x${size}@2x.png"
   done
   iconutil -c icns "$ICONSET" -o "$BUNDLE/Contents/Resources/Loki.icns"
-  rm -rf "$(dirname "$ICONSET")"
+  rm -rf "$WORK"
 else
-  echo "warning: $ICON_SRC is missing, so the app keeps the default icon" >&2
+  echo "warning: no artwork in branding/logo, so the app keeps the default icon" >&2
 fi
 
 echo "==> ad-hoc signing"
