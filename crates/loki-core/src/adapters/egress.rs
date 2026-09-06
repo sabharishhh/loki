@@ -44,6 +44,11 @@ impl Http {
                 // One emulation for the whole process, so every request this app makes looks like
                 // the same browser. Rotating it per request is the thing that stands out.
                 .emulation(wreq_util::Emulation::Chrome142)
+                // **A browser is a returning visitor (§12.2).** One jar for the process, so a
+                // consent or session cookie handed out on first contact comes back on the next
+                // request. Without it every request is a stranger, which is the strongest bot
+                // signal there is and the one no fingerprint can cover for.
+                .cookie_store(true)
                 // **Redirects are followed here, not by the client.** A client that follows three
                 // hops internally makes four requests and lets the exit emit one event, and
                 // §21.7's byte accounting is then wrong by three requests with nothing to say so.

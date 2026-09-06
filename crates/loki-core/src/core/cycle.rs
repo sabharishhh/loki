@@ -705,7 +705,7 @@ impl Loop {
                 self.events.emit(&Event::Searched {
                     task,
                     query: question.to_owned(),
-                    provider: web.discover.id().to_owned(),
+                    provider: found.engine.to_owned(),
                     hits: u32::try_from(found.sources.len()).unwrap_or(u32::MAX),
                     cost: vocab::CostModel::Free,
                 });
@@ -737,7 +737,7 @@ impl Loop {
             Err(why) => {
                 self.events.emit(&Event::Blocked {
                     reason: BlockReason::ProviderFailed {
-                        provider: web.discover.id().to_owned(),
+                        provider: web.engine_ids().join(", "),
                         detail: why.to_string(),
                     },
                 });

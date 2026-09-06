@@ -290,7 +290,7 @@ impl Fixture {
         let mut app = Self::open(label, answers, &["DONE"]).await;
         app.core
             .attach_web(Arc::new(loki_core::core::websearch::Search {
-                discover: engine as Arc<dyn Discover>,
+                engines: vec![engine as Arc<dyn Discover>],
                 rungs: Vec::new(),
                 clock: Arc::new(SystemClock),
                 budget: loki_core::core::attempt::Budget::of_steps(2),

@@ -24,7 +24,20 @@ serde_yaml_ng.workspace = true
 jiff.workspace = true
 strsim.workspace = true
 git2.workspace = true
-wreq = { version = "0.16.1", features = ["json", "stream"] }
+# `cookies` is not optional dressing: §12.2 requires one jar per domain held across the
+# session, and an engine that hands out a consent cookie on first contact reads a client that
+# never returns it as a bot on the second request, whatever its TLS fingerprint says.
+# The decompression features are the other half of the same claim: emulating a browser that
+# advertises gzip, brotli and zstd while being unable to read any of them is a tell.
+wreq = { version = "0.16.1", features = [
+    "json",
+    "stream",
+    "cookies",
+    "gzip",
+    "brotli",
+    "deflate",
+    "zstd",
+] }
 wreq-util = "0.2.0"
 dom_smoothie = "0.18.0"
 fast_html2md = "0.0.62"

@@ -189,3 +189,40 @@ fn nothing_but_the_egress_adapter_builds_a_transport() {
         offences.join("\n")
     );
 }
+
+/// §12.2: the client has to be the browser it claims to be.
+///
+/// **A fingerprint that contradicts itself is worse than none.** The exit emulates Chrome, and
+/// Chrome advertises `gzip`, `deflate`, `br` and `zstd` and keeps cookies. With those features off
+/// the client announced a browser it was not, and DuckDuckGo answered every search with a 202 soft
+/// block: no error, no status a caller would question, just a page with no results in it. That was
+/// read as "the engine refuses this machine" and cost a rebuild of discovery around a browser
+/// before anyone checked the client (D-091).
+///
+/// A source-level check because the failure is silent at runtime. Nothing throws when a feature is
+/// missing; the searches just quietly stop working.
+#[test]
+fn the_exit_can_be_the_browser_it_impersonates() {
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("the manifest is readable");
+
+    let wreq = manifest
+        .lines()
+        .skip_while(|line| !line.starts_with("wreq = "))
+        .take_while(|line| !line.starts_with("wreq-util"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for feature in ["cookies", "gzip", "brotli", "deflate", "zstd"] {
+        assert!(
+            wreq.contains(&format!("\"{feature}\"")),
+            "the exit emulates a browser that uses {feature} and cannot read it: {wreq}"
+        );
+    }
+
+    let egress = fs::read_to_string(src("adapters").join("egress.rs")).expect("readable");
+    assert!(
+        egress.contains(".cookie_store(true)"),
+        "the feature is compiled in and the jar is switched off, which is the same thing as having none"
+    );
+}

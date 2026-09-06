@@ -26,6 +26,8 @@ use crate::ports::search::{CancelToken, Discover, Extract, Hit, Page, SearchErro
 /// What a search turned up, ready to be cited.
 #[derive(Debug, Clone, Default)]
 pub struct Found {
+    /// Which rung of the discovery ladder answered, for §12.9's ledger.
+    pub engine: &'static str,
     /// One entry per source, in the order they were used.
     pub sources: Vec<Cited>,
     /// Whether the budget ran out before the question was covered (§12.7).
@@ -78,7 +80,10 @@ impl Found {
 
 /// Everything the loop needs from the outside.
 pub struct Search {
-    pub discover: Arc<dyn Discover>,
+    /// Cheapest first, exactly like `rungs`. §12.2 puts discovery on `wreq` from the user's own
+    /// machine and keeps the browser behind it: a search that needs no browser should not start
+    /// one.
+    pub engines: Vec<Arc<dyn Discover>>,
     /// Cheapest first. The loop stops at the first rung that answers (§12.2).
     pub rungs: Vec<Arc<dyn Extract>>,
     pub clock: Arc<dyn Clock>,
@@ -92,18 +97,52 @@ pub struct Search {
 }
 
 impl Search {
+    /// Every engine on the ladder, for the ledger.
+    #[must_use]
+    pub fn engine_ids(&self) -> Vec<&'static str> {
+        self.engines.iter().map(|engine| engine.id()).collect()
+    }
+
+    /// Walks the discovery ladder and returns the first rung that found anything.
+    ///
+    /// **No cleverness on purpose.** A rung either comes back with pages or it does not, and the
+    /// one behind it is tried when it does not. There is no classifier deciding in advance which
+    /// rung suits a question, because a wrong guess there produces a confident answer about the
+    /// wrong thing rather than a slow one.
+    ///
+    /// # Errors
+    /// Fails when no rung could answer, carrying the last real failure rather than a bare empty.
+    async fn find(
+        &self,
+        question: &str,
+        cancel: CancelToken,
+    ) -> Result<(&'static str, Vec<crate::ports::search::Hit>), SearchError> {
+        let mut last: Option<SearchError> = None;
+        let mut tried: Vec<&'static str> = Vec::new();
+
+        for engine in &self.engines {
+            tried.push(engine.id());
+            match engine.search(question, cancel.clone()).await {
+                Ok(hits) if !hits.is_empty() => return Ok((engine.id(), hits)),
+                Ok(_) => {}
+                // Remembered in case nothing below works either, so the caller is told why rather
+                // than told the web was empty.
+                Err(why) => last = Some(why),
+            }
+        }
+
+        Err(last.unwrap_or(SearchError::SilentlyEmpty {
+            engine: tried.join(", "),
+        }))
+    }
+
     /// Runs one search to completion, or to the budget.
     ///
     /// # Errors
     /// Fails only when the engine itself could not be used. A page that could not be read is a
     /// missing source, not a failed search (§12.4).
     pub async fn run(&self, question: &str, cancel: CancelToken) -> Result<Found, SearchError> {
-        let hits = self.discover.search(question, cancel.clone()).await?;
-        if hits.is_empty() {
-            return Err(SearchError::SilentlyEmpty {
-                engine: self.discover.id().to_owned(),
-            });
-        }
+        let (engine, hits) = self.find(question, cancel.clone()).await?;
 
         // The engine's own summaries, which are free and already carry their URLs.
         let mut sources: Vec<Cited> = hits
@@ -122,6 +161,7 @@ impl Search {
         if answered_by_snippets(question, &sources) {
             self.fetch_icons(&mut sources, cancel.clone()).await;
             return Ok(Found {
+                engine,
                 sources,
                 complete: true,
             });
@@ -148,6 +188,7 @@ impl Search {
 
         self.fetch_icons(&mut sources, cancel_for_icons).await;
         Ok(Found {
+            engine,
             sources,
             complete: outcome.ending == Ending::Stopped,
         })
@@ -410,6 +451,7 @@ mod tests {
     #[test]
     fn a_brief_numbers_its_sources_and_says_when_it_is_short() {
         let found = Found {
+            engine: "test",
             sources: vec![
                 snippet("https://a.test", "first"),
                 snippet("https://b.test", "second"),

@@ -259,9 +259,17 @@ pub unsafe extern "C" fn loki_core_new(
     // this is the only place that holds the exit, the clock and the evidence store at once.
     if let Some(browsing) = open_the_browser(&runtime, &http, &gate) {
         core.attach_web(Arc::new(loki_core::core::websearch::Search {
-            // One browser, both jobs. Discovery renders a results page and extraction renders an
-            // article, so sharing the adapter is what keeps it to one warm process (§12.3).
-            discover: Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Discover>,
+            // §12.2's ladder, cheapest first. Rung 1 answers a search in about a second and
+            // starts nothing; the browser is behind it for the engines that will not talk to an
+            // HTTP client at all. Measured 2026-09-06: rung 1 returns ten hits in 1.01s where the
+            // browser took 8.5s warm and 15s cold for twelve.
+            engines: vec![
+                Arc::new(loki_core::adapters::duckduckgo::DuckDuckGo::new(
+                    Arc::clone(&outbound),
+                    Arc::clone(&gate),
+                )),
+                Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Discover>,
+            ],
             rungs: vec![
                 Arc::new(loki_core::adapters::reader::Reader::new(
                     Arc::clone(&outbound),
