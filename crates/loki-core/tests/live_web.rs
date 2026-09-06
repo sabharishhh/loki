@@ -412,3 +412,58 @@ async fn an_ad_heavy_page_reads_quickly() {
         }
     }
 }
+
+/// How deep a search goes, against how much the question asked for.
+#[tokio::test]
+#[ignore = "needs the network"]
+async fn depth_follows_the_question() {
+    let egress = exit();
+    let gate: Shared = Arc::new(Politeness::default());
+    let browsing = browser().await;
+    let search = Search {
+        engines: vec![
+            Arc::new(loki_core::adapters::duckduckgo::DuckDuckGo::new(
+                Arc::clone(&egress),
+                Arc::clone(&gate),
+            )),
+            Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Discover>,
+        ],
+        rungs: vec![
+            Arc::new(Reader::new(Arc::clone(&egress), Arc::clone(&gate))),
+            Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Extract>,
+        ],
+        clock: Arc::new(SystemClock),
+        budget: loki_core::core::attempt::Budget::of_steps(6)
+            .within(std::time::Duration::from_secs(30)),
+        reads: 3,
+        evidence: None,
+        egress: Some(egress),
+        events: None,
+    };
+
+    for question in [
+        "who is the president of india",
+        "compare graphcast and fourcastnet weather models",
+    ] {
+        let started = std::time::Instant::now();
+        match search
+            .run(
+                question,
+                loki_core::core::ids::TaskId::new(0),
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(found) => println!(
+                "{:>6}ms read={} of {} sources  {question}",
+                started.elapsed().as_millis(),
+                found.sources.iter().filter(|s| s.read).count(),
+                found.sources.len()
+            ),
+            Err(e) => println!(
+                "{:>6}ms failed: {e}  {question}",
+                started.elapsed().as_millis()
+            ),
+        }
+    }
+}

@@ -47,7 +47,7 @@ fn score(wanted: &[String], hit: &Hit) -> u32 {
 ///
 /// Short words and the ones every question contains are dropped: matching on "the" ranks every
 /// page equally, which is the same as not ranking at all.
-fn content_words(question: &str) -> Vec<String> {
+pub(crate) fn content_words(question: &str) -> Vec<String> {
     const EVERYWHERE: [&str; 24] = [
         "the", "and", "for", "what", "when", "where", "which", "who", "why", "how", "is", "are",
         "was", "were", "does", "did", "do", "can", "with", "from", "that", "this", "about", "into",

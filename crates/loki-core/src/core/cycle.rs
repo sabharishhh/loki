@@ -482,13 +482,7 @@ impl Loop {
         // §12.6, read after memory because memory is free by this point and its answer outranks a
         // search. The trigger never sees the model: it reads the question and lane 1's score.
         if let Some(web) = self.web.clone() {
-            let reach = trigger::decide(
-                &message,
-                trigger::Situation {
-                    recall: best,
-                    asked: false,
-                },
-            );
+            let reach = trigger::decide(&message, trigger::Situation { recall: best });
             match reach {
                 trigger::Reach::Yes => {
                     self.search_the_web(task, &web, &message, cancel.clone())

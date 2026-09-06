@@ -215,6 +215,7 @@ impl Search {
 
         let cancel_for_icons = cancel.clone();
         let plan = Reading {
+            question: question.to_owned(),
             hits,
             rungs: self.rungs.clone(),
             cancel,
@@ -338,7 +339,85 @@ fn answered_by_snippets(question: &str, sources: &[Cited]) -> bool {
 }
 
 /// The reading half, as steps the bounded attempt can run.
+/// The text of a record, without the url, title and icon `record` writes above it.
+fn body_of(record: &str) -> &str {
+    record.splitn(4, '\n').nth(3).unwrap_or("")
+}
+
+/// Why the reading loop stopped, in §12.2's shape: a reason, never a count.
+///
+/// **A number cannot be matched on and cannot say why.** `reads: 3` reports nothing about whether
+/// three was too few or five too many, and no caller can act on it. This can, and the ledger can
+/// record it (§12.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gathered {
+    /// Every subject the question named appears in what has been read.
+    Answered,
+    /// Something the question asked about is still missing.
+    Wanting,
+}
+
+/// Whether what has been read covers what was asked.
+///
+/// **Depth falls out of the question rather than being guessed at.** The stopping condition is
+/// that the question's own subjects are present in the evidence, so a question with one subject is
+/// covered by one page and a comparison of three keeps going until all three are there. Nothing
+/// classifies the question's complexity; the complexity is read off its structure, which is the
+/// same move the compiler makes deriving a lifetime from the code rather than asking for it.
+///
+/// Lexical and local, because a model call per page is the cost this exists to avoid.
+fn gathered(question: &str, read: &[String]) -> Gathered {
+    // **What the question asks *for* is not what it asks *about*.** "compare X with Y" wants X and
+    // Y; "compare" itself appears in no article about either, so requiring it meant a comparison
+    // could never be satisfied and always spent the whole budget. The list is closed and short
+    // because these are the verbs a request is made with, not the things requests are about.
+    const INSTRUCTIONS: [&str; 18] = [
+        "compare",
+        "contrast",
+        "explain",
+        "describe",
+        "summarise",
+        "summarize",
+        "list",
+        "tell",
+        "give",
+        "show",
+        "write",
+        "find",
+        "search",
+        "look",
+        "check",
+        "refer",
+        "verify",
+        "answer",
+    ];
+    let wanted: Vec<String> = crate::core::rank::content_words(question)
+        .into_iter()
+        .filter(|word| !INSTRUCTIONS.contains(&word.as_str()))
+        .collect();
+    if wanted.is_empty() || read.is_empty() {
+        return Gathered::Wanting;
+    }
+    // **The page's text, never its title or its address.** A record opens with the url and the
+    // title, and a search result's title echoes the query almost by construction: "kerala news
+    // today" is covered by a page called "Kerala News Today" before a word of it has been read.
+    // Judging on the title is judging on the search engine's own paraphrase of the question.
+    let haystack = read
+        .iter()
+        .map(|record| body_of(record))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    if wanted.iter().all(|word| haystack.contains(word.as_str())) {
+        Gathered::Answered
+    } else {
+        Gathered::Wanting
+    }
+}
+
 struct Reading {
+    /// What was asked, so the loop can tell when it has been answered.
+    question: String,
     hits: Vec<Hit>,
     rungs: Vec<Arc<dyn Extract>>,
     cancel: CancelToken,
@@ -371,6 +450,12 @@ impl attempt::Steps for Reading {
     type Error = SearchError;
 
     async fn next(&self, seen: &[String]) -> Result<Option<Hit>, SearchError> {
+        // **Stop when the question is answered, not when a counter runs out (§12.7).** `reads` was
+        // a target, so "who is the president of India" cost the same six pages as a question that
+        // genuinely needs a survey. It is a ceiling now, and the floor is sufficiency.
+        if let Gathered::Answered = gathered(&self.question, seen) {
+            return Ok(None);
+        }
         Ok(self
             .hits
             .iter()
@@ -555,5 +640,103 @@ mod tests {
 
         let nothing = Found::default();
         assert!(nothing.brief().contains("nothing readable"));
+    }
+}
+
+#[cfg(test)]
+mod sufficiency {
+    use super::*;
+
+    /// A record as `record` writes one: url, title, icon, then the text.
+    fn page(url: &str, title: &str, text: &str) -> String {
+        format!("{url}\n{title}\n\n{text}")
+    }
+
+    /// **A title is the engine's paraphrase of the question, not an answer to it.** Judging on the
+    /// record whole let a page called "Kerala News Today" satisfy "kerala news today" before a word
+    /// of it had been read, which would stop every search on its first result.
+    #[test]
+    fn a_title_that_echoes_the_question_is_not_coverage() {
+        let read = vec![page(
+            "https://example.com/kerala-monsoon-rainfall",
+            "Kerala Monsoon Rainfall",
+            "This page could not be displayed.",
+        )];
+        assert_eq!(
+            gathered("kerala monsoon rainfall", &read),
+            Gathered::Wanting
+        );
+    }
+
+    /// One subject, one page. This is the "who is the president of India" case, which cost six.
+    #[test]
+    fn a_single_subject_is_covered_by_one_page() {
+        let read = vec![page(
+            "https://presidentofindia.gov.in/",
+            "The President of India",
+            "Droupadi Murmu is the president of India.",
+        )];
+        assert_eq!(
+            gathered("who is the president of india", &read),
+            Gathered::Answered
+        );
+    }
+
+    /// **Depth comes from the question, not from a setting.** Three subjects keep the loop going
+    /// until all three are there, without anything having classified the question as complex.
+    #[test]
+    fn a_comparison_keeps_reading_until_every_subject_is_there() {
+        let question = "compare weathernext with graphcast and fourcastnet";
+        let one = vec![page(
+            "https://a.example",
+            "Models",
+            "WeatherNext 3 produces hourly global forecasts.",
+        )];
+        assert_eq!(gathered(question, &one), Gathered::Wanting);
+
+        let two = vec![
+            one[0].clone(),
+            page(
+                "https://b.example",
+                "More",
+                "GraphCast is a DeepMind model.",
+            ),
+        ];
+        assert_eq!(gathered(question, &two), Gathered::Wanting);
+
+        let all = vec![
+            two[0].clone(),
+            two[1].clone(),
+            page("https://c.example", "More", "FourCastNet came from NVIDIA."),
+        ];
+        assert_eq!(gathered(question, &all), Gathered::Answered);
+    }
+
+    /// Nothing read yet is never enough, however the question is worded.
+    #[test]
+    fn an_empty_reading_is_never_answered() {
+        assert_eq!(gathered("anything at all", &[]), Gathered::Wanting);
+    }
+
+    /// A question with no content words cannot be judged covered, so the budget decides instead of
+    /// a vacuous truth stopping the loop on the first page.
+    #[test]
+    fn a_question_with_no_subject_does_not_stop_the_loop() {
+        let read = vec![page("https://a.example", "Title", "Something was read.")];
+        assert_eq!(gathered("what is it", &read), Gathered::Wanting);
+    }
+
+    /// A page about something else does not count as covering the question.
+    #[test]
+    fn reading_the_wrong_thing_is_not_coverage() {
+        let read = vec![page(
+            "https://a.example",
+            "Sport",
+            "Cricket scores from the weekend.",
+        )];
+        assert_eq!(
+            gathered("kerala monsoon rainfall", &read),
+            Gathered::Wanting
+        );
     }
 }

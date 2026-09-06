@@ -24,12 +24,14 @@ pub enum Reach {
 }
 
 /// What the host knows when it decides.
+///
+/// **`asked` used to live here and was always false.** It meant "the user asked in so many words",
+/// which is what `asks_for_the_web` reads off the message standing right beside it, so the field
+/// was a second copy of the same question that nobody ever answered.
 #[derive(Debug, Clone, Copy)]
 pub struct Situation {
     /// The best score lane 1 returned, if it returned anything.
     pub recall: Option<f32>,
-    /// Whether the user asked for it in so many words.
-    pub asked: bool,
 }
 
 /// Reads §12.6's rows in order.
@@ -40,7 +42,7 @@ pub struct Situation {
 pub fn decide(message: &str, situation: Situation) -> Reach {
     // Row 3's explicit half. An instruction outranks every heuristic below it, including a memory
     // that would otherwise have answered: being told to look it up is not a question about the past.
-    if situation.asked || asks_for_the_web(message) {
+    if asks_for_the_web(message) {
         return Reach::Yes;
     }
 
@@ -80,21 +82,53 @@ pub fn decide(message: &str, situation: Situation) -> Reach {
     Reach::Offer
 }
 
-/// An instruction to look, rather than a question that might need looking.
+/// Whether the message is an instruction to go and look, rather than a question that might need it.
+///
+/// **A fast path, not a gate, and the difference is what a miss costs.** Anything this misses still
+/// reaches the model as §12.6's offer, so a phrasing nobody thought of costs one extra round trip
+/// rather than the search never happening. It was a gate before, and "refer online" asked twice got
+/// no search at all.
+///
+/// **Composed rather than enumerated.** A list of whole phrases is a list of the ways somebody
+/// already thought of; a verb of looking plus somewhere to look covers the ones they did not.
+/// "refer online", "go and check the internet", "verify this on the web" are all the same sentence
+/// to this and none of them would have been written down.
+///
+/// A false positive here costs a search, never a wrong answer, which is why the rule leans towards
+/// catching too much.
 fn asks_for_the_web(message: &str) -> bool {
     let lowered = message.to_lowercase();
-    [
-        "search the web",
+
+    // Instructions that mean it without naming anywhere to look.
+    const OUTRIGHT: [&str; 14] = [
+        "google it",
+        "google that",
+        "google this",
         "look it up",
         "look this up",
-        "google",
+        "look that up",
         "search for",
-        "find online",
-        "on the web",
-        "check online",
-    ]
-    .iter()
-    .any(|phrase| lowered.contains(phrase))
+        "fact check",
+        "fact-check",
+        "cite sources",
+        "cite your sources",
+        "with sources",
+        "with citations",
+        "proper citations",
+    ];
+    if OUTRIGHT.iter().any(|phrase| lowered.contains(phrase)) {
+        return true;
+    }
+
+    // Otherwise: a verb of looking, and somewhere to look.
+    const LOOKING: [&str; 12] = [
+        "search", "look", "check", "verify", "browse", "refer", "consult", "find", "google",
+        "read up", "dig up", "pull up",
+    ];
+    const OUT_THERE: [&str; 6] = ["web", "online", "internet", "the net", "google", "browser"];
+
+    LOOKING.iter().any(|verb| lowered.contains(verb))
+        && OUT_THERE.iter().any(|place| lowered.contains(place))
 }
 
 /// Things whose answers do not move.
@@ -192,29 +226,19 @@ fn depends_on_now(message: &str) -> bool {
 mod tests {
     use super::*;
 
-    const NOTHING: Situation = Situation {
-        recall: None,
-        asked: false,
-    };
+    const NOTHING: Situation = Situation { recall: None };
 
     #[test]
     fn being_told_to_look_outranks_everything() {
         // Even a memory that would have answered: an instruction is not a question about the past.
-        let known = Situation {
-            recall: Some(0.99),
-            asked: false,
-        };
+        let known = Situation { recall: Some(0.99) };
         assert_eq!(decide("search the web for rust 1.98", known), Reach::Yes);
         assert_eq!(decide("look it up", known), Reach::Yes);
+        // The override now travels in the message, which is the only place it ever came from.
         assert_eq!(
-            decide(
-                "anything",
-                Situation {
-                    recall: Some(0.99),
-                    asked: true
-                }
-            ),
-            Reach::Yes
+            decide("look it up", Situation { recall: Some(0.99) }),
+            Reach::Yes,
+            "being told to look outranks a memory that would have answered"
         );
     }
 
@@ -226,10 +250,7 @@ mod tests {
     /// written against.
     #[test]
     fn a_strong_memory_does_not_answer_a_question_about_now() {
-        let remembered = Situation {
-            recall: Some(0.95),
-            asked: false,
-        };
+        let remembered = Situation { recall: Some(0.95) };
         for question in [
             "what is the price of the pixel today",
             "what is the latest rust version",
@@ -246,10 +267,7 @@ mod tests {
     /// web is the trust cost §12.6 opens by naming.
     #[test]
     fn a_question_about_the_user_stays_with_memory_even_in_the_present_tense() {
-        let remembered = Situation {
-            recall: Some(0.95),
-            asked: false,
-        };
+        let remembered = Situation { recall: Some(0.95) };
         for question in [
             "where do i work now",
             "what is my current address",
@@ -262,16 +280,10 @@ mod tests {
 
     #[test]
     fn memory_answering_ends_it() {
-        let known = Situation {
-            recall: Some(0.8),
-            asked: false,
-        };
+        let known = Situation { recall: Some(0.8) };
         assert_eq!(decide("what is my sister called", known), Reach::No);
         // A weak hit does not end it, which is the case that made the model get a voice.
-        let vague = Situation {
-            recall: Some(0.2),
-            asked: false,
-        };
+        let vague = Situation { recall: Some(0.2) };
         assert_ne!(decide("what is my sister called", vague), Reach::No);
     }
 
@@ -336,5 +348,94 @@ mod tests {
     fn the_past_is_memorys_even_with_a_date_in_it() {
         assert_ne!(decide("what did i say in 2025?", NOTHING), Reach::Yes);
         assert_ne!(decide("do you remember 2024?", NOTHING), Reach::Yes);
+    }
+}
+
+#[cfg(test)]
+mod asking_outright {
+    use super::*;
+
+    fn reach(message: &str) -> Reach {
+        decide(message, Situation { recall: None })
+    }
+
+    /// W2, in Sabharish's own words. Asked twice and searched neither time.
+    #[test]
+    fn refer_online_is_an_instruction_to_look() {
+        assert_eq!(reach("refer online and then answer"), Reach::Yes);
+        assert_eq!(
+            reach("refer to her biography online and cite it"),
+            Reach::Yes
+        );
+    }
+
+    /// The point of composing a verb with a place: none of these was ever written down.
+    #[test]
+    fn phrasings_nobody_listed_still_land() {
+        for message in [
+            "go and check the internet for this",
+            "verify this on the web",
+            "consult the web before answering",
+            "browse online and tell me",
+            "pull up something from the internet",
+            "dig up whatever the web says",
+        ] {
+            assert_eq!(reach(message), Reach::Yes, "{message}");
+        }
+    }
+
+    #[test]
+    fn the_old_phrasings_still_work() {
+        for message in [
+            "search the web for this",
+            "look it up",
+            "google it",
+            "search for the release notes",
+            "check online first",
+        ] {
+            assert_eq!(reach(message), Reach::Yes, "{message}");
+        }
+    }
+
+    /// **A miss costs a round trip, never a search that never happens.** An instruction this does
+    /// not recognise still reaches the model as the offer, which is the whole reason the rule is
+    /// allowed to be simple.
+    #[test]
+    fn an_instruction_it_misses_is_still_offered() {
+        assert_eq!(
+            reach("have a rummage and tell me what you find"),
+            Reach::Offer
+        );
+    }
+
+    /// A verb of looking with nowhere to look is not an instruction to search.
+    ///
+    /// The assertion is that it does not *force* one. Offering is right: the host cannot tell, and
+    /// the model reading the sentence will not search for a spelling check.
+    #[test]
+    fn looking_at_something_here_does_not_force_a_search() {
+        for message in [
+            "check my spelling in this paragraph",
+            "look at the second one again",
+            "find the bug in this function",
+        ] {
+            assert_ne!(reach(message), Reach::Yes, "{message}");
+        }
+    }
+
+    /// Asking for sources is asking for the web, whether or not it names it.
+    #[test]
+    fn asking_for_sources_asks_for_the_web() {
+        assert_eq!(
+            reach("write me a para on her with proper citations"),
+            Reach::Yes
+        );
+        assert_eq!(reach("answer with sources"), Reach::Yes);
+    }
+
+    /// Arithmetic stays out of it however it is phrased.
+    #[test]
+    fn a_sum_is_still_not_a_search() {
+        assert_eq!(reach("what is 2 + 2"), Reach::No);
     }
 }
