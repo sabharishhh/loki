@@ -26,7 +26,11 @@ strsim.workspace = true
 git2.workspace = true
 wreq = { version = "0.16.1", features = ["json", "stream"] }
 wreq-util = "0.2.0"
+dom_smoothie = "0.18.0"
+fast_html2md = "0.0.62"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# `test-util` gives the paused clock the politeness tests need: a gate whose job is to wait a
+# second per host is a gate no real-time test can afford to exercise honestly.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 async-stream.workspace = true

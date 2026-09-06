@@ -84,7 +84,10 @@ fn ring_two_never_talks_to_ring_two() {
     // Modules an adapter may share. `sse` and `pricing` are common infrastructure, not providers,
     // so they are not another adapter in the sense the rule cares about. `*` is the glob a test
     // submodule uses to reach its own file.
-    let shared = ["sse", "pricing", "mod", "*"];
+    // `politeness` joins them: it is a shared rate gate, not a provider, and every adapter that
+    // reaches the network has to consult the *same* one. Two limiters that do not know about each
+    // other are one limiter with twice the rate, which is the thing it exists to prevent.
+    let shared = ["sse", "pricing", "politeness", "mod", "*"];
 
     for file in rust_files(&adapters) {
         let own = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");

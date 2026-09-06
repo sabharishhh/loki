@@ -47,6 +47,14 @@ pub enum SearchError {
     /// A known-good query returned nothing, which is a failure and not an answer (§21.5).
     #[error("{engine} returned nothing for a query that should always match")]
     SilentlyEmpty { engine: String },
+    /// The engine recognised the request and refused it.
+    ///
+    /// **Distinct from an empty result on purpose.** A soft block is served as a page with a
+    /// success-ish status and no results in it, so the shape on the wire is identical to a query
+    /// nobody has written about. Reporting it as empty is the silent-empty failure §21.5 exists to
+    /// catch, arriving through the code that implements the search.
+    #[error("{engine} refused the request, {detail}")]
+    Refused { engine: String, detail: String },
     #[error("cancelled")]
     Cancelled,
 }
