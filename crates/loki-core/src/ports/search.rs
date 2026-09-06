@@ -29,11 +29,14 @@ pub struct Page {
     pub title: String,
     /// The readable content, as markdown.
     pub text: String,
-    /// The site's own icon, as bytes, from the page that was already fetched.
+    /// Where the site says its icon is, resolved against the page it was found on.
     ///
-    /// Never fetched separately from a favicon service: that would tell the service every site the
-    /// user reads, and it would open a second way out of the process (§21.7).
-    pub icon: Option<Vec<u8>>,
+    /// **A URL, not bytes, and the distinction is honest rather than lazy.** Reading the reference
+    /// off the page costs nothing because the page is already here; fetching it is another request
+    /// through the gate, and it belongs with the evidence store that will cache it rather than with
+    /// the read that found it. What is settled here is that it is never fetched from a favicon
+    /// service, which would tell that service every site the user reads (§21.7).
+    pub icon: Option<String>,
     pub rung: Rung,
     pub verdict: Verdict,
 }

@@ -19,4 +19,5 @@ pub mod journal;
 pub mod openai;
 pub mod politeness;
 pub mod pricing;
+pub mod reader;
 pub mod sse;
