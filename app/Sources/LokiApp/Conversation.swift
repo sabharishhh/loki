@@ -460,8 +460,14 @@ final class Conversation {
     }
 
     private func appendStep(_ step: Step) {
+        // **Never into a retrieval scope.** Those render `search` and nothing else, so a thinking
+        // step filed under one is a step that disappears. Lane 1's recall arrives before any scope
+        // exists and waits for the model's, which is where it reads as thinking rather than as
+        // something the memory search did.
         let index = entries.indices.dropFirst(turnFloor).last {
-            if case .scope = entries[$0] { return true }
+            if case let .scope(scope) = entries[$0] {
+                return scope.kind != "search" && scope.kind != "memory"
+            }
             return false
         }
         guard let index, case .scope(var scope) = entries[index] else {
