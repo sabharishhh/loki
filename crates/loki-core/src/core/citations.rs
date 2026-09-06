@@ -10,6 +10,7 @@
 //! has a number and §12.7 has something to say "it is out of budget" about.
 
 use std::collections::BTreeSet;
+use std::ops::Not as _;
 
 use crate::core::websearch::Cited;
 
@@ -107,15 +108,26 @@ pub fn check(answer: &str, offered: &[Cited]) -> Coverage {
         }
         coverage.sourced += 1;
         for marker in markers {
-            if marker == 0 || marker > offered.len() {
-                coverage.invented.insert(marker);
-            } else {
+            // **A source with nothing read from it was never evidence.** The search offers what it
+            // found alongside what it opened, so a title the engine returned and nobody fetched
+            // still carries a number; a sentence written "from" one of those was not written from
+            // anything, which is the invented case wearing a real number (B-88).
+            let real = marker > 0
+                && offered
+                    .get(marker - 1)
+                    .is_some_and(|source| !source.text.trim().is_empty());
+            if real {
                 used.insert(marker);
+            } else {
+                coverage.invented.insert(marker);
             }
         }
     }
 
-    coverage.unused = (1..=offered.len()).filter(|n| !used.contains(n)).collect();
+    coverage.unused = (1..=offered.len())
+        .filter(|n| !used.contains(n))
+        .filter(|n| offered[n - 1].text.trim().is_empty().not())
+        .collect();
     coverage
 }
 
@@ -215,12 +227,34 @@ mod tests {
             .map(|n| Cited {
                 url: format!("https://s{n}.test"),
                 title: format!("t{n}"),
-                text: String::new(),
+                // A source with no text is not a source, which is the whole of B-88. Fixtures that
+                // left this empty were describing something the search never produces.
+                text: format!("what page {n} said"),
                 icon: None,
                 icon_hash: None,
                 read: true,
             })
             .collect()
+    }
+
+    /// B-88, as the reader saw it: six sources under the answer, three of them never opened.
+    ///
+    /// The search offers what it found alongside what it read, so a title the engine returned
+    /// carries a number in the list without a word of the page behind it. A sentence citing one of
+    /// those was not written from anything, and it looks exactly like a sentence that was.
+    #[test]
+    fn a_source_that_was_found_but_never_opened_cannot_be_cited() {
+        let mut found = offered(3);
+        found[2].text = String::new();
+        found[2].read = false;
+
+        let coverage = check("Bitcoin trades around forty thousand dollars. [3]", &found);
+        assert_eq!(coverage.invented, [3].into_iter().collect());
+        assert!(!coverage.is_complete());
+        assert!(
+            !coverage.unused.contains(&3),
+            "a source nobody could have used is not a source that went unused"
+        );
     }
 
     #[test]
@@ -313,7 +347,7 @@ mod invented_markers {
             .map(|url| Cited {
                 url: (*url).to_owned(),
                 title: String::new(),
-                text: String::new(),
+                text: format!("what {url} said"),
                 icon: None,
                 icon_hash: None,
                 read: true,

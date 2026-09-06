@@ -71,15 +71,57 @@ pub fn decide(message: &str, situation: Situation) -> Reach {
         return Reach::No;
     }
 
-    // A present-tense question about the user that memory could not answer. The web does not know
-    // where you work either, but the host has nothing left to decide with.
-    if now {
-        return Reach::Yes;
-    }
-
-    // The model's voice. The host is not sure, and a score cannot tell a confident hit from a
-    // current one, so the turn is offered the choice rather than having it made for it.
+    // The model's voice, and reaching here means the question is about the user and memory did not
+    // answer it. Forcing a search on that was the other half of B-87: the web does not know where
+    // you work, so the present tense alone is not enough to be sure of anything. A score cannot
+    // tell a confident hit from a current one either, so the turn is offered the choice.
     Reach::Offer
+}
+
+/// The message reduced to its words, lowercased, space separated and padded at both ends.
+///
+/// **Every phrase list in this module is matched against this rather than against the raw message.**
+/// A plain substring found "now " inside "what do you know about me", so a question about what Loki
+/// remembers read as a question about the present and spent eleven seconds on the web before
+/// answering it from memory anyway (B-87). The lists are short and English, and every one of them
+/// meant whole words all along.
+fn words(message: &str) -> String {
+    let mut said = String::with_capacity(message.len() + 2);
+    said.push(' ');
+    for c in message.chars() {
+        if c.is_alphanumeric() || c == '\'' {
+            said.extend(c.to_lowercase());
+        } else if !said.ends_with(' ') {
+            said.push(' ');
+        }
+    }
+    if !said.ends_with(' ') {
+        said.push(' ');
+    }
+    said
+}
+
+/// Whether `phrase` appears in `said` as whole words. `said` comes from [`words`].
+fn says(said: &str, phrase: &str) -> bool {
+    said.match_indices(phrase).any(|(at, hit)| {
+        let before = at == 0 || said.as_bytes()[at - 1] == b' ';
+        let after = said
+            .as_bytes()
+            .get(at + hit.len())
+            .is_none_or(|b| *b == b' ');
+        before && after
+    })
+}
+
+/// Whether `stem` appears in `said`, allowing the endings English puts on the end of a word.
+///
+/// "searching the web" is the same instruction as "search the web", and "prices" is the same
+/// question as "price". A list that has to spell out every ending is a list that will be missing
+/// one, which is the failure the whole-word rule was brought in to stop repeating.
+fn does(said: &str, stem: &str) -> bool {
+    ["", "s", "es", "ed", "ing"]
+        .iter()
+        .any(|ending| says(said, &format!("{stem}{ending}")))
 }
 
 /// Whether the message is an instruction to go and look, rather than a question that might need it.
@@ -97,10 +139,11 @@ pub fn decide(message: &str, situation: Situation) -> Reach {
 /// A false positive here costs a search, never a wrong answer, which is why the rule leans towards
 /// catching too much.
 fn asks_for_the_web(message: &str) -> bool {
-    let lowered = message.to_lowercase();
+    let said = words(message);
 
-    // Instructions that mean it without naming anywhere to look.
-    const OUTRIGHT: [&str; 14] = [
+    // Instructions that mean it without naming anywhere to look. "fact-check" is not listed
+    // separately because a hyphen is a word break by the time this reads it.
+    const OUTRIGHT: [&str; 13] = [
         "google it",
         "google that",
         "google this",
@@ -109,14 +152,13 @@ fn asks_for_the_web(message: &str) -> bool {
         "look that up",
         "search for",
         "fact check",
-        "fact-check",
         "cite sources",
         "cite your sources",
         "with sources",
         "with citations",
         "proper citations",
     ];
-    if OUTRIGHT.iter().any(|phrase| lowered.contains(phrase)) {
+    if OUTRIGHT.iter().any(|phrase| says(&said, phrase)) {
         return true;
     }
 
@@ -127,13 +169,13 @@ fn asks_for_the_web(message: &str) -> bool {
     ];
     const OUT_THERE: [&str; 6] = ["web", "online", "internet", "the net", "google", "browser"];
 
-    LOOKING.iter().any(|verb| lowered.contains(verb))
-        && OUT_THERE.iter().any(|place| lowered.contains(place))
+    LOOKING.iter().any(|verb| does(&said, verb)) && OUT_THERE.iter().any(|place| says(&said, place))
 }
 
 /// Things whose answers do not move.
 fn is_stable(message: &str) -> bool {
     let lowered = message.to_lowercase();
+    let said = words(message);
     // Arithmetic, and questions about language rather than about the world.
     let settled = [
         "what does this code",
@@ -146,7 +188,7 @@ fn is_stable(message: &str) -> bool {
         "summarise",
         "summarize",
     ];
-    if settled.iter().any(|phrase| lowered.contains(phrase)) {
+    if settled.iter().any(|phrase| does(&said, phrase)) {
         return true;
     }
     // A sum is not a search. The lead-in comes off first: nobody types a bare expression, they
@@ -177,12 +219,10 @@ fn is_stable(message: &str) -> bool {
 /// §12.6 opens by naming: an assistant that searches for something you told it last week reads as
 /// not knowing you.
 fn about_the_user(message: &str) -> bool {
-    let lowered = format!(" {} ", message.to_lowercase());
-    [
-        " my ", " i ", " me ", " mine ", " our ", " we ", " i'm ", " im ",
-    ]
-    .iter()
-    .any(|word| lowered.contains(word))
+    let said = words(message);
+    ["my", "i", "me", "mine", "our", "we", "i'm", "im"]
+        .iter()
+        .any(|word| says(&said, word))
 }
 
 /// Whether the answer depends on the present.
@@ -192,6 +232,7 @@ fn about_the_user(message: &str) -> bool {
 /// whether the answer would be different today, which is answerable from the words.
 fn depends_on_now(message: &str) -> bool {
     let lowered = message.to_lowercase();
+    let said = words(message);
     let present = [
         "latest",
         "current",
@@ -212,10 +253,10 @@ fn depends_on_now(message: &str) -> bool {
         "release date",
         "version",
         "who won",
-        "still ",
-        "now ",
+        "still",
+        "now",
     ];
-    if present.iter().any(|phrase| lowered.contains(phrase)) {
+    if present.iter().any(|phrase| does(&said, phrase)) {
         return true;
     }
     // A question about the past is memory's, not the web's, even when it names a year.
@@ -233,10 +274,8 @@ mod tests {
         // Even a memory that would have answered: an instruction is not a question about the past.
         let known = Situation { recall: Some(0.99) };
         assert_eq!(decide("search the web for rust 1.98", known), Reach::Yes);
-        assert_eq!(decide("look it up", known), Reach::Yes);
-        // The override now travels in the message, which is the only place it ever came from.
         assert_eq!(
-            decide("look it up", Situation { recall: Some(0.99) }),
+            decide("look it up", known),
             Reach::Yes,
             "being told to look outranks a memory that would have answered"
         );
@@ -341,6 +380,52 @@ mod tests {
             decide("how does tls fingerprinting work", NOTHING),
             Reach::Offer
         );
+    }
+
+    /// B-87, and the reason every list in this module now matches whole words.
+    ///
+    /// "know about me" contains "now ", so a question about what Loki remembers was read as a
+    /// question about the present and spent eleven seconds on the web before answering it from
+    /// memory anyway. A substring is not a word, and every list here meant words.
+    #[test]
+    fn a_word_that_merely_contains_a_present_word_is_not_about_the_present() {
+        let vague = Situation { recall: Some(0.3) };
+        for question in [
+            "what do you know about me",
+            "do you know about my sister",
+            "what is your knowledge of rust",
+        ] {
+            assert_ne!(decide(question, vague), Reach::Yes, "{question}");
+        }
+    }
+
+    /// The same rule on the other lists, where a substring forced a search rather than blocked one.
+    #[test]
+    fn a_word_hidden_inside_another_word_is_not_an_instruction_to_look() {
+        for message in [
+            // "refer" inside "preference", and a place standing beside it.
+            "my preference is the online one",
+            // "the net" inside "the netflix", with a verb of looking in front of it.
+            "find the netflix password in my notes",
+        ] {
+            assert_ne!(decide(message, NOTHING), Reach::Yes, "{message}");
+        }
+    }
+
+    /// Whole words, not whole spellings. A stem list that has to name every ending will miss one.
+    #[test]
+    fn the_endings_english_puts_on_a_word_still_land() {
+        assert_eq!(decide("searching the web for this", NOTHING), Reach::Yes);
+        assert_eq!(decide("what are the current prices", NOTHING), Reach::Yes);
+    }
+
+    /// The present tense is not enough to be sure when the question is about the user.
+    ///
+    /// Memory did not answer and the web cannot: the host has run out of things it knows, which is
+    /// what Offer means. Forcing a search here was the second half of B-87.
+    #[test]
+    fn a_present_tense_question_about_the_user_is_offered_not_forced() {
+        assert_eq!(decide("what is my current mood", NOTHING), Reach::Offer);
     }
 
     /// A question about the past belongs to memory even when it names a year.

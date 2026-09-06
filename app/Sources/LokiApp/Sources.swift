@@ -179,7 +179,9 @@ struct InlineCitation: View {
             .popover(isPresented: $hovering, arrowEdge: .bottom) {
                 SourcePreview(source: lead)
             }
-            .help(lead.title)
+            // No `.help` here. The same hover opens the preview, which already carries the title,
+            // so the tooltip arrived on top of it saying the same words twice. The text a screen
+            // reader needs is on the label below, which is where it belongs anyway.
             .accessibilityLabel("Source: \(lead.host). \(lead.title)")
         }
     }

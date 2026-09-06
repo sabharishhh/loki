@@ -796,8 +796,13 @@ mod living_together {
         );
     }
 
-    /// Both rails at once, on the turn where the host decides for itself. Neither subsystem gets
-    /// to blank the other's output.
+    /// Both rails at once. Neither subsystem gets to blank the other's output.
+    ///
+    /// **This asked "what do you know about my computer science degree" and passed for the wrong
+    /// reason.** "know about" contains "now ", so the present-tense check fired on a substring and
+    /// sent a question about the user to the web (B-87). With that fixed the question is memory's
+    /// alone, which it always should have been, so the turn is put on both rails by asking outright
+    /// rather than by accident.
     #[tokio::test]
     async fn one_turn_can_fill_both_rails() {
         let engine = FakeEngine::returning(&[(
@@ -807,7 +812,7 @@ mod living_together {
         )]);
         let mut app = Fixture::with_web("both-rails", &["Here is what I found [1]."], engine).await;
 
-        app.ask("what all do you know about my computer science degree")
+        app.ask("check the web for what my computer science degree covers")
             .await;
 
         assert!(

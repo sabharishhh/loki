@@ -63,15 +63,25 @@ impl Found {
         }
         let mut out = String::from(
             "# From the web\n\nCite a source by its number, like [1]. \
-             Every factual sentence needs one. If a claim has no source here, say so.\n\n",
+             Every factual sentence needs one. Some entries below are titles a search returned and \
+             were never opened: they are marked, they are not evidence, and citing one is worse \
+             than citing nothing. If a claim has no source here, say so.\n\n",
         );
         for (at, source) in self.sources.iter().enumerate() {
+            // **The numbering runs over every source, opened or not.** The interface lists the same
+            // sources in the same order, so skipping one here would shift every marker after it and
+            // point the reader's clicks at the wrong page.
+            let body = source.text.trim();
+            let shown = if body.is_empty() {
+                "not opened, nothing read from this page".to_owned()
+            } else {
+                attempt::clip(body)
+            };
             out.push_str(&format!(
-                "[{}] {} ({})\n{}\n\n",
+                "[{}] {} ({})\n{shown}\n\n",
                 at + 1,
                 source.title,
                 source.url,
-                attempt::clip(&source.text)
             ));
         }
         if !self.complete {
@@ -351,7 +361,7 @@ fn body_of(record: &str) -> &str {
 /// record it (§12.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gathered {
-    /// Every subject the question named appears in what has been read.
+    /// Every subject is covered, and more than one page said something about them.
     Answered,
     /// Something the question asked about is still missing.
     Wanting,
@@ -364,6 +374,13 @@ enum Gathered {
 /// covered by one page and a comparison of three keeps going until all three are there. Nothing
 /// classifies the question's complexity; the complexity is read off its structure, which is the
 /// same move the compiler makes deriving a lifetime from the code rather than asking for it.
+///
+/// **One page is never the answer, and that is not a counter (B-88).** The subjects are the words
+/// the engine matched on, so every result it returns contains them by construction and a check
+/// built on them alone cannot fail: CoinMarketCap's evergreen article says "bitcoin" and "price" on
+/// every line and carries no price, and the loop stopped on it. Corroboration is the missing half.
+/// A second page that also speaks to the subjects is what makes the first one evidence rather than
+/// a hit.
 ///
 /// Lexical and local, because a model call per page is the cost this exists to avoid.
 fn gathered(question: &str, read: &[String]) -> Gathered {
@@ -396,6 +413,18 @@ fn gathered(question: &str, read: &[String]) -> Gathered {
         .filter(|word| !INSTRUCTIONS.contains(&word.as_str()))
         .collect();
     if wanted.is_empty() || read.is_empty() {
+        return Gathered::Wanting;
+    }
+    // A page counts towards corroboration when it says something about what was asked, not merely
+    // when the fetch returned bytes: two blocked pages are not two sources.
+    let speaking = read
+        .iter()
+        .filter(|record| {
+            let body = body_of(record).to_lowercase();
+            wanted.iter().any(|word| body.contains(word.as_str()))
+        })
+        .count();
+    if speaking < 2 {
         return Gathered::Wanting;
     }
     // **The page's text, never its title or its address.** A record opens with the url and the
@@ -668,16 +697,34 @@ mod sufficiency {
         );
     }
 
-    /// One subject, one page. This is the "who is the president of India" case, which cost six.
+    /// One subject, two pages. This is the "who is the president of India" case, which cost six.
+    ///
+    /// **The first version of this test asserted one page was enough, and it was wrong.** The rule
+    /// that satisfied it also satisfied a page with no answer on it (B-88), because a result the
+    /// engine returned contains the question's words either way. Two pages that both speak to the
+    /// subject is the cheapest thing that is actually evidence.
     #[test]
-    fn a_single_subject_is_covered_by_one_page() {
-        let read = vec![page(
+    fn a_single_subject_is_covered_once_a_second_page_agrees() {
+        let first = page(
             "https://presidentofindia.gov.in/",
             "The President of India",
             "Droupadi Murmu is the president of India.",
-        )];
+        );
         assert_eq!(
-            gathered("who is the president of india", &read),
+            gathered(
+                "who is the president of india",
+                std::slice::from_ref(&first)
+            ),
+            Gathered::Wanting
+        );
+
+        let second = page(
+            "https://en.wikipedia.org/wiki/President_of_India",
+            "President of India",
+            "The president of India is Droupadi Murmu, in office since 2022.",
+        );
+        assert_eq!(
+            gathered("who is the president of india", &[first, second]),
             Gathered::Answered
         );
     }
@@ -724,6 +771,49 @@ mod sufficiency {
     fn a_question_with_no_subject_does_not_stop_the_loop() {
         let read = vec![page("https://a.example", "Title", "Something was read.")];
         assert_eq!(gathered("what is it", &read), Gathered::Wanting);
+    }
+
+    /// B-88, taken from the log verbatim. This is the page Loki read and stopped on.
+    ///
+    /// It is CoinMarketCap's evergreen "what is Bitcoin" article, and it says "price" and "bitcoin"
+    /// on every line without carrying a price at all. The engine returned it *because* it says
+    /// those words, so the question's own words cannot be the test of whether it was answered.
+    #[test]
+    fn a_page_full_of_the_questions_words_is_not_an_answer() {
+        let read = vec![page(
+            "https://coinmarketcap.com/currencies/bitcoin/",
+            "Bitcoin price today, BTC to USD live price",
+            "Bitcoin price was $0 when first introduced, and most Bitcoins were obtained via \
+             mining. In July 2010, Bitcoin first started trading, with the Bitcoin price ranging \
+             from $0.0008 to $0.08 at that time. Mining Bitcoins can be very profitable for \
+             miners, depending on the current hash rate and the price of Bitcoin.",
+        )];
+        assert_eq!(
+            gathered("what is the price of bitcoin", &read),
+            Gathered::Wanting,
+            "one page echoing the question is not an answer to it"
+        );
+    }
+
+    /// A fetch that returned bytes is not a source. Two blocked pages are not corroboration.
+    #[test]
+    fn a_page_that_says_nothing_does_not_corroborate() {
+        let read = vec![
+            page(
+                "https://a.example",
+                "The President of India",
+                "Droupadi Murmu is the president of India.",
+            ),
+            page(
+                "https://b.example",
+                "Just a moment",
+                "Enable JavaScript to continue.",
+            ),
+        ];
+        assert_eq!(
+            gathered("who is the president of india", &read),
+            Gathered::Wanting
+        );
     }
 
     /// A page about something else does not count as covering the question.
