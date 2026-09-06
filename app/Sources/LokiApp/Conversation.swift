@@ -45,6 +45,10 @@ struct Scope: Identifiable {
     /// A turn cut short. The rail keeps a mark rather than vanishing, because what was kept and
     /// what was dropped is exactly what a user needs after an interrupt (§18.3).
     var interrupted = false
+    /// What a web search did, for the scopes that are one (§12.9). Kept apart from `steps` because
+    /// it reads differently: a search says which pages it opened and how they answered, and that
+    /// is a different shape from a tool call and its output.
+    var search: [SearchStep] = []
 }
 
 /// What the composer is doing.
@@ -421,6 +425,31 @@ final class Conversation {
     /// previous answer, where it read as something Loki had done for a question already answered,
     /// and on the first turn of a session it was dropped on the floor. Steps that arrive early
     /// wait for the scope that will hold them.
+    /// Adds a step to the turn's search scope, and marks the one before it finished.
+    ///
+    /// A search reports what it did after each piece is done, so the row that was live becomes the
+    /// row that is settled the moment the next one arrives.
+    private func appendSearchStep(_ step: SearchStep) {
+        let index = entries.indices.dropFirst(turnFloor).last {
+            if case let .scope(scope) = entries[$0] { return scope.kind == "search" }
+            return false
+        }
+        guard let index, case .scope(var scope) = entries[index] else { return }
+        for at in scope.search.indices { scope.search[at].done = true }
+        scope.search.append(step)
+        entries[index] = .scope(scope)
+    }
+
+    /// Which rung a `fetched` event came from, for the row that says a rung was not satisfied.
+    private func rungNumber(_ fields: [String: Any]) -> Int {
+        switch fields["rung"] as? String {
+        case "direct": 1
+        case "rendered": 2
+        case "interactive": 3
+        default: 1
+        }
+    }
+
     private func appendStep(_ step: Step) {
         let index = entries.indices.dropFirst(turnFloor).last {
             if case .scope = entries[$0] { return true }
@@ -479,6 +508,25 @@ final class Conversation {
                 scope.state = .idle
                 scope.elapsed = fields["ms"] as? UInt64
             }
+
+        // §12.9's ladder, as the reader sees it happening. Without these the search scope opens,
+        // sits for several seconds with nothing in it, and closes.
+        case "searched":
+            guard let query = fields["query"] as? String else { return }
+            appendSearchStep(SearchStep(kind: .searching(query: query)))
+
+        case "fetched":
+            guard let url = fields["url"] as? String else { return }
+            let host = URL(string: url)?.host()?.replacingOccurrences(of: "www.", with: "") ?? url
+            let verdict = fields["verdict"] as? String ?? ""
+            // A page that was reached and not read is what the ladder climbed for, so it is worth
+            // a row of its own rather than being folded into the one above it.
+            appendSearchStep(
+                SearchStep(
+                    kind: verdict == "ok" ? .reading(host: host) : .rung(number: rungNumber(fields), verdict: verdict),
+                    done: true
+                )
+            )
 
         case "tool_called":
             guard let tool = fields["tool"] as? String else { return }

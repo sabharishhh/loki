@@ -324,6 +324,8 @@ mod tests {
             ("scope_opened", vec!["id", "parent", "kind"]),
             ("scope_closed", vec!["id", "ms"]),
             ("memory_recalled", vec!["claim_ids", "lane"]),
+            ("searched", vec!["query"]),
+            ("fetched", vec!["url", "rung", "verdict"]),
             ("tool_called", vec!["tool", "tier", "args"]),
             ("tool_returned", vec!["tool"]),
             ("blocked", vec!["reason"]),

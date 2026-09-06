@@ -11,9 +11,21 @@ import SwiftUI
 /// string is the cheapest possible way to say so.
 struct MarkdownText: View, Equatable {
     let text: String
+    /// What the turn cited, so a `[1]` becomes the site it names (§12.7). Empty on any answer that
+    /// did not search, which is most of them.
+    var sources: [Source] = []
+    /// Opening a citation is the same gesture as opening the source list, so the caller decides
+    /// what that means rather than this view reaching for a window.
+    var onOpenSource: ((Source) -> Void)?
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        // The closure is deliberately not compared: it is the same handler for the life of the
+        // row, and comparing it is not possible anyway. Text and sources are what change.
+        lhs.text == rhs.text && lhs.sources == rhs.sources
+    }
 
     var body: some View {
-        Blocks(blocks: Markdown.parse(text))
+        Blocks(blocks: Markdown.parse(text), sources: sources, onOpenSource: onOpenSource)
             .textSelection(.enabled)
     }
 }
@@ -21,6 +33,8 @@ struct MarkdownText: View, Equatable {
 /// A run of blocks. Recursive, because a list item can hold blocks of its own.
 private struct Blocks: View {
     let blocks: [Markdown.Block]
+    var sources: [Source] = []
+    var onOpenSource: ((Source) -> Void)?
 
     /// Position and kind together. A block that changes kind at the same position is a different
     /// view, which is what stops SwiftUI reusing one across the change.
@@ -35,7 +49,7 @@ private struct Blocks: View {
             // becomes a list the moment "- " arrives. Identity by position alone reuses the view
             // across that change and it can keep stale layout.
             ForEach(placed) { placed in
-                BlockView(block: placed.block)
+                BlockView(block: placed.block, sources: sources, onOpenSource: onOpenSource)
             }
         }
     }
@@ -48,6 +62,8 @@ private struct Placed: Identifiable {
 
 private struct BlockView: View {
     let block: Markdown.Block
+    var sources: [Source] = []
+    var onOpenSource: ((Source) -> Void)?
 
     var body: some View {
         switch block {
@@ -58,10 +74,12 @@ private struct BlockView: View {
                 .padding(.top, level <= 2 ? Theme.Space.s : 0)
 
         case let .paragraph(text):
-            Text(Markdown.inline(text, base: Theme.Text.record))
-                .lineSpacing(Theme.Text.recordLineSpacing)
-                .foregroundStyle(Theme.Colors.primary)
-                .fixedSize(horizontal: false, vertical: true)
+            Cited(text: text, sources: sources, onOpenSource: onOpenSource) { body in
+                Text(Markdown.inline(body, base: Theme.Text.record))
+                    .lineSpacing(Theme.Text.recordLineSpacing)
+                    .foregroundStyle(Theme.Colors.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
         case let .code(language, lines):
             CodeBlock(language: language, lines: lines)
@@ -69,7 +87,12 @@ private struct BlockView: View {
         case let .list(items, ordered, start):
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 ForEach(Array(items.enumerated()), id: \.offset) { at, item in
-                    ListRow(item: item, marker: ordered ? "\(start + at)." : "•")
+                    ListRow(
+                        item: item,
+                        marker: ordered ? "\(start + at)." : "•",
+                        sources: sources,
+                        onOpenSource: onOpenSource
+                    )
                 }
             }
 
@@ -94,9 +117,66 @@ private struct BlockView: View {
     }
 }
 
+/// Prose with the sources it cited, the markers taken out and chips put where they pointed.
+///
+/// **The chips follow the block rather than sitting inside the sentence.** A citation inside a
+/// paragraph would have to flow with the text, which means breaking the paragraph into words and
+/// laying them out by hand: many views per answer, on the path that already starved the main actor
+/// once (B-68). Trailing them costs one row and reads the same, because a model puts its markers at
+/// the end of a claim.
+private struct Cited<Body: View>: View {
+    let text: String
+    let sources: [Source]
+    var onOpenSource: ((Source) -> Void)?
+    @ViewBuilder let content: (String) -> Body
+
+    var body: some View {
+        let split = Citations.split(text, available: sources.count)
+        let cited = split.cited.compactMap { number in
+            sources.indices.contains(number - 1) ? sources[number - 1] : nil
+        }
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            content(split.text)
+            if !cited.isEmpty {
+                CitationRow(sources: cited, onOpen: onOpenSource)
+            }
+        }
+    }
+}
+
+/// The chips for one block, wrapping when there are more than a line's worth.
+private struct CitationRow: View {
+    let sources: [Source]
+    var onOpen: ((Source) -> Void)?
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs) {
+            // One chip per site, not per source: three pages from Reuters is one citation that
+            // says Reuters, which is what the reader is deciding about.
+            ForEach(bySite, id: \.0) { _, group in
+                InlineCitation(sources: group) { source in onOpen?(source) }
+            }
+            Spacer(minLength: 0)
+        }
+        .transition(.opacity.combined(with: .offset(y: -2)))
+    }
+
+    private var bySite: [(String, [Source])] {
+        var order: [String] = []
+        var grouped: [String: [Source]] = [:]
+        for source in sources {
+            if grouped[source.host] == nil { order.append(source.host) }
+            grouped[source.host, default: []].append(source)
+        }
+        return order.map { ($0, grouped[$0] ?? []) }
+    }
+}
+
 private struct ListRow: View {
     let item: Markdown.Item
     let marker: String
+    var sources: [Source] = []
+    var onOpenSource: ((Source) -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
@@ -115,13 +195,15 @@ private struct ListRow: View {
             .frame(minWidth: 18, alignment: .trailing)
 
             VStack(alignment: .leading, spacing: Theme.Space.s) {
-                Text(Markdown.inline(item.text, base: Theme.Text.record))
-                    .lineSpacing(Theme.Text.recordLineSpacing)
-                    .foregroundStyle(Theme.Colors.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Cited(text: item.text, sources: sources, onOpenSource: onOpenSource) { body in
+                    Text(Markdown.inline(body, base: Theme.Text.record))
+                        .lineSpacing(Theme.Text.recordLineSpacing)
+                        .foregroundStyle(Theme.Colors.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if !item.children.isEmpty {
-                    Blocks(blocks: item.children)
+                    Blocks(blocks: item.children, sources: sources, onOpenSource: onOpenSource)
                 }
             }
         }

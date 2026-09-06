@@ -76,8 +76,20 @@ struct ThreadView: View {
                             )
                             .id(turn.id)
                         case .scope(let scope):
-                            ThinkingTrace(scope: scope, live: conversation.isLive(scope))
+                            // A search reads differently from thinking: it names pages and says
+                            // how each answered, so it gets the surface built for that rather
+                            // than a list of steps (§12.9).
+                            if scope.kind == "search" {
+                                SearchTrace(
+                                    steps: scope.search,
+                                    live: conversation.isLive(scope),
+                                    elapsed: .milliseconds(scope.elapsed ?? 0)
+                                )
                                 .id(scope.id)
+                            } else {
+                                ThinkingTrace(scope: scope, live: conversation.isLive(scope))
+                                    .id(scope.id)
+                            }
                         }
                     }
 

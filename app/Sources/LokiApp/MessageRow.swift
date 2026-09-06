@@ -88,8 +88,12 @@ struct MessageRow: View {
                 }
         } else {
             VStack(alignment: .leading, spacing: Theme.Space.m) {
-                MarkdownText(text: turn.text)
-                    .equatable()
+                MarkdownText(
+                    text: turn.text,
+                    sources: turn.sources,
+                    onOpenSource: { onShowSources?([$0]) }
+                )
+                .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Under the answer rather than inside it. An inline citation says where one claim
