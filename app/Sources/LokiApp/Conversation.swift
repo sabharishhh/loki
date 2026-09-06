@@ -532,6 +532,7 @@ final class Conversation {
             // Event-driven, not polled. Principle 8 forbids a timer for this.
             refreshSpend()
             refreshRecalled()
+            attachSources()
             if captureWhenDone {
                 captureWhenDone = false
                 Task { await capture() }
@@ -558,6 +559,22 @@ final class Conversation {
     private func refreshRecalled() {
         let found = core?.recalled ?? []
         withAnimation(Theme.Motion.control) { recalled = found }
+    }
+
+    /// Puts the turn's sources on the answer that used them (§12.7).
+    ///
+    /// Read after the turn, like the recall rail, because what an answer rested on is only settled
+    /// once it has been written. Attached to the last assistant turn rather than held beside the
+    /// thread, so scrolling back to an old answer still shows what that one cited.
+    private func attachSources() {
+        let sources = (core?.cited ?? []).map(Source.init)
+        guard !sources.isEmpty else { return }
+        guard let index = entries.lastIndex(where: {
+            if case .turn(let turn) = $0 { return turn.speaker == .assistant }
+            return false
+        }), case .turn(var turn) = entries[index] else { return }
+        turn.sources = sources
+        withAnimation(Theme.Motion.arrive) { entries[index] = .turn(turn) }
     }
 
     /// Marks the cut, so the thread shows where the turn stopped rather than just stopping.

@@ -1,3 +1,4 @@
+import LokiCore
 import SwiftUI
 
 /// A page an answer was built from (§12.7).
@@ -33,6 +34,24 @@ struct Source: Identifiable, Hashable {
     /// The letter a fallback mark carries. First letter of the registrable name, not of `www`.
     var initial: String {
         host.first.map { String($0).uppercased() } ?? "?"
+    }
+}
+
+extension Source {
+    /// From what crossed the bridge.
+    ///
+    /// The fetch time is the moment it arrived rather than a field, because the core does not carry
+    /// one yet: the episode holds when a URL was fetched and the rail is showing this turn's
+    /// sources, so "just now" is true and a stored timestamp would be the first thing to go stale.
+    init(_ cited: CitedSource) {
+        self.init(
+            id: cited.id,
+            url: cited.url,
+            title: cited.title.isEmpty ? cited.url : cited.title,
+            excerpt: cited.excerpt,
+            icon: cited.iconData,
+            fetched: .now
+        )
     }
 }
 

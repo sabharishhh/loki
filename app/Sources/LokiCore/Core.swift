@@ -155,6 +155,14 @@ public final class Core: Sendable {
         decode(loki_recalled(handle)) ?? []
     }
 
+    /// What the last turn cited (§12.7).
+    ///
+    /// Read after the turn rather than during it, like `recalled`, because the rail's question is
+    /// what the answer was built from and that is only settled once it has been.
+    public var cited: [CitedSource] {
+        decode(loki_cited(handle)) ?? []
+    }
+
     /// The memory timeline, newest first.
     public func timeline(limit: Int = 200) -> [String] {
         decode(loki_timeline(handle, UInt32(limit))) ?? []
@@ -383,6 +391,26 @@ public struct Alternative: Decodable, Sendable, Equatable, Identifiable {
 }
 
 /// One claim pre-fetch surfaced for a turn.
+/// One page an answer rested on.
+///
+/// The icon arrives as base64 rather than a path. The interface has no business reading the
+/// evidence store, and a path it could read would be a second way in.
+public struct CitedSource: Decodable, Sendable, Identifiable, Equatable {
+    public let id: Int
+    public let url: String
+    public let title: String
+    public let excerpt: String
+    /// Base64 of the site's own icon, absent when it offered none or it could not be fetched.
+    public let icon: String?
+    /// Whether the page was read, or the engine's summary sufficed.
+    public let read: Bool
+
+    /// The icon's bytes, or nil. Decoded once at the boundary so no view has to know it was text.
+    public var iconData: Data? {
+        icon.flatMap { Data(base64Encoded: $0) }
+    }
+}
+
 public struct RecalledClaim: Decodable, Sendable, Identifiable, Equatable {
     public let path: String
     public let name: String
