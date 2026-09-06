@@ -15,11 +15,12 @@ use tokio_util::sync::CancellationToken;
 use super::budget::{Budget, Verdict};
 use super::checkpoint::Checkpoint;
 use super::event::Event;
-use super::ids::{ClaimId, ConceptId, IdGen, QueryHash, TaskId};
+use super::ids::{ClaimId, ConceptId, ContentHash, IdGen, QueryHash, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::temporal;
-use super::vocab::{BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
+use super::trigger;
+use super::vocab::{self, BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory, Speaker};
 use crate::memory::runtime;
 use crate::ports::clock::Clock;
@@ -77,6 +78,19 @@ SEARCH: <what to look for>
 You will be given the results and asked again. Do not explain, do not apologise, and do not answer \
 partially first. If the above does answer it, ignore this and reply normally.";
 
+/// The same offer, for the web (§12.6's last row).
+///
+/// A separate marker from memory's, because the two searches cost different things and reach
+/// different places, and a model that could not say which it wanted would have the host guessing.
+const ASK_TO_SEARCH_WEB: &str = "\
+If answering this needs something current, or something you would only know by looking, reply with \
+exactly one line and nothing else:
+
+WEB: <what to look for>
+
+You will be given what was found, with numbered sources, and asked again. If you can answer without \
+it, ignore this and reply normally.";
+
 /// Reads a search request out of a reply, or `None` if it is an ordinary answer.
 ///
 /// The marker has to open the reply. A model that answers and then mentions searching has already
@@ -120,6 +134,9 @@ pub struct Loop {
     session_started: Timestamp,
     /// The last day the user said anything before this session, for the third line.
     last_spoke: Option<Date>,
+    /// The web, when it is configured. `None` is a working assistant that cannot reach it, which
+    /// is what every test that is not about search wants, and what a build with no engine has.
+    web: Option<Arc<crate::core::websearch::Search>>,
 }
 
 impl Loop {
@@ -151,7 +168,16 @@ impl Loop {
             session_started,
             clock,
             last_spoke: None,
+            web: None,
         }
+    }
+
+    /// Gives the loop the web (§12).
+    ///
+    /// Same shape as `attach_memory` and for the same reason: a build with no engine configured is
+    /// an assistant that cannot search, not one that will not start.
+    pub fn attach_web(&mut self, web: Arc<crate::core::websearch::Search>) {
+        self.web = Some(web);
     }
 
     /// The clock this loop reads. Principle 9: callers resolve time, the model never does.
@@ -323,11 +349,14 @@ impl Loop {
         // Whether the model may ask for a deeper search on this turn. Set below, once lane 1 has
         // run and the floor has had its chance.
         let mut armed = false;
+        // Read inside the memory block and used after it, because §12.6's first row is "memory
+        // already answered" and the trigger cannot ask that question without the score.
+        let mut best: Option<f32> = None;
 
         if let Some(memory) = self.memory.clone() {
             memory.record(Speaker::User, &message).await?;
             let recalled = memory.recall(&message, self.window_keeps, today)?;
-            let best = recalled.first().map(|hit| hit.score.value());
+            best = recalled.first().map(|hit| hit.score.value());
             let texts: Vec<String> = recalled.iter().map(|hit| hit.text.clone()).collect();
             if recalled.is_empty() {
                 self.turn.set_recall("");
@@ -377,7 +406,31 @@ impl Loop {
             }
         }
 
-        self.turn.set_offer(if armed { ASK_TO_SEARCH } else { "" });
+        // §12.6, read after memory because memory is free by this point and its answer outranks a
+        // search. The trigger never sees the model: it reads the question and lane 1's score.
+        if let Some(web) = self.web.clone() {
+            let reach = trigger::decide(
+                &message,
+                trigger::Situation {
+                    recall: best,
+                    asked: false,
+                },
+            );
+            match reach {
+                trigger::Reach::Yes => {
+                    self.search_the_web(task, &web, &message, cancel.clone())
+                        .await
+                }
+                // The host is not sure, so it does not decide. The model is told it may ask, in
+                // the same slot and the same shape memory search uses (§10.8).
+                trigger::Reach::Offer => self.turn.set_offer(ASK_TO_SEARCH_WEB),
+                trigger::Reach::No => {}
+            }
+        }
+
+        if armed {
+            self.turn.set_offer(ASK_TO_SEARCH);
+        }
 
         self.turn.push(Message::user(message.clone()));
 
@@ -532,6 +585,64 @@ impl Loop {
                     },
                 });
                 self.turn.set_search(runtime::Found::failed().brief());
+            }
+        }
+    }
+
+    /// Runs one web search and puts what it found into the turn (§12.7).
+    ///
+    /// Never fails the turn. A search that cannot run leaves the answer where it would have been
+    /// without one, and losing the answer as well would make the failure twice as expensive. The
+    /// same rule `escalate` follows for memory, for the same reason.
+    async fn search_the_web(
+        &mut self,
+        task: TaskId,
+        web: &crate::core::websearch::Search,
+        question: &str,
+        cancel: CancellationToken,
+    ) {
+        match web.run(question, cancel).await {
+            Ok(found) => {
+                self.events.emit(&Event::Searched {
+                    task,
+                    query: question.to_owned(),
+                    provider: web.discover.id().to_owned(),
+                    hits: u32::try_from(found.sources.len()).unwrap_or(u32::MAX),
+                    cost: vocab::CostModel::Free,
+                });
+                for source in &found.sources {
+                    // One event per source, whether it was read or came from a summary: §12.9's
+                    // ledger counts what answered, and a snippet that answered is a rung that did
+                    // not have to run.
+                    self.events.emit(&Event::Fetched {
+                        task,
+                        url: source.url.clone(),
+                        // Empty until S2 content-addresses what was fetched. Stated rather than
+                        // faked: a hash invented here would be a hash of nothing, and §12.7's
+                        // point is that the cached page can be checked against it.
+                        hash: ContentHash::new(""),
+                        rung: vocab::Rung::Direct,
+                        verdict: if source.read {
+                            vocab::Verdict::Ok
+                        } else {
+                            vocab::Verdict::JsRequired
+                        },
+                        cost: vocab::CostModel::Free,
+                    });
+                }
+                self.turn.set_web(found.brief());
+            }
+            // §12.4: an unreadable web is reported, never returned as an empty one. The model is
+            // told, so it can say so rather than answering as though nothing was out there.
+            Err(why) => {
+                self.events.emit(&Event::Blocked {
+                    reason: BlockReason::ProviderFailed {
+                        provider: web.discover.id().to_owned(),
+                        detail: why.to_string(),
+                    },
+                });
+                self.turn
+                    .set_web("The web could not be reached this turn. Say so rather than answering as though it had been.");
             }
         }
     }

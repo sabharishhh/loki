@@ -9,7 +9,7 @@ use super::ids::{ActionId, ClaimId, ConceptId, ContentHash, QueryHash, ScopeId, 
 use super::payload::{Args, PartialOutput, ToolOutput};
 use super::vocab::{
     ActionKind, BlockReason, CallPath, Cents, CostModel, Lane, Locality, ModelRole, Rung,
-    ScopeKind, TaskStatus, Tier, WriteOp,
+    ScopeKind, TaskStatus, Tier, Verdict, WriteOp,
 };
 use crate::ports::egress::{DenyReason, EgressMode};
 
@@ -59,9 +59,15 @@ pub enum Event {
         task: TaskId,
         url: String,
         hash: ContentHash,
-        /// Which step of §12.2's ladder answered. §21.5 scores the distribution, and nothing
-        /// emits this until Phase 5: adding the field later is a Ring 1 change made twice.
+        /// Which step of §12.2's ladder answered. §21.5 scores the distribution.
         rung: Rung,
+        /// Why that rung was or was not satisfied (§12.2).
+        ///
+        /// The half that makes the rung count actionable. Rung 2 usage rising because of
+        /// `JsRequired` means the web got more dynamic; the same number rising because of `Blocked`
+        /// means this address is being scored differently, which is a different problem with a
+        /// different fix, and a rung count alone cannot tell them apart.
+        verdict: Verdict,
         cost: CostModel,
     },
     ActionJournaled {
@@ -243,6 +249,7 @@ mod tests {
             },
             Event::Fetched {
                 rung: Rung::Direct,
+                verdict: Verdict::Ok,
                 task: TaskId::new(0),
                 url: "https://example.com".into(),
                 hash: ContentHash::new("deadbeef"),

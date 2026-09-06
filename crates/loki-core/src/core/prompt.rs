@@ -137,6 +137,7 @@ pub struct Turn {
     /// What lane 2 came back with, when it ran (§10.8). Separate from `recall` because it answers
     /// the message rather than preceding it, and because it is set on a different trigger.
     search: String,
+    web: String,
     /// The standing offer of a deeper search, on a turn where the model may ask for one (D-062).
     /// Its own field rather than a suffix on `recall`, so it can be withdrawn for the retry
     /// without rebuilding what recall found.
@@ -154,6 +155,7 @@ impl Turn {
             recalled: Vec::new(),
             recall: String::new(),
             search: String::new(),
+            web: String::new(),
             offer: String::new(),
             frame: String::new(),
             history: Vec::new(),
@@ -219,6 +221,17 @@ impl Turn {
         &self.search
     }
 
+    /// What the web returned (§12.7). Its own slot rather than sharing lane 2's, because a turn
+    /// can need both and whichever wrote second would silently drop the other's evidence.
+    pub fn set_web(&mut self, text: impl Into<String>) {
+        self.web = text.into();
+    }
+
+    #[must_use]
+    pub fn web(&self) -> &str {
+        &self.web
+    }
+
     #[must_use]
     pub fn history(&self) -> &[Message] {
         &self.history
@@ -273,6 +286,9 @@ pub fn build(prefix: &Prefix, turn: &Turn, role: ModelRole, max_tokens: u32) -> 
     messages.extend_from_slice(turn.history());
     // After the message, because it answers it. Before the message it would read as something
     // known in advance, which is the one thing a deliberate search is not.
+    if !turn.web().is_empty() {
+        messages.push(Message::user(turn.web().to_owned()));
+    }
     if !turn.search().is_empty() {
         messages.push(Message::user(turn.search().to_owned()));
     }
