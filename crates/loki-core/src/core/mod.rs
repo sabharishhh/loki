@@ -27,6 +27,7 @@
 pub mod attempt;
 pub mod budget;
 pub mod checkpoint;
+pub mod citations;
 pub mod cycle;
 pub mod event;
 pub mod ids;
