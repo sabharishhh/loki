@@ -34,6 +34,7 @@ pub mod ids;
 pub mod ledger;
 pub mod payload;
 pub mod prompt;
+pub mod query;
 pub mod render;
 pub mod sink;
 pub mod temporal;

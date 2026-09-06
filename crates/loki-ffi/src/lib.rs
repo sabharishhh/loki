@@ -257,7 +257,7 @@ pub unsafe extern "C" fn loki_core_new(
     // §12.6's trigger cannot fire on a loop with no engine attached, and a loop with no engine
     // answers a question about today from what the model happens to remember. Built here because
     // this is the only place that holds the exit, the clock and the evidence store at once.
-    if let Some(browsing) = open_the_browser(&runtime, &http, &gate) {
+    if let Some(browsing) = open_the_browser(&http, &gate) {
         core.attach_web(Arc::new(loki_core::core::websearch::Search {
             // §12.2's ladder, cheapest first. Rung 1 answers a search in about a second and
             // starts nothing; the browser is behind it for the engines that will not talk to an
@@ -1114,20 +1114,14 @@ async fn open_memory(events: Arc<dyn EventSink>) -> Option<Arc<Memory>> {
 /// Returns `None` when no Chromium-family browser is installed or the exit will not open. Search is
 /// then absent rather than broken, and the turn says so instead of answering from memory.
 fn open_the_browser(
-    runtime: &Runtime,
     http: &Arc<loki_core::adapters::egress::Http>,
     gate: &loki_core::adapters::politeness::Shared,
 ) -> Option<Arc<loki_core::adapters::browser::Browsing>> {
-    use loki_core::ports::egress::{Delegate, Policy};
-
     let profile = loki_core::paths::browser_profile().ok()?;
-    // Nothing blocked and one always-reachable target: the browser is driven to pages chosen by
-    // the search, so a per-page allowlist would be a list of everywhere.
-    let exit = runtime
-        .block_on(http.delegate(Policy::for_target("duckduckgo.com")))
-        .ok()?;
+    // The exit is opened by the browser when it launches, not here: binding a listener at startup
+    // for a search that may never happen is the opposite of §1's idle behaviour.
     loki_core::adapters::browser::Browsing::new(
-        Arc::new(exit),
+        Arc::clone(http) as Arc<dyn loki_core::ports::egress::Delegate>,
         profile,
         BROWSER_PORT,
         Arc::clone(gate),

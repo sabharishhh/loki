@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
-use crate::ports::egress::Delegated;
+use crate::ports::egress::{Delegate, Delegated};
 
 /// A Chromium-family browser on this machine.
 ///
@@ -1486,19 +1486,78 @@ pub struct Browsing {
     browser: Chromium,
     profile: PathBuf,
     port: u16,
-    exit: Arc<Delegated>,
+    /// The exit is opened with the browser and dropped with it, so an idle Loki holds no bound
+    /// socket either. Holding a live `Delegated` here would keep a listener up for a search nobody
+    /// asked for.
+    exit: Arc<dyn Delegate>,
     gate: super::politeness::Shared,
     want: page::Readiness,
-    /// `None` until the first page is asked for.
-    session: tokio::sync::Mutex<Option<Session>>,
+    /// `None` until the first page is asked for, and again once the reaper has been round.
+    warm: Arc<tokio::sync::Mutex<Option<Warm>>>,
     engine: Engine,
+    idle: Duration,
+}
+
+/// A running browser and when it was last wanted.
+struct Warm {
+    /// Held for its `Drop`, which kills the browser and releases the exit with it. Never read.
+    _session: Session,
+    used: std::time::Instant,
+}
+
+/// How long a browser stays up with nothing to do.
+///
+/// **The whole cost of this rung is that it is a process.** §1 asks for an idle Loki to cost
+/// almost nothing, and a browser held open for a question asked once is the opposite of that. Two
+/// and a half minutes keeps a follow-up instant and lets a session that is genuinely over end.
+const IDLE: Duration = Duration::from_secs(150);
+
+/// How long to wait before looking again, or `None` when it has been idle long enough to close.
+///
+/// Split out so the arithmetic is testable without a browser: the reaper itself needs a real
+/// process to watch, and the part that gets an off-by-one wrong is this.
+fn still_wanted(used: std::time::Instant, after: Duration) -> Option<Duration> {
+    let idle = used.elapsed();
+    (idle < after).then(|| after - idle)
+}
+
+/// Closes the browser once it has been idle, then stops.
+///
+/// **The task exits when it reaps, so an idle Loki runs no timer.** A ticker that lives for the
+/// life of the app to notice something that happens once is the shape this is avoiding.
+async fn reap(warm: Arc<tokio::sync::Mutex<Option<Warm>>>, after: Duration) {
+    loop {
+        let remaining = {
+            let held = warm.lock().await;
+            match held.as_ref() {
+                // Closed by something else, so there is nothing left to watch.
+                None => return,
+                Some(warm) => still_wanted(warm.used, after),
+            }
+        };
+        match remaining {
+            Some(remaining) => tokio::time::sleep(remaining).await,
+            None => {
+                let mut held = warm.lock().await;
+                // Checked again under the lock, because a render may have started while it was
+                // free and killing a browser mid-page is worse than keeping one too long.
+                if held
+                    .as_ref()
+                    .is_some_and(|warm| still_wanted(warm.used, after).is_none())
+                {
+                    *held = None;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl Browsing {
     /// # Errors
     /// Fails if no Chromium-family browser is installed.
     pub fn new(
-        exit: Arc<Delegated>,
+        exit: Arc<dyn Delegate>,
         profile: PathBuf,
         port: u16,
         gate: super::politeness::Shared,
@@ -1510,9 +1569,20 @@ impl Browsing {
             exit,
             gate,
             want: page::Readiness::default(),
-            session: tokio::sync::Mutex::new(None),
+            warm: Arc::new(tokio::sync::Mutex::new(None)),
             engine: Engine::DEFAULT,
+            idle: IDLE,
         })
+    }
+
+    /// How long the browser stays up with nothing to do.
+    ///
+    /// A knob rather than a constant so the reaper can be exercised against a real browser without
+    /// a test that waits two and a half minutes.
+    #[must_use]
+    pub const fn reaping_after(mut self, idle: Duration) -> Self {
+        self.idle = idle;
+        self
     }
 
     /// Points discovery at a different engine.
@@ -1535,20 +1605,25 @@ impl Browsing {
     async fn render(&self, url: &str) -> Result<page::Rendered, CdpError> {
         self.gate.wait_for(&super::politeness::host_of(url)).await;
 
-        let mut held = self.session.lock().await;
+        let mut held = self.warm.lock().await;
         if held.is_none() {
-            *held = Some(
-                Session::open(
-                    &self.browser,
-                    Arc::clone(&self.exit),
-                    &self.profile,
-                    self.port,
-                )
-                .map_err(|e| CdpError::Unreachable(e.to_string()))?,
-            );
+            // Opened with the browser rather than held for its lifetime, so nothing is bound while
+            // no search is running.
+            let exit = self
+                .exit
+                .delegate(crate::ports::egress::Policy::for_target(self.engine.host))
+                .await
+                .map_err(|e| CdpError::Unreachable(e.to_string()))?;
+            let session = Session::open(&self.browser, Arc::new(exit), &self.profile, self.port)
+                .map_err(|e| CdpError::Unreachable(e.to_string()))?;
             // The browser needs a moment between spawning and listening, and a connect that races
             // it fails for a reason that has nothing to do with the page.
             wait_until_listening(self.port).await?;
+            *held = Some(Warm {
+                _session: session,
+                used: std::time::Instant::now(),
+            });
+            tokio::spawn(reap(Arc::clone(&self.warm), self.idle));
         }
 
         let target = page_socket(self.port).await?;
@@ -1563,6 +1638,9 @@ impl Browsing {
             Err(CdpError::Unreachable(_) | CdpError::Transport(_))
         ) {
             *held = None;
+        } else if let Some(warm) = held.as_mut() {
+            // Stamped after the page, not before it: a slow read is still the browser being used.
+            warm.used = std::time::Instant::now();
         }
         rendered
     }
@@ -1934,6 +2012,43 @@ mod discovery {
         assert_eq!(
             Engine::BING.query_url("kerala news"),
             "https://www.bing.com/search?q=kerala+news"
+        );
+    }
+}
+
+#[cfg(test)]
+mod idling {
+    use super::*;
+
+    #[test]
+    fn a_browser_just_used_is_still_wanted() {
+        let left = still_wanted(std::time::Instant::now(), Duration::from_secs(150));
+        assert!(left.is_some_and(|left| left > Duration::from_secs(148)));
+    }
+
+    #[test]
+    fn a_browser_idle_past_the_timeout_is_not() {
+        let long_ago = std::time::Instant::now() - Duration::from_secs(200);
+        assert_eq!(still_wanted(long_ago, Duration::from_secs(150)), None);
+    }
+
+    /// The boundary, because this is where a reaper either spins on a zero sleep or never fires.
+    #[test]
+    fn exactly_at_the_timeout_is_closed_rather_than_waited_on() {
+        let exactly = std::time::Instant::now() - Duration::from_secs(150);
+        assert_eq!(still_wanted(exactly, Duration::from_secs(150)), None);
+    }
+
+    /// A render that lands mid-wait pushes the deadline out rather than being killed under it.
+    #[test]
+    fn using_it_again_buys_the_whole_window_back() {
+        let after = Duration::from_secs(150);
+        let nearly = std::time::Instant::now() - Duration::from_secs(149);
+        assert!(still_wanted(nearly, after).is_some_and(|left| left < Duration::from_secs(2)));
+
+        let used_again = std::time::Instant::now();
+        assert!(
+            still_wanted(used_again, after).is_some_and(|left| left > Duration::from_secs(148))
         );
     }
 }

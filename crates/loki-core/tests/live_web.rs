@@ -20,16 +20,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Loki's own browser, launched the way the app launches it.
 async fn browser() -> Arc<loki_core::adapters::browser::Browsing> {
-    use loki_core::ports::egress::{Delegate, Policy};
     let events = Arc::new(Broadcast::new());
-    let http = loki_core::adapters::egress::Http::new(events).expect("egress");
-    let delegated = http
-        .delegate(Policy::for_target("duckduckgo.com"))
-        .await
-        .expect("exit");
+    let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
     Arc::new(
         loki_core::adapters::browser::Browsing::new(
-            Arc::new(delegated),
+            Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
             std::env::temp_dir().join("loki-live-web-profile"),
             9334,
             Arc::new(Politeness::default()),
@@ -233,15 +228,10 @@ async fn rung_one_discovery_with_a_cookie_jar() {
 #[ignore = "needs the network"]
 async fn which_engines_a_browser_can_read() {
     use loki_core::adapters::browser::Engine;
-    use loki_core::ports::egress::{Delegate, Policy};
     use loki_core::ports::search::Discover;
 
     let events = Arc::new(Broadcast::new());
-    let http = loki_core::adapters::egress::Http::new(events).expect("egress");
-    let delegated = http
-        .delegate(Policy::for_target("example.com"))
-        .await
-        .expect("exit");
+    let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
 
     for engine in [
         Engine::BING,
@@ -252,11 +242,7 @@ async fn which_engines_a_browser_can_read() {
         Engine::DUCKDUCKGO,
     ] {
         let browsing = loki_core::adapters::browser::Browsing::new(
-            Arc::new(
-                http.delegate(Policy::for_target(engine.host))
-                    .await
-                    .expect("exit"),
-            ),
+            Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
             std::env::temp_dir().join("loki-probe-profile"),
             9336,
             Arc::new(Politeness::default()),
@@ -284,31 +270,19 @@ async fn which_engines_a_browser_can_read() {
             ),
         }
     }
-    let _ = delegated;
 }
 
 /// Where a browser search actually spends its time, step by step.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the network"]
 async fn where_the_browser_search_spends_its_time() {
-    use loki_core::ports::egress::{Delegate, Policy};
     let mark = std::time::Instant::now();
     let events = Arc::new(Broadcast::new());
-    let http = loki_core::adapters::egress::Http::new(events).expect("egress");
+    let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
     eprintln!("[{:>6}ms] egress up", mark.elapsed().as_millis());
 
-    let delegated = http
-        .delegate(Policy::for_target("duckduckgo.com"))
-        .await
-        .expect("exit");
-    eprintln!(
-        "[{:>6}ms] proxy listening at {}",
-        mark.elapsed().as_millis(),
-        delegated.proxy_url()
-    );
-
     let browsing = loki_core::adapters::browser::Browsing::new(
-        Arc::new(delegated),
+        Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
         std::env::temp_dir().join("loki-probe-profile"),
         9335,
         Arc::new(Politeness::default()),
@@ -360,4 +334,43 @@ async fn where_the_browser_search_spends_its_time() {
         Ok(Err(e)) => panic!("search failed: {e}"),
         Err(_) => panic!("search never returned inside 60s"),
     }
+}
+
+/// The browser stops existing when nothing is using it (§1).
+///
+/// **Against a real process, because the point is that it dies.** A unit test can only prove the
+/// arithmetic; this proves the browser is gone and its control port is closed, which is what
+/// "costs nothing when idle" has to mean.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the network"]
+async fn an_idle_browser_closes_itself() {
+    use loki_core::ports::search::Extract;
+
+    let events = Arc::new(Broadcast::new());
+    let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
+    let port = 9338;
+    let browsing = loki_core::adapters::browser::Browsing::new(
+        Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
+        std::env::temp_dir().join("loki-idle-profile"),
+        port,
+        Arc::new(Politeness::default()),
+    )
+    .expect("a chromium-family browser")
+    .reaping_after(std::time::Duration::from_secs(3));
+
+    let _ = Extract::read(&browsing, "https://example.com/", CancellationToken::new()).await;
+    assert!(listening(port).await, "the browser is up after a page");
+
+    // Past the idle window, plus the reaper's own round trip.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        !listening(port).await,
+        "the browser is still listening on {port} with nothing to do"
+    );
+}
+
+async fn listening(port: u16) -> bool {
+    tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_ok()
 }

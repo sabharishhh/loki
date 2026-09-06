@@ -685,6 +685,12 @@ impl Loop {
         question: &str,
         cancel: CancellationToken,
     ) {
+        // §12.6: what someone said and what to search for are not the same string. Applied here
+        // rather than at the call sites so it covers both the turn the host decided for itself and
+        // the model's own `WEB:` request, and a query already written well passes through
+        // unchanged.
+        let question = &crate::core::query::for_search(question);
+
         // The search runs before the model call, so without a scope the interface has nothing to
         // show for however long the network takes and the turn reads as hung. `ScopeKind::Search`
         // is what the trace already renders, so this needs no new event and no new surface.
