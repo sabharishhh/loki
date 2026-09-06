@@ -294,6 +294,9 @@ pub unsafe extern "C" fn loki_core_new(
                 .ok()
                 .map(Arc::new),
             egress: Some(Arc::clone(&outbound)),
+            // So the search says what it is doing while it does it, rather than reporting once it
+            // is over (§12.9).
+            events: Some(Arc::clone(&events)),
         }));
     }
 

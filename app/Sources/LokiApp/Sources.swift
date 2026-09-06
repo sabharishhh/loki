@@ -199,6 +199,8 @@ struct SourceStack: View {
 
     /// Beyond this the stack stops being a shape and starts being a queue.
     private static let shown = 4
+    /// How far each icon travels under the pointer.
+    private static let fan: CGFloat = 3
 
     var body: some View {
         if !sources.isEmpty {
@@ -215,9 +217,14 @@ struct SourceStack: View {
                                 .zIndex(Double(Self.shown - index))
                                 // Fans out under the pointer, so the stack shows what it is made
                                 // of before it is clicked.
-                                .offset(x: hovering ? CGFloat(index) * 3 : 0)
+                                .offset(x: hovering ? CGFloat(index) * Self.fan : 0)
                         }
                     }
+                    // **The fan has to occupy the room it takes.** `offset` moves pixels and not
+                    // layout, so the last icon slid over the words while the gap the HStack was
+                    // keeping stayed where it was. Reserving the travel keeps the spacing the
+                    // design asks for at both ends of the animation (W11).
+                    .padding(.trailing, hovering ? CGFloat(min(sources.count, Self.shown) - 1) * Self.fan : 0)
                     Text(sources.count == 1 ? "1 source" : "\(sources.count) sources")
                         .font(Theme.Text.meta)
                         .foregroundStyle(hovering ? Theme.Colors.primary : Theme.Colors.secondary)

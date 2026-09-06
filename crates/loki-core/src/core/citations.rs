@@ -54,6 +54,43 @@ impl Coverage {
     }
 }
 
+/// Takes named markers out of an answer, leaving the prose whole.
+///
+/// **Used for markers that point at nothing.** Removing the citation and keeping the claim is the
+/// honest repair: the reader sees a sentence with no source, which is true, instead of a number
+/// that opens nothing.
+#[must_use]
+pub fn without(answer: &str, drop: &BTreeSet<usize>) -> String {
+    let mut out = String::with_capacity(answer.len());
+    let mut rest = answer;
+
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']').map(|at| at + open) else {
+            break;
+        };
+        let inside = &rest[open + 1..close];
+        let drops = inside
+            .parse::<usize>()
+            .is_ok_and(|number| drop.contains(&number));
+        out.push_str(&rest[..open]);
+        if !drops {
+            out.push_str(&rest[open..=close]);
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+
+    // A marker lifted out of "Patna. [5] Born" leaves two spaces, and one before a full stop.
+    let mut tidied = out;
+    while tidied.contains("  ") {
+        tidied = tidied.replace("  ", " ");
+    }
+    for mark in [".", ",", ";", ":", "!", "?"] {
+        tidied = tidied.replace(&format!(" {mark}"), mark);
+    }
+    tidied.trim().to_owned()
+}
+
 /// Reads an answer against the sources it was given.
 #[must_use]
 pub fn check(answer: &str, offered: &[Cited]) -> Coverage {
@@ -264,5 +301,72 @@ mod tests {
     fn an_answer_with_nothing_to_source_is_complete() {
         assert!(check("", &[]).is_complete());
         assert!(check("Yes.", &[]).is_complete());
+    }
+}
+
+#[cfg(test)]
+mod invented_markers {
+    use super::*;
+
+    fn cited(urls: &[&str]) -> Vec<Cited> {
+        urls.iter()
+            .map(|url| Cited {
+                url: (*url).to_owned(),
+                title: String::new(),
+                text: String::new(),
+                icon: None,
+                icon_hash: None,
+                read: true,
+            })
+            .collect()
+    }
+
+    /// B-82, as the reader saw it: seven sentences each carrying `[5]` on a turn where nothing had
+    /// been fetched.
+    #[test]
+    fn an_answer_citing_nothing_it_was_given_loses_its_markers() {
+        let answer = "She took office on 25 July 2022. [5] She was born in 1958. [5]";
+        let coverage = check(answer, &[]);
+        assert_eq!(coverage.invented, BTreeSet::from([5]));
+        assert_eq!(
+            without(answer, &coverage.invented),
+            "She took office on 25 July 2022. She was born in 1958."
+        );
+    }
+
+    /// The claim is what the reader came for and it survives. Only the false evidence goes.
+    #[test]
+    fn the_sentence_survives_the_marker_being_removed() {
+        let answer = "The river crossed its mark [9] in Patna.";
+        let coverage = check(answer, &cited(&["https://a.example"]));
+        assert_eq!(
+            without(answer, &coverage.invented),
+            "The river crossed its mark in Patna."
+        );
+    }
+
+    /// A real citation is untouched, and one invented marker beside it does not take it down.
+    #[test]
+    fn a_real_marker_is_kept_when_a_false_one_is_dropped() {
+        let answer = "First [1]. Second [7].";
+        let coverage = check(answer, &cited(&["https://a.example"]));
+        assert_eq!(coverage.invented, BTreeSet::from([7]));
+        assert_eq!(without(answer, &coverage.invented), "First [1]. Second.");
+    }
+
+    #[test]
+    fn text_with_nothing_to_drop_comes_back_as_it_was() {
+        let answer = "Nothing here is cited at all.";
+        assert_eq!(without(answer, &BTreeSet::new()), answer);
+    }
+
+    /// An array index is not a marker, so it is never a candidate for removal.
+    #[test]
+    fn an_array_index_is_not_dropped() {
+        let answer = "Read items[0] carefully.";
+        assert_eq!(
+            without(answer, &BTreeSet::from([0])),
+            "Read items carefully."
+        );
     }
 }

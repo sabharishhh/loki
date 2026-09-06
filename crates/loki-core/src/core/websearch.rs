@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::attempt::{self, Budget, Ending};
+use crate::core::ids::TaskId;
+use crate::core::sink::EventSink;
 use crate::core::vocab::Verdict;
 use crate::memory::evidence::Evidence;
 use crate::ports::clock::Clock;
@@ -104,9 +106,31 @@ pub struct Search {
     pub evidence: Option<Arc<Evidence>>,
     /// The one exit, for the icons. Never a favicon service (§21.7).
     pub egress: Option<Arc<dyn Egress>>,
+    /// Where the search says what it is doing, while it is doing it (§12.9).
+    ///
+    /// **A sink rather than a report at the end, and the difference is the whole experience.** The
+    /// loop used to hand back a `Found` and the caller emitted an event per source afterwards, so
+    /// every step of a seventeen second search landed in one frame once it was over and the trace
+    /// had nothing to say for the seventeen seconds that mattered.
+    pub events: Option<Arc<dyn EventSink>>,
 }
 
 impl Search {
+    /// Says a page was reached, as it is reached.
+    /// Says which engine answered and with how many hits, before any page is read.
+    fn discovered(&self, task: TaskId, question: &str, engine: &str, hits: usize) {
+        let Some(events) = self.events.as_ref() else {
+            return;
+        };
+        events.emit(&crate::core::event::Event::Searched {
+            task,
+            query: question.to_owned(),
+            provider: engine.to_owned(),
+            hits: u32::try_from(hits).unwrap_or(u32::MAX),
+            cost: crate::core::vocab::CostModel::Free,
+        });
+    }
+
     /// Every engine on the ladder, for the ledger.
     #[must_use]
     pub fn engine_ids(&self) -> Vec<&'static str> {
@@ -151,12 +175,20 @@ impl Search {
     /// # Errors
     /// Fails only when the engine itself could not be used. A page that could not be read is a
     /// missing source, not a failed search (§12.4).
-    pub async fn run(&self, question: &str, cancel: CancelToken) -> Result<Found, SearchError> {
+    pub async fn run(
+        &self,
+        question: &str,
+        task: TaskId,
+        cancel: CancelToken,
+    ) -> Result<Found, SearchError> {
         let (engine, hits) = self.find(question, cancel.clone()).await?;
         // **Between finding and reading, because reading is what costs.** The budget reads three
         // of these and the engine ordered them for its own reasons, so which three is most of the
         // answer's quality (§12.7).
         let hits = crate::core::rank::best_first(question, hits);
+        // Said now, not at the end: the reader is already waiting and this is the first thing
+        // there is to tell them.
+        self.discovered(task, question, engine, hits.len());
 
         // The engine's own summaries, which are free and already carry their URLs.
         let mut sources: Vec<Cited> = hits
@@ -187,6 +219,8 @@ impl Search {
             rungs: self.rungs.clone(),
             cancel,
             evidence: self.evidence.clone(),
+            events: self.events.clone(),
+            task,
         };
         let outcome = attempt::run(&plan, self.budget, self.clock.as_ref())
             .await
@@ -310,6 +344,25 @@ struct Reading {
     cancel: CancelToken,
     /// Where a page read lately is found again (§12.7).
     evidence: Option<Arc<Evidence>>,
+    events: Option<Arc<dyn EventSink>>,
+    task: TaskId,
+}
+
+impl Reading {
+    /// Says a page was reached, from inside the loop that reached it.
+    fn reached(&self, url: &str, rung: crate::core::vocab::Rung, verdict: Verdict) {
+        let Some(events) = self.events.as_ref() else {
+            return;
+        };
+        events.emit(&crate::core::event::Event::Fetched {
+            task: self.task,
+            url: url.to_owned(),
+            hash: crate::core::ids::ContentHash::new(""),
+            rung,
+            verdict,
+            cost: crate::core::vocab::CostModel::Free,
+        });
+    }
 }
 
 #[async_trait::async_trait]
@@ -336,6 +389,9 @@ impl attempt::Steps for Reading {
             && let Some(held) = evidence.recall(&step.url, FRESH_FOR)
             && let Ok(record) = String::from_utf8(held)
         {
+            // A page answered from the cache still happened, and a trace that skipped it would
+            // show a search reading fewer pages than it used.
+            self.reached(&step.url, crate::core::vocab::Rung::Direct, Verdict::Ok);
             return Ok(record);
         }
 
@@ -344,6 +400,7 @@ impl attempt::Steps for Reading {
             let page = rung.read(&step.url, self.cancel.clone()).await?;
             // The ladder stops climbing on a page that does not exist or a host asking to be left
             // alone. Trying harder there is what turns a soft flag into a ban (§12.2).
+            self.reached(&step.url, rung.rung(), page.verdict);
             if page.verdict == Verdict::Ok {
                 let record = record(&page);
                 // Never fails a search. A page that could not be cached is a page that will be

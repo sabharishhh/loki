@@ -354,8 +354,18 @@ final class Conversation {
     }
 
     /// Asks the rail to show these. Called when a source stack is clicked.
+    /// Asking to see sources, counted rather than compared.
+    ///
+    /// **A value that has not changed is not an event.** Watching `showingSources` meant clicking
+    /// the same stack twice did nothing the second time, so opening the rail, closing it and
+    /// clicking again read as a dead control. The counter changes on every ask (W9).
+    private(set) var sourcesAsked = 0
+
     func showSources(_ sources: [Source]) {
-        withAnimation(Theme.Motion.control) { showingSources = sources }
+        withAnimation(Theme.Motion.control) {
+            showingSources = sources
+            sourcesAsked += 1
+        }
     }
 
     func interrupt() {

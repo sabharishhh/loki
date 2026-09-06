@@ -15,12 +15,12 @@ use tokio_util::sync::CancellationToken;
 use super::budget::{Budget, Verdict};
 use super::checkpoint::Checkpoint;
 use super::event::Event;
-use super::ids::{ClaimId, ConceptId, ContentHash, IdGen, QueryHash, TaskId};
+use super::ids::{ClaimId, ConceptId, IdGen, QueryHash, TaskId};
 use super::prompt::{Prefix, Standing, Turn};
 use super::sink::EventSink;
 use super::temporal;
 use super::trigger;
-use super::vocab::{self, BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
+use super::vocab::{BlockReason, Cents, Lane, ModelRole, ScopeKind, TaskStatus};
 use crate::memory::handle::{self, Memory, Speaker};
 use crate::memory::runtime;
 use crate::ports::clock::Clock;
@@ -409,6 +409,13 @@ impl Loop {
             .set_frame(temporal::Frame::new(now, self.session_started, self.last_spoke).render());
         // Derived, and it answers one message. Left standing it would answer the next one too.
         self.turn.set_search("");
+        // **The same rule, and it was missing here, which is how an answer came to cite sources it
+        // was never given.** `set_web` was only ever written when a search ran, so a turn that
+        // searched left `# From the web` and its numbered sources standing in the prompt for every
+        // turn after it. The model was then correctly citing `[5]` from a list it could still see,
+        // on a turn where nothing had been fetched and `last_cited` was empty, so the marker had
+        // no chip to become and sat on screen as a bare number. B-82.
+        self.turn.set_web("");
 
         // Whether the model may ask for a deeper search on this turn. Set below, once lane 1 has
         // run and the floor has had its chance.
@@ -549,6 +556,18 @@ impl Loop {
             }
             self.turn.set_offer("");
             outcome = self.call(task, cancel.clone(), false).await?;
+        }
+
+        // **A marker pointing at a source that was never offered is evidence that does not exist,
+        // and it is the one thing worse than an uncited claim.** The prompt no longer carries a
+        // stale source list, so this is now a backstop against the model inventing one rather than
+        // against the host handing it one. The claim survives and the false citation does not: the
+        // sentence then reads as unsourced, which is what it is.
+        if !outcome.text.is_empty() {
+            let coverage = crate::core::citations::check(&outcome.text, &self.last_cited);
+            if !coverage.invented.is_empty() {
+                outcome.text = crate::core::citations::without(&outcome.text, &coverage.invented);
+            }
         }
 
         if !outcome.text.is_empty() {
@@ -703,38 +722,11 @@ impl Loop {
         self.checkpoint.open_scope(scope);
         let started = std::time::Instant::now();
 
-        let outcome = web.run(question, cancel).await;
+        let outcome = web.run(question, task, cancel).await;
         self.close_scope(scope, started);
 
         match outcome {
             Ok(found) => {
-                self.events.emit(&Event::Searched {
-                    task,
-                    query: question.to_owned(),
-                    provider: found.engine.to_owned(),
-                    hits: u32::try_from(found.sources.len()).unwrap_or(u32::MAX),
-                    cost: vocab::CostModel::Free,
-                });
-                for source in &found.sources {
-                    // One event per source, whether it was read or came from a summary: §12.9's
-                    // ledger counts what answered, and a snippet that answered is a rung that did
-                    // not have to run.
-                    self.events.emit(&Event::Fetched {
-                        task,
-                        url: source.url.clone(),
-                        // Empty until S2 content-addresses what was fetched. Stated rather than
-                        // faked: a hash invented here would be a hash of nothing, and §12.7's
-                        // point is that the cached page can be checked against it.
-                        hash: ContentHash::new(""),
-                        rung: vocab::Rung::Direct,
-                        verdict: if source.read {
-                            vocab::Verdict::Ok
-                        } else {
-                            vocab::Verdict::JsRequired
-                        },
-                        cost: vocab::CostModel::Free,
-                    });
-                }
                 self.last_cited.clone_from(&found.sources);
                 self.turn.set_web(found.brief());
             }

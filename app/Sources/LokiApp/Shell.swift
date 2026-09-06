@@ -71,8 +71,8 @@ struct Shell: View {
             // **Asking to see the sources opens the panel that shows them.** Clicking the stack
             // set the list and left the rail shut, so the gesture did nothing at all whenever the
             // reader had the rail closed, which is most of the time.
-            .onChange(of: conversation.showingSources) { _, latest in
-                if !latest.isEmpty, !rail {
+            .onChange(of: conversation.sourcesAsked) { _, _ in
+                if !conversation.showingSources.isEmpty, !rail {
                     withAnimation(Theme.Motion.panel) { rail = true }
                 }
             }

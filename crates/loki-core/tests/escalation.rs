@@ -297,6 +297,7 @@ impl Fixture {
                 reads: 1,
                 evidence: None,
                 egress: None,
+                events: None,
             }));
         app
     }

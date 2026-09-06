@@ -63,10 +63,15 @@ async fn a_question_about_today_comes_back_with_sources() {
         reads: 3,
         evidence: None,
         egress: Some(egress),
+        events: None,
     };
 
     let found = search
-        .run("kerala news headlines today", CancellationToken::new())
+        .run(
+            "kerala news headlines today",
+            loki_core::core::ids::TaskId::new(0),
+            CancellationToken::new(),
+        )
         .await
         .expect("the search ran");
 

@@ -27,10 +27,15 @@ pub fn readable(url: &str, html: &str) -> (String, String) {
 /// exit as everything else.
 pub fn icon_url(page: &str, html: &str) -> Option<String> {
     let lowered = html.to_lowercase();
+    // **Largest first, which is the opposite of what this did.** `rel="icon"` is usually the
+    // 16 pixel favicon, and drawing that at 18 points on a Retina display asks for 36 pixels from
+    // 16 and gets the stair-stepping B-70 fixed for the mark. `apple-touch-icon` is 180 square by
+    // convention, and downscaling 180 to 36 is the case resampling is good at.
     for rel in [
+        "rel=\"apple-touch-icon-precomposed\"",
+        "rel=\"apple-touch-icon\"",
         "rel=\"icon\"",
         "rel=\"shortcut icon\"",
-        "rel=\"apple-touch-icon\"",
     ] {
         let Some(at) = lowered.find(rel) else {
             continue;
