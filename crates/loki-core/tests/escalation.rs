@@ -26,6 +26,7 @@ use loki_core::memory::resolve::{Decision, Kind, Matcher, ResolveError};
 use loki_core::ports::model::{
     Caps, Chunk, ChunkStream, ModelError, ModelProvider, Request, StopReason, ToolSupport, Usage,
 };
+use loki_core::ports::search::{CancelToken, Discover, Hit, SearchError};
 use tokio_util::sync::CancellationToken;
 
 /// One provider serving both roles: the conversation on `Primary`, the navigator on `Utility`.
@@ -221,6 +222,8 @@ struct Fixture {
     tape: Arc<Tape>,
     events: Arc<Collector>,
     dir: std::path::PathBuf,
+    /// The same store the loop holds, so a test can ask what the turn left behind.
+    memory: Arc<Memory>,
 }
 
 impl Fixture {
@@ -267,7 +270,9 @@ impl Fixture {
             Prefix::new("You are Loki."),
             Spend::new(Cents::new(10_000)),
         );
-        core.attach_memory(memory).await.expect("attach");
+        core.attach_memory(Arc::clone(&memory))
+            .await
+            .expect("attach");
 
         Self {
             core,
@@ -275,7 +280,25 @@ impl Fixture {
             tape,
             events,
             dir,
+            memory,
         }
+    }
+
+    /// The same fixture with a search engine wired to the one exit, for the turns where memory and
+    /// the web both have a claim on the answer.
+    async fn with_web(label: &str, answers: &[&str], engine: Arc<FakeEngine>) -> Self {
+        let mut app = Self::open(label, answers, &["DONE"]).await;
+        app.core
+            .attach_web(Arc::new(loki_core::core::websearch::Search {
+                discover: engine as Arc<dyn Discover>,
+                rungs: Vec::new(),
+                clock: Arc::new(SystemClock),
+                budget: loki_core::core::attempt::Budget::of_steps(2),
+                reads: 1,
+                evidence: None,
+                egress: None,
+            }));
+        app
     }
 
     async fn ask(&mut self, message: &str) {
@@ -589,6 +612,254 @@ mod not_every_turn {
         assert!(
             !app.provider.requests(ModelRole::Utility).is_empty(),
             "lane 1 has nothing, so the model would only ask for a search anyway"
+        );
+    }
+}
+
+/// The gap that hid a defect for the entire life of the in-play rail (B-73).
+///
+/// `loki_recalled` read a list nothing ever wrote to. Both halves compiled, both had types, and the
+/// read end returned a valid empty answer, so nothing at either end could see it: the gap was
+/// between two crates. This is the shape of test that would have caught it, and the reason it sits
+/// here rather than in a unit test is that it has to run a whole turn to be worth anything.
+mod what_the_rails_read {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_turn_leaves_behind_what_it_recalled() {
+        let mut app = Fixture::open("rails", &["You studied computer science."], &["DONE"]).await;
+        assert!(
+            app.core.last_recalled().is_empty(),
+            "nothing has happened yet"
+        );
+
+        app.ask("what all do you know about my computer science degree")
+            .await;
+
+        // The rail asks after the turn has ended, so this is the only moment that matters.
+        assert!(
+            !app.core.last_recalled().is_empty(),
+            "the in-play rail has something to draw"
+        );
+    }
+
+    /// A rail showing the previous turn's sources beside this turn's answer looks like provenance.
+    #[tokio::test]
+    async fn a_second_turn_does_not_inherit_the_first_ones() {
+        let mut app = Fixture::open(
+            "rails-cleared",
+            &["Here is what I know.", "Nothing to say about that."],
+            &["DONE", "DONE"],
+        )
+        .await;
+
+        app.ask("what all do you know about my computer science degree")
+            .await;
+        assert!(
+            !app.core.last_recalled().is_empty(),
+            "the first turn recalled"
+        );
+
+        app.ask("zzzzq qqqzz nothing matches this").await;
+        assert!(
+            app.core.last_recalled().is_empty(),
+            "the second turn's rail is its own, not the first turn's"
+        );
+    }
+
+    /// The web half of the same plumbing. No engine is attached, so nothing is cited, and the
+    /// assertion is that this reads as nothing rather than as stale.
+    #[tokio::test]
+    async fn a_turn_without_the_web_cites_nothing() {
+        let mut app = Fixture::open("rails-web", &["Two plus two is four."], &["DONE"]).await;
+        app.ask("what is 2 + 2").await;
+        assert!(app.core.last_cited().is_empty());
+    }
+}
+
+/// An engine that answers from a script, so a test says what the web returned and nothing more.
+struct FakeEngine {
+    hits: Vec<Hit>,
+    /// When set, the engine cannot be reached at all. §12.4's failure point, not an empty result.
+    unreachable: bool,
+}
+
+impl FakeEngine {
+    fn returning(hits: &[(&str, &str, &str)]) -> Arc<Self> {
+        Arc::new(Self {
+            hits: hits
+                .iter()
+                .map(|(url, title, snippet)| Hit {
+                    url: (*url).to_owned(),
+                    title: (*title).to_owned(),
+                    snippet: (*snippet).to_owned(),
+                })
+                .collect(),
+            unreachable: false,
+        })
+    }
+
+    fn down() -> Arc<Self> {
+        Arc::new(Self {
+            hits: Vec::new(),
+            unreachable: true,
+        })
+    }
+}
+
+#[async_trait]
+impl Discover for FakeEngine {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+
+    async fn search(&self, _query: &str, _cancel: CancelToken) -> Result<Vec<Hit>, SearchError> {
+        if self.unreachable {
+            return Err(SearchError::Unreachable("no route".into()));
+        }
+        Ok(self.hits.clone())
+    }
+}
+
+/// Lifts the release out of a web-sourced answer, so consolidation has something to carry.
+struct RustFact;
+
+#[async_trait]
+impl Extractor for RustFact {
+    async fn extract(
+        &self,
+        _episode: &str,
+        text: &str,
+    ) -> Result<Vec<Candidate>, ConsolidateError> {
+        if !text.contains("1.96") {
+            return Ok(vec![]);
+        }
+        Ok(vec![Candidate {
+            surface: "Rust".to_owned(),
+            kind: Kind::Project,
+            heading: "software".to_owned(),
+            attribute: "release".to_owned(),
+            text: "The latest rust release is 1.96".to_owned(),
+            days_ago: None,
+            valid_from: Some(date(2026, 9, 3)),
+            origin: Origin::Stated,
+            tags: vec![],
+            aliases: vec![],
+            value: None,
+            relation: None,
+        }])
+    }
+}
+
+/// Memory and the web in one turn. B-74 was two subsystems that worked alone and silently
+/// cancelled each other when both had something to say, so these run them together on purpose.
+mod living_together {
+    use super::*;
+
+    /// B-57, arriving from a new direction. A web-sourced answer is Loki paraphrasing pages it
+    /// read, so it must reach the transcript and never the claims: filing it would turn whatever a
+    /// search engine surfaced into a remembered fact about the user.
+    #[tokio::test]
+    async fn a_web_sourced_answer_never_becomes_a_claim() {
+        let engine = FakeEngine::returning(&[(
+            "https://example.com/rust",
+            "Rust 1.96",
+            "Rust 1.96 was released.",
+        )]);
+        let mut app =
+            Fixture::with_web("web-records", &["Rust 1.96 is the latest [1]."], engine).await;
+
+        app.ask("what is the latest rust release").await;
+        app.memory
+            .close(&RustFact, &FirstMatch, &Unbounded, date(2026, 9, 3))
+            .await
+            .expect("close");
+
+        let claims = app
+            .memory
+            .recall("latest rust release", 5, date(2026, 9, 3))
+            .expect("recall");
+        assert!(
+            claims.is_empty(),
+            "the web's answer stayed out of memory, but recall saw {claims:?}"
+        );
+
+        // The seeded fact is still there, so this is the filter working rather than the store
+        // having been emptied.
+        assert!(
+            !app.memory
+                .recall("computer science degree", 5, date(2026, 9, 3))
+                .expect("recall")
+                .is_empty(),
+            "what the user actually said survives"
+        );
+    }
+
+    /// Both rails at once, on the turn where the host decides for itself. Neither subsystem gets
+    /// to blank the other's output.
+    #[tokio::test]
+    async fn one_turn_can_fill_both_rails() {
+        let engine = FakeEngine::returning(&[(
+            "https://example.com/cs",
+            "Degrees",
+            "A computer science degree covers algorithms.",
+        )]);
+        let mut app = Fixture::with_web("both-rails", &["Here is what I found [1]."], engine).await;
+
+        app.ask("what all do you know about my computer science degree")
+            .await;
+
+        assert!(
+            !app.core.last_recalled().is_empty(),
+            "memory's rail survived the web turn"
+        );
+        assert!(
+            !app.core.last_cited().is_empty(),
+            "the web's rail survived the memory turn"
+        );
+    }
+
+    /// The other flow: the host was unsure, so the model was offered the marker and used it. What
+    /// the user reads is the answer, never the asking.
+    #[tokio::test]
+    async fn a_model_that_asks_for_the_web_is_answered_not_echoed() {
+        let engine = FakeEngine::returning(&[(
+            "https://example.com/tickets",
+            "Tickets",
+            "A ticket costs 400 dollars.",
+        )]);
+        let mut app = Fixture::with_web(
+            "web-offer",
+            &["WEB: rust conference ticket price", "Tickets are $400 [1]."],
+            engine,
+        )
+        .await;
+
+        app.ask("how much does a rust conference ticket cost").await;
+
+        let shown = app.tape.shown();
+        assert!(!shown.contains("WEB:"), "the asking never reaches the user");
+        assert!(shown.contains("$400"), "the answer did, but got {shown:?}");
+        assert!(!app.core.last_cited().is_empty(), "with its sources");
+    }
+
+    /// §12.4's failure point. An engine that cannot be reached is a missing source, not a failed
+    /// turn, and it must not take memory down with it.
+    #[tokio::test]
+    async fn an_engine_that_is_down_still_leaves_an_answer() {
+        let mut app = Fixture::with_web(
+            "web-down",
+            &["I could not look that up."],
+            FakeEngine::down(),
+        )
+        .await;
+
+        app.ask("what is the latest rust release").await;
+
+        assert!(app.core.last_cited().is_empty(), "nothing was cited");
+        assert!(
+            app.tape.shown().contains("could not"),
+            "the turn still answered"
         );
     }
 }

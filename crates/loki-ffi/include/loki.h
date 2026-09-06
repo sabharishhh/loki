@@ -81,6 +81,9 @@ uint64_t loki_spend_month(LokiCore *core);
 /* What pre-fetch surfaced for the last turn, as a JSON array. "[]" when memory is off. */
 char *loki_recalled(LokiCore *core);
 
+/// What the last turn cited. JSON array. Free with loki_string_free.
+char *loki_cited(struct LokiCore *core);
+
 /* Marks a recalled claim wrong. Drops its confidence; deletes nothing. */
 LokiStatus loki_not_true(LokiCore *core, const char *path, uint32_t ordinal);
 

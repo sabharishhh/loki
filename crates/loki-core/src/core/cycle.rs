@@ -63,6 +63,8 @@ const DEFAULT_WINDOW_KEEPS: u32 = 20;
 
 /// What the model writes to ask for a deeper search of memory (§10.8, D-062).
 const SEARCH_MARKER: &str = "SEARCH:";
+/// The web's marker. See [`Ask`].
+const WEB_MARKER: &str = "WEB:";
 
 /// The line added to the recall block on a turn where the model may ask.
 ///
@@ -95,19 +97,56 @@ it, ignore this and reply normally.";
 ///
 /// The marker has to open the reply. A model that answers and then mentions searching has already
 /// answered, and re-asking would throw away a reply the user is entitled to.
-fn search_request(text: &str) -> Option<String> {
+fn search_request(text: &str) -> Option<Ask> {
     let text = text.trim_start();
-    let opening: String = text.chars().take(SEARCH_MARKER.len()).collect();
-    if !opening.eq_ignore_ascii_case(SEARCH_MARKER) {
-        return None;
+    for (marker, kind) in [
+        (SEARCH_MARKER, Ask::Memory as fn(String) -> Ask),
+        (WEB_MARKER, Ask::Web as fn(String) -> Ask),
+    ] {
+        let opening: String = text.chars().take(marker.len()).collect();
+        if !opening.eq_ignore_ascii_case(marker) {
+            continue;
+        }
+        let want = text[opening.len()..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if !want.is_empty() {
+            return Some(kind(want));
+        }
     }
-    let want = text[opening.len()..]
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    (!want.is_empty()).then_some(want)
+    None
+}
+
+/// Which search the model asked for.
+///
+/// **Two markers rather than one, because they cost different things and reach different places.**
+/// A model that could only say "search" would leave the host guessing whether it meant the store or
+/// the web, and guessing wrong is either a wasted fetch or an answer that never looked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ask {
+    Memory(String),
+    Web(String),
+}
+
+/// The longest opening a reply might carry, for the suppression in `drain`.
+///
+/// Both markers have to be held back, or a request the user was never meant to see streams into the
+/// thread as though it were the answer.
+const LONGEST_MARKER: usize = if SEARCH_MARKER.len() > WEB_MARKER.len() {
+    SEARCH_MARKER.len()
+} else {
+    WEB_MARKER.len()
+};
+
+/// Whether a held opening is a request rather than the start of an answer.
+fn opens_a_request(probe: &str) -> bool {
+    [SEARCH_MARKER, WEB_MARKER].iter().any(|marker| {
+        let opening: String = probe.chars().take(marker.len()).collect();
+        opening.eq_ignore_ascii_case(marker)
+    })
 }
 
 /// Everything one conversation needs.
@@ -374,6 +413,7 @@ impl Loop {
         // Whether the model may ask for a deeper search on this turn. Set below, once lane 1 has
         // run and the floor has had its chance.
         let mut armed = false;
+        let mut offer_web = false;
         // Read inside the memory block and used after it, because §12.6's first row is "memory
         // already answered" and the trigger cannot ask that question without the score.
         let mut best: Option<f32> = None;
@@ -445,18 +485,27 @@ impl Loop {
             match reach {
                 trigger::Reach::Yes => {
                     self.search_the_web(task, &web, &message, cancel.clone())
-                        .await
+                        .await;
                 }
                 // The host is not sure, so it does not decide. The model is told it may ask, in
-                // the same slot and the same shape memory search uses (§10.8).
-                trigger::Reach::Offer => self.turn.set_offer(ASK_TO_SEARCH_WEB),
+                // the same shape memory search uses (§10.8).
+                trigger::Reach::Offer => offer_web = true,
                 trigger::Reach::No => {}
             }
         }
 
+        // **Both offers, or neither overwrites the other.** They were written to one slot in
+        // sequence, so a turn where memory and the web were both worth offering silently lost the
+        // web one, and the marker it had asked the model to use was never parsed either (B-74).
+        let mut offers: Vec<&str> = Vec::new();
         if armed {
-            self.turn.set_offer(ASK_TO_SEARCH);
+            offers.push(ASK_TO_SEARCH);
         }
+        if offer_web {
+            offers.push(ASK_TO_SEARCH_WEB);
+        }
+        let offered = !offers.is_empty();
+        self.turn.set_offer(offers.join("\n\n"));
 
         self.turn.push(Message::user(message.clone()));
 
@@ -480,15 +529,24 @@ impl Loop {
             }
         }
 
-        let mut outcome = self.call(task, cancel.clone(), armed).await?;
+        let mut outcome = self.call(task, cancel.clone(), offered).await?;
 
-        // The model read its recall and said it was not enough. One retry, ever: the second call
-        // is never armed, so a model that keeps asking gets one search and then has to answer.
-        if let Some(want) = armed.then(|| search_request(&outcome.text)).flatten()
-            && let Some(memory) = self.memory.clone()
-        {
-            self.escalate(task, &memory, &want, today, cancel.clone())
-                .await;
+        // The model read what it was given and said it was not enough. One retry, ever: the second
+        // call is never armed, so a model that keeps asking gets one search and then has to answer.
+        if let Some(ask) = offered.then(|| search_request(&outcome.text)).flatten() {
+            match ask {
+                Ask::Memory(want) => {
+                    if let Some(memory) = self.memory.clone() {
+                        self.escalate(task, &memory, &want, today, cancel.clone())
+                            .await;
+                    }
+                }
+                Ask::Web(want) => {
+                    if let Some(web) = self.web.clone() {
+                        self.search_the_web(task, &web, &want, cancel.clone()).await;
+                    }
+                }
+            }
             self.turn.set_offer("");
             outcome = self.call(task, cancel.clone(), false).await?;
         }
@@ -707,10 +765,9 @@ impl Loop {
                     } else if deciding {
                         held.push_str(&piece);
                         let probe = held.trim_start();
-                        if probe.chars().count() >= SEARCH_MARKER.len() {
+                        if probe.chars().count() >= LONGEST_MARKER {
                             deciding = false;
-                            let opening: String = probe.chars().take(SEARCH_MARKER.len()).collect();
-                            if opening.eq_ignore_ascii_case(SEARCH_MARKER) {
+                            if opens_a_request(probe) {
                                 suppress = true;
                             } else {
                                 self.tokens.token(&held);
@@ -859,6 +916,65 @@ fn summarize(message: &str) -> String {
     match line.char_indices().nth(LIMIT) {
         Some((cut, _)) => format!("{}...", &line[..cut]),
         None => line.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod coexistence {
+    use super::*;
+
+    /// Both searches can be offered on one turn, and neither may erase the other.
+    ///
+    /// They were written to one slot in sequence, so memory's offer overwrote the web's and the
+    /// model was told to use a marker nothing parsed (B-74).
+    #[test]
+    fn two_offers_can_stand_together() {
+        let both = [ASK_TO_SEARCH, ASK_TO_SEARCH_WEB].join("\n\n");
+        assert!(both.contains(SEARCH_MARKER), "memory's marker survives");
+        assert!(both.contains(WEB_MARKER), "the web's marker survives");
+    }
+
+    #[test]
+    fn each_marker_routes_to_its_own_search() {
+        assert_eq!(
+            search_request("SEARCH: what did I say about meera"),
+            Some(Ask::Memory("what did I say about meera".to_owned()))
+        );
+        assert_eq!(
+            search_request("WEB: latest rust version"),
+            Some(Ask::Web("latest rust version".to_owned()))
+        );
+        // Case and leading whitespace are the model's to vary.
+        assert_eq!(
+            search_request("  web: prices today"),
+            Some(Ask::Web("prices today".to_owned()))
+        );
+    }
+
+    /// An answer is an answer. Re-asking would throw away a reply the user is entitled to.
+    #[test]
+    fn a_reply_that_merely_mentions_searching_is_an_answer() {
+        for answer in [
+            "I could SEARCH: for that if you like.",
+            "You could look on the WEB: it is documented.",
+            "Here is the answer.",
+            "",
+        ] {
+            assert_eq!(search_request(answer), None, "{answer}");
+        }
+    }
+
+    /// The suppression has to hold back the longest marker, or a shorter request streams out.
+    ///
+    /// `WEB:` is four characters and `SEARCH:` is seven. Holding back only seven was right by
+    /// accident; holding back only four would have leaked half of every memory request.
+    #[test]
+    fn the_held_opening_covers_both_markers() {
+        assert_eq!(LONGEST_MARKER, SEARCH_MARKER.len());
+        assert!(LONGEST_MARKER >= WEB_MARKER.len());
+        assert!(opens_a_request("SEARCH: x"));
+        assert!(opens_a_request("WEB: x"));
+        assert!(!opens_a_request("The answer"));
     }
 }
 
@@ -1206,11 +1322,11 @@ mod tests {
     fn a_search_request_has_to_be_the_whole_opening() {
         assert_eq!(
             search_request("SEARCH: my degree"),
-            Some("my degree".to_owned())
+            Some(Ask::Memory("my degree".to_owned()))
         );
         assert_eq!(
             search_request("  search: what Meera said\nand then some"),
-            Some("what Meera said".to_owned())
+            Some(Ask::Memory("what Meera said".to_owned()))
         );
 
         // Answered first. Not a request.
