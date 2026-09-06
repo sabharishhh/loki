@@ -136,10 +136,13 @@ fn the_check_can_actually_see_the_source() {
 /// somebody deletes.
 #[test]
 fn nothing_but_the_egress_adapter_builds_a_transport() {
-    const TRANSPORTS: [&str; 8] = [
+    const TRANSPORTS: [&str; 9] = [
         "reqwest::Client",
         "reqwest::get",
         "reqwest::blocking",
+        // The client the exit actually uses. Left beside reqwest rather than replacing it: a
+        // reintroduced reqwest would be a second transport just as surely as a second wreq.
+        "wreq::Client",
         // A socket is a socket. The delegated exit binds a listener and dials upstream, and a
         // second one of either anywhere else is the browser-shaped hole in §21.7's accounting.
         "TcpListener::bind",

@@ -51,6 +51,53 @@ pub struct Outbound {
 }
 
 impl Outbound {
+    /// A GET, with headers.
+    ///
+    /// **Headers rather than a bare URL helper.** §15's connectors and §13's HTTP tool both need
+    /// an authenticated GET, and a helper that could not carry one would grow a second beside it,
+    /// which is how a single exit becomes two functions that drift.
+    #[must_use]
+    pub fn get(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Get,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// The header set a browser sends, in the order a browser sends it.
+    ///
+    /// **Order is part of the fingerprint, and `Sec-Fetch-*` is the part everyone forgets.** A
+    /// missing `Sec-Fetch-Site` is one of the commonest reasons a search engine refuses a request
+    /// that is otherwise indistinguishable from a browser's, and it costs nothing to send. The TLS
+    /// fingerprint is the other half and belongs to the client (§12.2).
+    #[must_use]
+    pub fn as_browser(mut self) -> Self {
+        let browserish = [
+            (
+                "accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            ),
+            ("accept-language", "en-US,en;q=0.9"),
+            ("sec-fetch-site", "none"),
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-user", "?1"),
+            ("sec-fetch-dest", "document"),
+            ("upgrade-insecure-requests", "1"),
+        ];
+        for (name, value) in browserish {
+            if !self
+                .headers
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            {
+                self.headers.push((name.to_owned(), value.to_owned()));
+            }
+        }
+        self
+    }
+
     /// A POST with a JSON body.
     #[must_use]
     pub fn post(url: impl Into<String>, body: Vec<u8>) -> Self {

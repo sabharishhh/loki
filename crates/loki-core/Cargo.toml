@@ -16,7 +16,6 @@ serde_json.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-reqwest.workspace = true
 eventsource-stream.workspace = true
 async-stream.workspace = true
 rusqlite.workspace = true
@@ -25,6 +24,8 @@ serde_yaml_ng.workspace = true
 jiff.workspace = true
 strsim.workspace = true
 git2.workspace = true
+wreq = { version = "0.16.1", features = ["json", "stream"] }
+wreq-util = "0.2.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

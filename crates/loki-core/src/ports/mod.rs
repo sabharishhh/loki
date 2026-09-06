@@ -22,4 +22,5 @@
 pub mod clock;
 pub mod egress;
 pub mod model;
+pub mod search;
 pub mod tool;

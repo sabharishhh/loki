@@ -1,6 +1,6 @@
 //! The only transport in the tree (§7.1, §21.7).
 //!
-//! One `reqwest::Client`, and `tests/rings.rs` fails if anything else builds one. That is what
+//! One `wreq::Client`, and `tests/rings.rs` fails if anything else builds one. That is what
 //! makes §21.7's assertion sayable at all: a request nobody can make outside this file is a
 //! request the event stream cannot miss.
 
@@ -20,8 +20,18 @@ use crate::ports::egress::{
 };
 
 /// One HTTP client for the whole process.
+///
+/// **`wreq` rather than `reqwest`, and the difference is the TLS handshake.** §12.1's argument for
+/// running discovery from the user's own machine is that a residential address at human volume
+/// looks like a person with a browser. It only holds if the request looks like one too: a search
+/// engine reads the TLS and HTTP/2 fingerprint before it reads a header, and a Rust HTTP client has
+/// a fingerprint nothing else on earth shares. `wreq` is a hard fork of reqwest by the author of
+/// the crate `primp` binds to, so the API below is the same one that was here before.
+///
+/// The cost is stated because it is real: it links BoringSSL, which needs `cmake` and about two and
+/// a half minutes on a cold build, measured.
 pub struct Http {
-    client: reqwest::Client,
+    client: wreq::Client,
     events: Arc<dyn EventSink>,
 }
 
@@ -30,7 +40,10 @@ impl Http {
     /// Fails if the client cannot be built.
     pub fn new(events: Arc<dyn EventSink>) -> Result<Self, EgressError> {
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: wreq::Client::builder()
+                // One emulation for the whole process, so every request this app makes looks like
+                // the same browser. Rotating it per request is the thing that stands out.
+                .emulation(wreq_util::Emulation::Chrome142)
                 .build()
                 .map_err(|e| EgressError::Transport(e.to_string()))?,
             events,

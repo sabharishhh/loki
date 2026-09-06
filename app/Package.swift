@@ -30,6 +30,11 @@ let package = Package(
                 // frameworks rustls needs, have to be named here.
                 .linkedLibrary("z"),
                 .linkedLibrary("iconv"),
+                // BoringSSL, which `wreq` links for its TLS fingerprint, is C++. Swift does the
+                // final link and does not see Cargo's link directives, so this is named here for
+                // the same reason zlib is, and the missing-zlib failure is what says that class of
+                // omission is invisible until the link.
+                .linkedLibrary("c++"),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
             ]
