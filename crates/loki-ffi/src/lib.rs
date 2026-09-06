@@ -119,6 +119,14 @@ Answer plainly. Do not use em dashes.";
 
 const DEFAULT_CEILING: Cents = Cents::new(2000);
 
+/// What one web search may spend before it answers with what it has (§12.5).
+///
+/// Steps bound the rungs tried, the wall bounds a site that accepts the connection and then stalls,
+/// and `WEB_READS` is how many pages are fetched when the engine's own snippets do not answer it.
+const WEB_STEPS: usize = 6;
+const WEB_SECONDS: u64 = 30;
+const WEB_READS: usize = 3;
+
 /// Reads a C string, rejecting null and invalid UTF-8.
 ///
 /// # Safety
@@ -203,6 +211,9 @@ pub unsafe extern "C" fn loki_core_new(
         return std::ptr::null_mut();
     };
     let egress: Arc<dyn loki_core::ports::egress::Egress> = Arc::new(http);
+    // Kept before the provider takes it: §21.7 is one exit, so search reaches the network through
+    // the same adapter the model does, and both are accounted in one stream.
+    let outbound = Arc::clone(&egress);
     let provider: Arc<dyn ModelProvider> = match provider {
         LokiProvider::Anthropic => {
             let p = Anthropic::new(egress, api_key);
@@ -233,6 +244,35 @@ pub unsafe extern "C" fn loki_core_new(
         Prefix::new(SYSTEM),
         Budget::resuming(DEFAULT_CEILING, spent),
     );
+
+    let mut core = core;
+
+    // §12.6's trigger cannot fire on a loop with no engine attached, and a loop with no engine
+    // answers a question about today from what the model happens to remember. Built here because
+    // this is the only place that holds the exit, the clock and the evidence store at once.
+    {
+        let gate: loki_core::adapters::politeness::Shared =
+            Arc::new(loki_core::adapters::politeness::Politeness::default());
+        core.attach_web(Arc::new(loki_core::core::websearch::Search {
+            discover: Arc::new(loki_core::adapters::duckduckgo::DuckDuckGo::new(
+                Arc::clone(&outbound),
+                Arc::clone(&gate),
+            )),
+            rungs: vec![Arc::new(loki_core::adapters::reader::Reader::new(
+                Arc::clone(&outbound),
+                Arc::clone(&gate),
+            ))],
+            clock: Arc::clone(&clock),
+            budget: loki_core::core::attempt::Budget::of_steps(WEB_STEPS)
+                .within(std::time::Duration::from_secs(WEB_SECONDS)),
+            reads: WEB_READS,
+            // Failing to open the cache costs a re-fetch, never the search.
+            evidence: loki_core::memory::evidence::Evidence::default_location()
+                .ok()
+                .map(Arc::new),
+            egress: Some(Arc::clone(&outbound)),
+        }));
+    }
 
     // Opened here rather than lazily, so the working set reaches the frozen prefix before the
     // first turn. A store that will not open leaves a working assistant with no recall rather

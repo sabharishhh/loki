@@ -685,7 +685,22 @@ impl Loop {
         question: &str,
         cancel: CancellationToken,
     ) {
-        match web.run(question, cancel).await {
+        // The search runs before the model call, so without a scope the interface has nothing to
+        // show for however long the network takes and the turn reads as hung. `ScopeKind::Search`
+        // is what the trace already renders, so this needs no new event and no new surface.
+        let scope = self.ids.scope();
+        self.events.emit(&Event::ScopeOpened {
+            id: scope,
+            parent: None,
+            kind: ScopeKind::Search,
+        });
+        self.checkpoint.open_scope(scope);
+        let started = std::time::Instant::now();
+
+        let outcome = web.run(question, cancel).await;
+        self.close_scope(scope, started);
+
+        match outcome {
             Ok(found) => {
                 self.events.emit(&Event::Searched {
                     task,

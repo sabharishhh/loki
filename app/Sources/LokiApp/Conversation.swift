@@ -110,16 +110,15 @@ final class Conversation {
     /// Deliberately wider than the core's task. It ends when the streamer has finished painting,
     /// not when the last token arrived, because the two differ by the whole length of the drain
     /// and the reader is waiting for the second one.
-    private(set) var working = false
+    private(set) var life = TurnLife()
+    var working: Bool { life.working }
     /// When the reader started waiting, for the trace's clock.
-    @ObservationIgnored private var turnBegan: ContinuousClock.Instant?
     /// Where this turn's entries begin. Anything before it belongs to an earlier turn.
     @ObservationIgnored private var turnFloor = 0
     /// Steps reported before the turn opened a scope to hold them.
     @ObservationIgnored private var queuedSteps: [Step] = []
     /// The newest scope, so a trace can ask whether it is the one still running without every
     /// trace in the thread walking the thread to find out.
-    private var newestScope: UInt64?
 
     /// The per-turn cap the rail counts against. Mirrors `RECALL_CAP` in the core.
     static let recallCap = 5
@@ -331,7 +330,7 @@ final class Conversation {
         } catch {
             lastError = String(describing: error)
             composer = .idle
-            working = false
+            life.end()
         }
     }
 
@@ -369,16 +368,14 @@ final class Conversation {
     /// Idempotent within a turn: the second call keeps the first clock, because the reader started
     /// waiting when they pressed send, not when the core got round to saying so.
     private func beginTurn() {
-        if !working { turnBegan = .now }
-        working = true
+        life.begin()
         turnFloor = entries.count
         queuedSteps.removeAll()
     }
 
     /// The answer is fully on screen. Only the streamer decides this.
     private func endTurn() {
-        working = false
-        turnBegan = nil
+        life.end()
     }
 
     /// Whether this trace is still counting.
@@ -387,9 +384,7 @@ final class Conversation {
     /// figure the reader is left with is the wait they actually had rather than the length of the
     /// model call inside it.
     func isLive(_ scope: Scope) -> Bool {
-        if scope.state != .idle { return true }
-        guard working else { return false }
-        return newestScope == scope.id
+        life.isLive(scope: scope.id, closed: scope.state == .idle)
     }
 
     /// Puts a smoothed batch of characters on screen. Only the streamer calls this.
@@ -470,12 +465,12 @@ final class Conversation {
                         kind: fields["kind"] as? String ?? "tool",
                         state: .reading,
                         steps: firstOfTurn ? queuedSteps : [],
-                        began: firstOfTurn ? (turnBegan ?? .now) : .now,
+                        began: firstOfTurn ? (life.began ?? .now) : .now,
                         depth: depth
                     )
                 )
             )
-            newestScope = id
+            life.opened(id)
             if firstOfTurn { queuedSteps.removeAll() }
 
         case "scope_closed":
@@ -627,5 +622,44 @@ final class Conversation {
         default:
             return "Stopped."
         }
+    }
+}
+
+/// Which trace is still counting, and when a turn starts and stops.
+///
+/// **A struct, so the two-turn sequence can be replayed in a test.** The rule reads simply and the
+/// defect was never in the rule: `newestScope` kept pointing at the finished turn's scope, so the
+/// instant the next turn set `working`, the old trace was live again for one tick and recomputed
+/// its age from a start a whole turn earlier (B-75).
+struct TurnLife: Equatable {
+    private(set) var working = false
+    private(set) var began: ContinuousClock.Instant?
+    private(set) var newestScope: UInt64?
+
+    /// Idempotent within a turn: the reader started waiting when they pressed send, not when the
+    /// core got round to saying so.
+    mutating func begin(at now: ContinuousClock.Instant = .now) {
+        if !working { began = now }
+        working = true
+        newestScope = nil
+    }
+
+    mutating func opened(_ scope: UInt64) {
+        newestScope = scope
+    }
+
+    /// The answer is fully on screen. Only the streamer decides this.
+    mutating func end() {
+        working = false
+        began = nil
+    }
+
+    /// A scope of the running turn stays live until the answer has finished painting, so the
+    /// figure the reader is left with is the wait they actually had rather than the model call
+    /// inside it.
+    func isLive(scope id: UInt64, closed: Bool) -> Bool {
+        if !closed { return true }
+        guard working else { return false }
+        return newestScope == id
     }
 }
