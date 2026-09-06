@@ -109,6 +109,9 @@ struct SearchTrace: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(reduceMotion ? nil : Theme.Motion.disclose, value: open)
         .animation(reduceMotion ? nil : Theme.Motion.arrive, value: steps.count)
+        // The line stops shimmering and starts stating what it cost. Without this the two swap in
+        // one frame at the moment the reader is looking straight at it.
+        .animation(reduceMotion ? nil : Theme.Motion.control, value: live)
     }
 
     private var header: some View {
@@ -128,6 +131,8 @@ struct SearchTrace: View {
                     Text(summary)
                         .font(Theme.Text.body)
                         .foregroundStyle(Theme.Colors.secondary)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
                 }
 
                 Image(systemName: "chevron.down")

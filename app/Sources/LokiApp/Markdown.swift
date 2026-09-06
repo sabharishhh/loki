@@ -130,6 +130,8 @@ private struct Cited<Body: View>: View {
     var onOpenSource: ((Source) -> Void)?
     @ViewBuilder let content: (String) -> Body
 
+    @Environment(\.reduceMotion) private var reduceMotion
+
     var body: some View {
         let split = Citations.split(text, available: sources.count)
         let cited = split.cited.compactMap { number in
@@ -141,6 +143,10 @@ private struct Cited<Body: View>: View {
                 CitationRow(sources: cited, onOpen: onOpenSource)
             }
         }
+        // Sources land after the answer has finished streaming, so without this the chips appear
+        // in one frame under text that is already settled, which reads as a glitch rather than as
+        // the answer being completed.
+        .animation(reduceMotion ? nil : Theme.Motion.arrive, value: cited.count)
     }
 }
 

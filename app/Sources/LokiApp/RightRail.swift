@@ -132,6 +132,7 @@ private struct InPlay: View {
                     .font(Theme.Text.micro)
                     .kerning(Theme.Text.microTracking)
                     .monospacedDigit()
+                    .contentTransition(.numericText())
                     .foregroundStyle(Theme.Colors.tertiary)
                     .padding(.top, Theme.Space.xs)
             }

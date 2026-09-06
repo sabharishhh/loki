@@ -89,6 +89,11 @@ struct ThinkingTrace: View {
             Text(caption)
                 .font(Theme.Text.body)
                 .foregroundStyle(tint)
+                .monospacedDigit()
+                // The figure changes once a second even though the clock ticks eight times, so
+                // this fires once a second and rolls the digit rather than swapping the sentence.
+                .contentTransition(.numericText())
+                .animation(reduceMotion ? nil : Theme.Motion.control, value: caption)
         }
     }
 
