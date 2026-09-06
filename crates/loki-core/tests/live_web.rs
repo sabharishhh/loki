@@ -390,8 +390,8 @@ async fn an_ad_heavy_page_reads_quickly() {
     let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
     let browsing = loki_core::adapters::browser::Browsing::new(
         Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
-        std::env::temp_dir().join("loki-adheavy-profile"),
-        9339,
+        std::env::temp_dir().join("loki-adheavy2"),
+        9341,
         Arc::new(Politeness::default()),
     )
     .expect("a chromium-family browser");

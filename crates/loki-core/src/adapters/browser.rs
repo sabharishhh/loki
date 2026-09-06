@@ -490,6 +490,17 @@ pub mod page {
         pub minimum_text: usize,
     }
 
+    impl Readiness {
+        /// Text well past the threshold, where waiting longer cannot change the answer.
+        ///
+        /// Four times, which on the measured distribution is far above every error page and far
+        /// below every real article.
+        #[must_use]
+        pub const fn plainly_arrived(&self) -> usize {
+            self.minimum_text * 4
+        }
+    }
+
     impl Default for Readiness {
         fn default() -> Self {
             Self {
@@ -520,6 +531,15 @@ pub mod page {
         pub html: String,
         /// Visible text length, which is what the threshold was judged on.
         pub text: usize,
+        /// The page finished arriving, by either of the two ways that can happen.
+        ///
+        /// **Quiet is a proxy for content, and it is not the only one.** A site whose own scripts
+        /// poll forever never goes silent, so waiting for silence spent the whole budget and then
+        /// reported a Times of India page carrying 57KB of readable text as exhausted. A page well
+        /// past the text threshold has plainly arrived, and that counts as settled too.
+        ///
+        /// What this still excludes is the case the old rule was protecting: a page cut off by the
+        /// budget while it was genuinely mid-load is partial, whatever arrived first.
         pub settled: bool,
         /// The status of the document itself, not of a subresource.
         ///
@@ -538,7 +558,11 @@ pub mod page {
 
     /// The request types held for a decision. `Document` is deliberately absent: see
     /// `block_unread_resources`.
-    const JUDGED: [&str; 11] = [
+    /// **Every name here is one the browser accepts in a fetch filter, which is not the same as
+    /// every name in the protocol's `ResourceType`.** `WebSocket` is in the enum and is refused
+    /// here, and a refused filter fails `Fetch.enable`, which takes the whole rung down rather than
+    /// degrading. Found live: the unit tests covered the decision and not the call.
+    const JUDGED: [&str; 9] = [
         "Script",
         "XHR",
         "Fetch",
@@ -547,8 +571,6 @@ pub mod page {
         "Font",
         "Media",
         "Ping",
-        "EventSource",
-        "WebSocket",
         "CSPViolationReport",
     ];
 
@@ -646,11 +668,25 @@ pub mod page {
         let deadline = Instant::now() + want.budget;
         let mut loaded = false;
         let mut last_activity = Instant::now();
+        let mut looked = Instant::now();
         let mut status = None;
 
         loop {
             if loaded && last_activity.elapsed() >= want.quiet {
                 return Ok((true, status));
+            }
+            // **Enough text is its own answer.** A page whose own scripts poll forever never goes
+            // quiet, and waiting out the budget for it costs twenty seconds and changes nothing.
+            // Checked at the quiet interval rather than per event, so it is one evaluation a
+            // second on the pages that need it and none on the pages that settle.
+            if loaded
+                && looked.elapsed() >= want.quiet
+                && let Ok(text) = visible_text(cdp).await
+            {
+                looked = Instant::now();
+                if text >= want.plainly_arrived() {
+                    return Ok((true, status));
+                }
             }
             let Some(remaining) = deadline
                 .checked_duration_since(Instant::now())
