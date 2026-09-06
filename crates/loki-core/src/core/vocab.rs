@@ -74,12 +74,65 @@ impl Lane {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rung {
-    /// `rquest`. TLS and HTTP2 parity, no browser.
+    /// `wreq`. TLS and HTTP2 parity, no browser.
     Direct,
-    /// `spider`. HTTP first, a browser only for pages that genuinely need one.
+    /// CDP over the user's installed Chromium, behind our own exit (§12.3).
     Rendered,
-    /// A paid per-URL fallback. Designed, not shipped (§12.4).
-    Paid,
+    /// Interaction: a login, a form, a multi-step flow. Designed, not shipped (§12.4).
+    Interactive,
+}
+
+/// Why a rung was not satisfied, which is what decides where the ladder goes next (§12.2).
+///
+/// **A reason rather than a boolean, and this is the load-bearing decision of the ladder.** A rung
+/// that only says "failed" leaves the caller with one move, which is to try harder, and trying
+/// harder against a block is what turns a soft flag into a ban. Every rung returns one of these,
+/// and the verdict rides in `Fetched` so §12.9 can say why the ladder climbed rather than only how
+/// often.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Real content that passed §21.5's readiness check.
+    Ok,
+    /// A 200 carrying a shell where content should be. Escalates to a browser.
+    JsRequired,
+    /// Recognised and refused: 403, a challenge page, a 429 with nothing to wait for.
+    ///
+    /// Escalates, and is **never** retried on the same rung. The response already said the request
+    /// was recognised, and repeating it is the behaviour that hardens a host against this address.
+    Blocked,
+    /// A 429 that said how long to wait.
+    ///
+    /// Backs off the whole domain and never escalates. A browser arriving seconds after a rate
+    /// limit reads as evasion rather than as retrieval, which is the opposite of §12.5's posture.
+    RateLimited,
+    /// 404 or 410. The ladder stops: another rung cannot make a page exist.
+    NotFound,
+    /// A login wall or a form gate. §12.4's rung when it exists, honest exhaustion until then.
+    InteractionRequired,
+    /// Every rung tried, nothing readable. §12.4's honest failure.
+    Exhausted,
+}
+
+impl Verdict {
+    /// Whether climbing to the next rung is the right response.
+    ///
+    /// Deliberately not the negation of `Ok`. Three of these are terminal for opposite reasons: a
+    /// page that does not exist, a host asking to be left alone, and a ladder already spent.
+    #[must_use]
+    pub const fn should_escalate(self) -> bool {
+        matches!(self, Self::JsRequired | Self::Blocked)
+    }
+
+    /// Whether the same rung may try again.
+    ///
+    /// Only ever true for a transport failure, which is not a verdict at all, so this is always
+    /// false. It exists to be the one place the question is answered, because "should I retry"
+    /// asked at a call site is answered optimistically (§12.2).
+    #[must_use]
+    pub const fn may_retry(self) -> bool {
+        false
+    }
 }
 
 /// Where a model runs. A capability, not a setting.

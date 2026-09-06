@@ -171,6 +171,7 @@ pub mod page {
     use serde_json::{Value, json};
 
     use super::{Cdp, CdpError};
+    use crate::core::vocab::Verdict;
 
     /// Turns on the page domain, which is what makes load events arrive at all.
     ///
@@ -241,7 +242,18 @@ pub mod page {
                 // enough that one late XHR does not read as settled, short enough not to be felt.
                 quiet: Duration::from_millis(500),
                 budget: Duration::from_secs(20),
-                // Roughly a short paragraph. Below it, a page that returned 200 gave back a shell.
+                // Measured rather than picked. Visible text in characters, from real fetches:
+                //
+                //      97   an HTTP 429 error page
+                //     104   an HTTP 403 error page
+                //     129   example.com, the IANA placeholder
+                //     134   an HTTP 404 error page
+                //    1499   a page whose content is written entirely by script
+                //   73365   a Wikipedia article
+                //
+                // Stubs and error pages cluster under 140, real content starts above 1400, and
+                // anything in that valley separates them. 200 sits in it with room on both sides,
+                // which is the most that can be claimed until §26 has a distribution from use.
                 minimum_text: 200,
             }
         }
@@ -254,6 +266,12 @@ pub mod page {
         /// Visible text length, which is what the threshold was judged on.
         pub text: usize,
         pub settled: bool,
+        /// The status of the document itself, not of a subresource.
+        ///
+        /// `None` when the browser never reported one, which happens for a navigation that failed
+        /// before a response. Absent rather than defaulted to 200: a status nobody saw is not a
+        /// success, and §12.2 has a verdict for not knowing.
+        pub status: Option<u16>,
     }
 
     /// Resource types worth never fetching.
@@ -274,13 +292,14 @@ pub mod page {
         block_unread_resources(cdp).await?;
         navigate(cdp, url).await?;
 
-        let settled = settle(cdp, want).await?;
+        let (settled, status) = settle(cdp, want).await?;
         let html = html(cdp).await?;
         let text = visible_text(cdp).await?;
         Ok(Rendered {
             html,
             text,
             settled,
+            status,
         })
     }
 
@@ -299,51 +318,61 @@ pub mod page {
             .map(|_| ())
     }
 
-    /// Waits for the document, then for the network to go quiet.
+    /// Waits for the document, then for the network to fall quiet.
     ///
-    /// Returns whether it settled inside the budget. A page that never settles is not an error: it is
-    /// a page, and §12.2's verdict is the caller's to draw.
-    async fn settle(cdp: &mut Cdp, want: Readiness) -> Result<bool, CdpError> {
+    /// Returns whether it settled inside the budget. A page that never settles is not an error: it
+    /// is a page, and §12.2's verdict is the caller's to draw.
+    ///
+    /// **Quiet means no traffic, not zero requests outstanding.** Counting requests in flight is
+    /// the obvious definition and it does not survive the real web: measured on a Wikipedia
+    /// article, 49 requests were sent and 48 completed, so a counter sits at one forever and the
+    /// page never settles though it has been finished for twenty seconds. One connection that
+    /// stays open is normal, and a definition that a single long poll defeats is the wrong
+    /// definition. Silence is observable and a balanced ledger is not.
+    async fn settle(cdp: &mut Cdp, want: Readiness) -> Result<(bool, Option<u16>), CdpError> {
         let deadline = Instant::now() + want.budget;
-        let mut inflight = 0_i64;
         let mut loaded = false;
-        // `None` while requests are outstanding; the moment the last one finished otherwise.
-        let mut quiet_since: Option<Instant> = None;
+        let mut last_activity = Instant::now();
+        let mut status = None;
 
         loop {
-            if loaded
-                && let Some(since) = quiet_since
-                && since.elapsed() >= want.quiet
-            {
-                return Ok(true);
+            if loaded && last_activity.elapsed() >= want.quiet {
+                return Ok((true, status));
             }
             let Some(remaining) = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|left| !left.is_zero())
             else {
-                return Ok(false);
+                return Ok((false, status));
             };
-            // Never wait longer than the quiet period, or a page that fell silent would sit here until
-            // something else happened to arrive.
+            // Never wait longer than the quiet period, or a page that fell silent would sit here
+            // until something else happened to arrive.
             let Some(event) = cdp.next_event(remaining.min(want.quiet)).await? else {
                 continue;
             };
 
             match event.get("method").and_then(Value::as_str) {
                 Some("Page.loadEventFired" | "Page.domContentEventFired") => loaded = true,
-                Some("Network.requestWillBeSent") => {
-                    inflight += 1;
-                    quiet_since = None;
-                }
-                Some("Network.loadingFinished" | "Network.loadingFailed") => {
-                    inflight = (inflight - 1).max(0);
-                    if inflight == 0 {
-                        quiet_since = Some(Instant::now());
-                    }
-                }
                 // An intercepted request that is never answered hangs the page, so this is the one
-                // event that must be handled rather than counted.
-                Some("Fetch.requestPaused") => refuse(cdp, &event).await?,
+                // event that has to be acted on rather than merely noticed.
+                Some("Fetch.requestPaused") => {
+                    refuse(cdp, &event).await?;
+                    last_activity = Instant::now();
+                }
+                Some("Network.responseReceived") => {
+                    // The document's own status, not a subresource's. A page whose analytics
+                    // script 404s is not a 404, and taking the last status seen would say it was.
+                    if event.pointer("/params/type").and_then(Value::as_str) == Some("Document")
+                        && status.is_none()
+                    {
+                        status = event
+                            .pointer("/params/response/status")
+                            .and_then(Value::as_u64)
+                            .and_then(|code| u16::try_from(code).ok());
+                    }
+                    last_activity = Instant::now();
+                }
+                Some(method) if method.starts_with("Network.") => last_activity = Instant::now(),
                 _ => {}
             }
         }
@@ -362,6 +391,126 @@ pub mod page {
         )
         .await
         .map(|_| ())
+    }
+
+    /// The kind of interstitial a page is showing, if any (§12.10).
+    ///
+    /// Read off the page's own content rather than guessed from a status, because a challenge is
+    /// served as a 200 and looks like a successful fetch to everything upstream of here.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Challenge {
+        /// A wait, not a puzzle. Clears itself given a few seconds.
+        NonInteractive,
+        /// A widget that expects a click.
+        Interactive,
+    }
+
+    impl Challenge {
+        /// What the page is showing, if it is showing one.
+        ///
+        /// Markers rather than a parse. The interstitial's shape changes often and its script URL
+        /// does not, so the narrow check is the durable one.
+        #[must_use]
+        pub fn detect(html: &str) -> Option<Self> {
+            for marker in ["cType: 'non-interactive'", "cType: \"non-interactive\""] {
+                if html.contains(marker) {
+                    return Some(Self::NonInteractive);
+                }
+            }
+            for marker in [
+                "cType: 'managed'",
+                "cType: 'interactive'",
+                "challenges.cloudflare.com/turnstile",
+                "cf-challenge",
+            ] {
+                if html.contains(marker) {
+                    return Some(Self::Interactive);
+                }
+            }
+            None
+        }
+    }
+
+    /// One attempt at getting past an interstitial.
+    ///
+    /// **One, and then the page goes to the reader.** A non-interactive challenge is waited out,
+    /// which is not evasion: it is the page not being ready, and it folds into the readiness rule
+    /// above. An interactive one is attempted once inside `budget`, and if that does not clear it
+    /// the answer is the `needs you` state (§14.2) in a window the reader is already looking at,
+    /// not another attempt. Retrying is what hardens a host against this address, and the reader
+    /// can clear a widget in a second that no amount of retrying will.
+    ///
+    /// The honest note, since §12.5 sets the precedent for writing these down: attempting a
+    /// challenge programmatically is a stronger claim than presenting a browser-shaped request. It
+    /// is bounded here to a single attempt with a person as the fallback, so the failure mode is
+    /// asking rather than hammering.
+    ///
+    /// # Errors
+    /// Fails on a protocol error. A challenge that does not clear is `Ok(false)`, not an error.
+    pub async fn clear_challenge(
+        cdp: &mut Cdp,
+        kind: Challenge,
+        budget: Duration,
+    ) -> Result<bool, CdpError> {
+        let deadline = Instant::now() + budget;
+        if kind == Challenge::NonInteractive {
+            return wait_out(cdp, deadline).await;
+        }
+
+        // The widget lives in an iframe, so the click has to land in page coordinates. Asking the
+        // page where it is beats guessing, and a page that will not say where it is has not
+        // rendered one yet.
+        let Some((x, y)) = widget_centre(cdp).await? else {
+            return wait_out(cdp, deadline).await;
+        };
+        for event in ["mouseMoved", "mousePressed", "mouseReleased"] {
+            let mut params = json!({ "type": event, "x": x, "y": y });
+            if event != "mouseMoved" {
+                params["button"] = json!("left");
+                params["clickCount"] = json!(1);
+            }
+            cdp.call("Input.dispatchMouseEvent", params).await?;
+        }
+        wait_out(cdp, deadline).await
+    }
+
+    /// Waits for the interstitial to go, or gives up.
+    async fn wait_out(cdp: &mut Cdp, deadline: Instant) -> Result<bool, CdpError> {
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            if Challenge::detect(&html(cdp).await?).is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Where the widget is, in page coordinates.
+    async fn widget_centre(cdp: &mut Cdp) -> Result<Option<(f64, f64)>, CdpError> {
+        let found = cdp
+            .call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(() => { \
+                        const f = document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]') \
+                            || document.querySelector('#cf-turnstile, .cf-turnstile, #cf_turnstile'); \
+                        if (!f) return null; \
+                        const r = f.getBoundingClientRect(); \
+                        return r.width ? [r.left + 30, r.top + r.height / 2] : null; })()",
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        let Some(pair) = found.pointer("/result/value").and_then(Value::as_array) else {
+            return Ok(None);
+        };
+        let (Some(x), Some(y)) = (
+            pair.first().and_then(Value::as_f64),
+            pair.get(1).and_then(Value::as_f64),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some((x, y)))
     }
 
     /// How much text a reader would actually see.
@@ -395,6 +544,26 @@ pub mod page {
         pub const fn is_readable(&self, want: Readiness) -> bool {
             self.settled && self.text >= want.minimum_text
         }
+
+        /// What this page was, in the ladder's own words (§12.2).
+        ///
+        /// **The status is read before the content.** A 404 with a helpful error page is content
+        /// rich and still a 404, and no rung can make a page exist, so judging on content first
+        /// would climb a ladder that cannot reach anything.
+        ///
+        /// Rung 2 never returns `JsRequired`: it *is* the answer to that, so a shell that survives
+        /// a browser is exhausted rather than escalated.
+        #[must_use]
+        pub fn verdict(&self, want: Readiness) -> Verdict {
+            match self.status {
+                Some(404 | 410) => Verdict::NotFound,
+                Some(401 | 403) => Verdict::Blocked,
+                Some(429) => Verdict::RateLimited,
+                Some(code) if code >= 500 => Verdict::Exhausted,
+                _ if self.is_readable(want) => Verdict::Ok,
+                _ => Verdict::Exhausted,
+            }
+        }
     }
 
     #[cfg(test)]
@@ -419,14 +588,136 @@ pub mod page {
             }
         }
 
+        /// A challenge is served as a 200, so nothing upstream of the page content can see it.
+        #[test]
+        fn an_interstitial_is_told_apart_from_a_page() {
+            assert_eq!(
+                Challenge::detect("<script>window._cf = { cType: 'non-interactive' }</script>"),
+                Some(Challenge::NonInteractive)
+            );
+            for interactive in [
+                "<script>cType: 'managed'</script>",
+                "<script>cType: 'interactive'</script>",
+                "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>",
+                "<div class=\"cf-challenge\"></div>",
+            ] {
+                assert_eq!(
+                    Challenge::detect(interactive),
+                    Some(Challenge::Interactive),
+                    "{interactive}"
+                );
+            }
+        }
+
+        /// The expensive false positive: treating a real page as a challenge means waiting the
+        /// whole challenge budget on a page that was already finished.
+        #[test]
+        fn an_ordinary_page_is_not_mistaken_for_a_challenge() {
+            for ordinary in [
+                "<html><body><h1>Example Domain</h1></body></html>",
+                // Words that appear in prose about the subject, which is where a loose substring
+                // match would fire.
+                "<p>We migrated off Cloudflare last year and the interactive demo is below.</p>",
+                "<p>This article explains how a managed challenge works.</p>",
+                "",
+            ] {
+                assert_eq!(Challenge::detect(ordinary), None, "{ordinary}");
+            }
+        }
+
+        fn reading(status: Option<u16>, text: usize, settled: bool) -> Rendered {
+            Rendered {
+                html: String::new(),
+                text,
+                settled,
+                status,
+            }
+        }
+
+        /// The whole table, because each verdict routes differently and one wrong row sends the
+        /// ladder somewhere it cannot come back from.
+        #[test]
+        fn a_status_decides_the_verdict_before_the_content_does() {
+            let want = Readiness::default();
+            // A 404 with a friendly error page is content-rich and still a 404. Reading the
+            // content first would climb a ladder that cannot reach anything.
+            assert_eq!(
+                reading(Some(404), 5_000, true).verdict(want),
+                Verdict::NotFound
+            );
+            assert_eq!(
+                reading(Some(410), 5_000, true).verdict(want),
+                Verdict::NotFound
+            );
+            assert_eq!(
+                reading(Some(403), 5_000, true).verdict(want),
+                Verdict::Blocked
+            );
+            assert_eq!(
+                reading(Some(401), 5_000, true).verdict(want),
+                Verdict::Blocked
+            );
+            assert_eq!(
+                reading(Some(429), 5_000, true).verdict(want),
+                Verdict::RateLimited
+            );
+            assert_eq!(
+                reading(Some(503), 5_000, true).verdict(want),
+                Verdict::Exhausted
+            );
+            assert_eq!(reading(Some(200), 5_000, true).verdict(want), Verdict::Ok);
+        }
+
+        /// Rung 2 is the answer to `JsRequired`, so it can never be the one asking for it.
+        #[test]
+        fn a_shell_that_survived_a_browser_is_exhausted_rather_than_escalated() {
+            let want = Readiness::default();
+            let shell = reading(Some(200), 12, true);
+            assert_eq!(shell.verdict(want), Verdict::Exhausted);
+            assert!(
+                !shell.verdict(want).should_escalate(),
+                "there is nowhere above this rung to go"
+            );
+        }
+
+        #[test]
+        fn an_unknown_status_falls_back_to_the_content() {
+            let want = Readiness::default();
+            assert_eq!(reading(None, 5_000, true).verdict(want), Verdict::Ok);
+            assert_eq!(
+                reading(None, 5_000, false).verdict(want),
+                Verdict::Exhausted
+            );
+        }
+
+        #[test]
+        fn only_two_verdicts_climb_and_none_retry() {
+            for verdict in [Verdict::JsRequired, Verdict::Blocked] {
+                assert!(verdict.should_escalate(), "{verdict:?} climbs");
+            }
+            // Each terminal for its own reason: the page is gone, the host asked to be left
+            // alone, the ladder is spent, or the rung that would help does not exist yet.
+            for verdict in [
+                Verdict::Ok,
+                Verdict::RateLimited,
+                Verdict::NotFound,
+                Verdict::InteractionRequired,
+                Verdict::Exhausted,
+            ] {
+                assert!(!verdict.should_escalate(), "{verdict:?} does not climb");
+            }
+            for verdict in [Verdict::Blocked, Verdict::RateLimited, Verdict::Ok] {
+                assert!(
+                    !verdict.may_retry(),
+                    "{verdict:?} is never retried on its own rung"
+                );
+            }
+        }
+
         #[test]
         fn a_page_that_did_not_settle_is_not_readable_however_much_it_said() {
             let want = Readiness::default();
-            let cut_off = Rendered {
-                html: String::new(),
-                text: 100_000,
-                settled: false,
-            };
+            let cut_off = reading(None, 100_000, false);
             assert!(
                 !cut_off.is_readable(want),
                 "a page cut off mid-load is partial, whatever arrived first"
@@ -437,18 +728,10 @@ pub mod page {
         #[test]
         fn a_shell_that_settled_is_not_readable_either() {
             let want = Readiness::default();
-            let shell = Rendered {
-                html: "<html><body><div id=root></div></body></html>".to_owned(),
-                text: 12,
-                settled: true,
-            };
+            let shell = reading(Some(200), 12, true);
             assert!(!shell.is_readable(want));
 
-            let real = Rendered {
-                text: want.minimum_text,
-                settled: true,
-                ..shell
-            };
+            let real = reading(Some(200), want.minimum_text, true);
             assert!(real.is_readable(want), "exactly at the threshold counts");
         }
 
