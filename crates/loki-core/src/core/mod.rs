@@ -36,4 +36,6 @@ pub mod prompt;
 pub mod render;
 pub mod sink;
 pub mod temporal;
+pub mod trigger;
 pub mod vocab;
+pub mod websearch;
