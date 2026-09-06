@@ -27,6 +27,8 @@ final class ThreadWindowController: NSObject, NSWindowDelegate {
         // Become a Dock app before the hop. The policy change needs a run loop pass to land, and
         // activating inside the same pass finds the app still an accessory and does nothing.
         NSApp.setActivationPolicy(.regular)
+        // The tile is new, so the mark goes back on it.
+        Brand.applyToDock()
         uiTrace("6 policy set regular, hopping to next runloop")
         DispatchQueue.main.async { [self] in
             uiTrace("7 present on next runloop")

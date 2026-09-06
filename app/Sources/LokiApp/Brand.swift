@@ -103,12 +103,21 @@ enum Brand {
         return rep
     }
 
-    /// The mark at full resolution, for the Dock.
+    /// Puts the mark on the Dock tile, and does it again whenever the tile is rebuilt.
     ///
-    /// **Set at launch, not left to the bundle.** `CFBundleIconFile` only applies to an assembled
-    /// `.app`, and the app is routinely run as the bare SwiftPM executable from Xcode, where there
-    /// is no `Resources/` for an `.icns` to sit in and the Dock falls back to the generic
-    /// executable icon. Assigning it at runtime covers both, and costs one line.
+    /// **Changing the activation policy destroys the tile and takes the icon with it.** The window
+    /// controller flips to `.regular` every time the thread opens and to `.accessory` when it
+    /// closes, so an icon applied once at launch survived until the first window and no longer.
+    /// An assembled `.app` reads `CFBundleIconFile` and never noticed; the bare executable Xcode
+    /// runs has no such file and showed the generic one (B-71).
+    static func applyToDock() {
+        guard let icon = icon() else { return }
+        NSApplication.shared.applicationIconImage = icon
+        // The tile does not repaint itself when the image behind it changes.
+        NSApp.dockTile.display()
+    }
+
+    /// The mark at full resolution, for the Dock.
     static func icon() -> NSImage? {
         // Large, because the Dock asks for sizes up to 1024 and a vector page has no natural one
         // to give it.

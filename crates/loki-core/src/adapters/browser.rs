@@ -536,6 +536,22 @@ pub mod page {
     /// a page that renders to nothing.
     const NEVER_FETCH: [&str; 5] = ["Image", "Font", "Media", "Ping", "CSPViolationReport"];
 
+    /// The request types held for a decision. `Document` is deliberately absent: see
+    /// `block_unread_resources`.
+    const JUDGED: [&str; 11] = [
+        "Script",
+        "XHR",
+        "Fetch",
+        "Stylesheet",
+        "Image",
+        "Font",
+        "Media",
+        "Ping",
+        "EventSource",
+        "WebSocket",
+        "CSPViolationReport",
+    ];
+
     /// Loads a URL and reads what it turned into.
     ///
     /// # Errors
@@ -547,7 +563,7 @@ pub mod page {
         block_unread_resources(cdp).await?;
         navigate(cdp, url).await?;
 
-        let (settled, status) = settle(cdp, want).await?;
+        let (settled, status) = settle(cdp, url, want).await?;
         let html = html(cdp).await?;
         let text = visible_text(cdp).await?;
         Ok(Rendered {
@@ -564,13 +580,51 @@ pub mod page {
     /// *is*, and a CDN image with no extension is still an image. Only the blocked types are
     /// intercepted, so nothing else pays for the pause.
     async fn block_unread_resources(cdp: &mut Cdp) -> Result<(), CdpError> {
-        let patterns: Vec<Value> = NEVER_FETCH
+        // **Every type a page pulls in, and never the document itself.** Intercepting `*` deadlocks
+        // the navigation: `Page.navigate` does not answer until the load commits, the document
+        // request pauses waiting for a decision, and the decision is made by the loop that has not
+        // started yet. The document is first party by definition anyway, being the URL asked for.
+        let patterns: Vec<Value> = JUDGED
             .iter()
             .map(|kind| json!({ "urlPattern": "*", "resourceType": kind, "requestStage": "Request" }))
             .collect();
         cdp.call("Fetch.enable", json!({ "patterns": patterns }))
             .await
             .map(|_| ())
+    }
+
+    /// Whether a request the page made is worth making.
+    ///
+    /// **First party only, and this is a latency fix and a privacy fix at once.** Measured on a
+    /// news site: reading one article made requests to Rubicon, AdSrvr, Demdex, AdRoll,
+    /// Quantserve, Google's ad exchange and thirty more, and the page took forty seconds to fall
+    /// quiet because those bidders were talking to each other. §12.3 already turns off the
+    /// browser's own telemetry on the grounds that the user did not ask their assistant to tell a
+    /// vendor they are running; a page's advertising stack is the same argument with fifty
+    /// companies instead of one.
+    ///
+    /// The article is in the document, so refusing everything else does not cost the text. What it
+    /// can cost is a page whose own script arrives from a different registrable domain, and that
+    /// page comes back thin and is reported thin rather than answered wrongly (§21.5).
+    fn worth_fetching(page: &str, request: &str, kind: Option<&str>) -> bool {
+        if kind.is_some_and(|kind| NEVER_FETCH.contains(&kind)) {
+            return false;
+        }
+        let site = registrable(&crate::adapters::politeness::host_of(page));
+        !site.is_empty() && registrable(&crate::adapters::politeness::host_of(request)) == site
+    }
+
+    /// The last two labels of a host, so `www.` and `cdn.` count as the same site.
+    ///
+    /// Deliberately not a public-suffix list: that is a downloaded, ageing dataset for a rule whose
+    /// only job here is to keep a site's own subdomains together. It over-groups `co.uk` pairs,
+    /// which errs towards letting a first party through rather than refusing one.
+    fn registrable(host: &str) -> String {
+        let labels: Vec<&str> = host.split('.').filter(|label| !label.is_empty()).collect();
+        if labels.len() <= 2 {
+            return labels.join(".");
+        }
+        labels[labels.len() - 2..].join(".")
     }
 
     /// Waits for the document, then for the network to fall quiet.
@@ -584,7 +638,11 @@ pub mod page {
     /// page never settles though it has been finished for twenty seconds. One connection that
     /// stays open is normal, and a definition that a single long poll defeats is the wrong
     /// definition. Silence is observable and a balanced ledger is not.
-    async fn settle(cdp: &mut Cdp, want: Readiness) -> Result<(bool, Option<u16>), CdpError> {
+    async fn settle(
+        cdp: &mut Cdp,
+        page: &str,
+        want: Readiness,
+    ) -> Result<(bool, Option<u16>), CdpError> {
         let deadline = Instant::now() + want.budget;
         let mut loaded = false;
         let mut last_activity = Instant::now();
@@ -611,7 +669,18 @@ pub mod page {
                 // An intercepted request that is never answered hangs the page, so this is the one
                 // event that has to be acted on rather than merely noticed.
                 Some("Fetch.requestPaused") => {
-                    refuse(cdp, &event).await?;
+                    let url = event
+                        .pointer("/params/request/url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let kind = event
+                        .pointer("/params/resourceType")
+                        .and_then(Value::as_str);
+                    if worth_fetching(page, url, kind) {
+                        allow(cdp, &event).await?;
+                    } else {
+                        refuse(cdp, &event).await?;
+                    }
                     last_activity = Instant::now();
                 }
                 Some("Network.responseReceived") => {
@@ -634,6 +703,17 @@ pub mod page {
     }
 
     /// Fails one intercepted request.
+    /// Lets a paused request go ahead. Every interception has to end in one of these or the page
+    /// waits on it forever.
+    async fn allow(cdp: &mut Cdp, event: &Value) -> Result<(), CdpError> {
+        let Some(id) = event.pointer("/params/requestId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        cdp.call("Fetch.continueRequest", json!({ "requestId": id }))
+            .await
+            .map(|_| ())
+    }
+
     async fn refuse(cdp: &mut Cdp, event: &Value) -> Result<(), CdpError> {
         let Some(id) = event.pointer("/params/requestId").and_then(Value::as_str) else {
             return Ok(());
@@ -824,6 +904,63 @@ pub mod page {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The forty seconds. A news page reading its own article is one site; the bidders it
+        /// talks to while doing so are fifty, and they are what the reader waits for.
+        #[test]
+        fn a_pages_own_requests_go_through_and_the_ad_stack_does_not() {
+            let page = "https://www.ndtv.com/top-stories";
+            assert!(worth_fetching(
+                page,
+                "https://www.ndtv.com/app.js",
+                Some("Script")
+            ));
+            assert!(worth_fetching(
+                page,
+                "https://cdn.ndtv.com/bundle.js",
+                Some("Script")
+            ));
+            for tracker in [
+                "https://fastlane.rubiconproject.com/a/api/fastlane.json",
+                "https://match.adsrvr.org/track/cmf/generic",
+                "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                "https://dpm.demdex.net/id",
+            ] {
+                assert!(!worth_fetching(page, tracker, Some("XHR")), "{tracker}");
+            }
+        }
+
+        /// A type we never want is refused even from the site's own domain, so the origin rule
+        /// widens what is blocked rather than replacing it.
+        #[test]
+        fn the_sites_own_images_are_still_not_fetched() {
+            assert!(!worth_fetching(
+                "https://www.ndtv.com/x",
+                "https://www.ndtv.com/hero.jpg",
+                Some("Image")
+            ));
+        }
+
+        /// Subdomains are the same site and a lookalike domain is not.
+        #[test]
+        fn a_lookalike_domain_is_not_the_site() {
+            let page = "https://www.thehindu.com/news";
+            assert!(worth_fetching(
+                page,
+                "https://static.thehindu.com/a.js",
+                Some("Script")
+            ));
+            assert!(!worth_fetching(
+                page,
+                "https://thehindu.com.evil.net/a.js",
+                Some("Script")
+            ));
+            assert!(!worth_fetching(
+                page,
+                "https://notthehindu.com/a.js",
+                Some("Script")
+            ));
+        }
 
         #[test]
         fn stylesheets_and_scripts_are_never_in_the_block_list() {

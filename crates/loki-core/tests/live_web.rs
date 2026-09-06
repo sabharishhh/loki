@@ -374,3 +374,36 @@ async fn listening(port: u16) -> bool {
         .await
         .is_ok()
 }
+
+/// What a news page costs to read, which is mostly not the news page.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the network"]
+async fn an_ad_heavy_page_reads_quickly() {
+    use loki_core::ports::search::Extract;
+
+    let events = Arc::new(Broadcast::new());
+    let http = Arc::new(loki_core::adapters::egress::Http::new(events).expect("egress"));
+    let browsing = loki_core::adapters::browser::Browsing::new(
+        Arc::clone(&http) as Arc<dyn loki_core::ports::egress::Delegate>,
+        std::env::temp_dir().join("loki-adheavy-profile"),
+        9339,
+        Arc::new(Politeness::default()),
+    )
+    .expect("a chromium-family browser");
+
+    for url in [
+        "https://www.ndtv.com/top-stories",
+        "https://timesofindia.indiatimes.com/home/headlines",
+    ] {
+        let started = std::time::Instant::now();
+        match Extract::read(&browsing, url, CancellationToken::new()).await {
+            Ok(page) => println!(
+                "{:>6}ms {:?} text={}b  {url}",
+                started.elapsed().as_millis(),
+                page.verdict,
+                page.text.len()
+            ),
+            Err(e) => println!("{:>6}ms failed: {e}  {url}", started.elapsed().as_millis()),
+        }
+    }
+}

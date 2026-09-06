@@ -68,6 +68,14 @@ struct Shell: View {
                 }
             }
             .background(Theme.Colors.background)
+            // **Asking to see the sources opens the panel that shows them.** Clicking the stack
+            // set the list and left the rail shut, so the gesture did nothing at all whenever the
+            // reader had the rail closed, which is most of the time.
+            .onChange(of: conversation.showingSources) { _, latest in
+                if !latest.isEmpty, !rail {
+                    withAnimation(Theme.Motion.panel) { rail = true }
+                }
+            }
             // One animation for the whole layout, so a column opening and the thread narrowing
             // are the same movement rather than two that nearly agree.
             .animation(Theme.Motion.panel, value: sidebar)

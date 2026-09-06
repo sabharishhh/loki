@@ -92,8 +92,18 @@ struct SearchTrace: View {
 
     @Environment(\.reduceMotion) private var reduceMotion
     @State private var open = false
+    /// Counted here while the search runs.
+    ///
+    /// **The scope's own figure only exists once it has closed.** `elapsed` arrives with
+    /// `ScopeClosed`, so a trace that showed only that had nothing to say for the several seconds
+    /// the reader is actually waiting, which is the whole time it matters.
+    @State private var ticked: Duration = .zero
+    @State private var counted = false
 
     private var current: SearchStep? { steps.last(where: { !$0.done }) }
+
+    /// What to show: the live count while it runs, the scope's figure once it has stopped.
+    private var showing: Duration { counted ? ticked : elapsed }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
@@ -112,6 +122,7 @@ struct SearchTrace: View {
         // The line stops shimmering and starts stating what it cost. Without this the two swap in
         // one frame at the moment the reader is looking straight at it.
         .animation(reduceMotion ? nil : Theme.Motion.control, value: live)
+        .task(id: live) { await tick() }
     }
 
     private var header: some View {
@@ -124,9 +135,18 @@ struct SearchTrace: View {
 
                 // While it runs, the line says what is happening now. Afterwards it says what it
                 // cost, because that is the fact worth keeping.
-                if live, let current {
-                    Shimmer(text: current.kind.sentence)
+                //
+                // **A search reports each piece after it is done**, so for the first few seconds
+                // there is no step to name. Saying so beats falling through to a summary that
+                // reads "0 pages" while the work is still going on.
+                if live {
+                    Shimmer(text: current?.kind.sentence ?? "Searching the web")
                         .transition(.opacity)
+                    Text(waited)
+                        .font(Theme.Text.micro)
+                        .foregroundStyle(Theme.Colors.tertiary)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
                 } else {
                     Text(summary)
                         .font(Theme.Text.body)
@@ -146,11 +166,30 @@ struct SearchTrace: View {
         .accessibilityLabel(summary)
     }
 
+    /// The running figure, for the line that is still counting.
+    private var waited: String {
+        let seconds = Int(
+            (Double(showing.components.seconds)
+                + Double(showing.components.attoseconds) / 1e18).rounded())
+        return seconds >= 1 ? "\(seconds)s" : ""
+    }
+
+    /// Counts while the search runs, then holds what it reached.
+    private func tick() async {
+        guard live else { return }
+        counted = true
+        let began = ContinuousClock.now
+        while !Task.isCancelled {
+            ticked = ContinuousClock.now - began
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 1000 : 120))
+        }
+    }
+
     private var summary: String {
         let read = steps.filter { if case .reading = $0.kind { true } else { false } }.count
         let seconds = Int(
-            (Double(elapsed.components.seconds)
-                + Double(elapsed.components.attoseconds) / 1e18).rounded())
+            (Double(showing.components.seconds)
+                + Double(showing.components.attoseconds) / 1e18).rounded())
         let pages = read == 1 ? "1 page" : "\(read) pages"
         return seconds >= 1 ? "Searched the web, \(pages), \(seconds)s" : "Searched the web, \(pages)"
     }

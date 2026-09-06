@@ -50,7 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Dock icon, set here rather than left to `CFBundleIconFile`. That key only applies to
         // an assembled `.app`, and running the SwiftPM executable from Xcode has no bundle to read
         // it from, so the Dock shows the generic executable icon instead of the mark.
-        if let icon = Brand.icon() { NSApplication.shared.applicationIconImage = icon }
+        // **Three steps, and the last two are why this kept not working.** Setting the image is
+        // not enough for a bare SwiftPM executable: it has no bundle, so it starts as an accessory
+        // with no Dock tile to put an icon on, and a tile that already exists does not repaint
+        // itself when the image behind it changes. Xcode runs exactly that bare executable, which
+        // is why an assembled `Loki.app` looked correct the whole time (B-71).
+        NSApp.setActivationPolicy(.regular)
+        Brand.applyToDock()
         uiTrace("3 didFinishLaunching policy=\(NSApp.activationPolicy().rawValue)")
 
         // A clash means another app already owns these keys. Not an error: the menu bar and the

@@ -96,6 +96,7 @@ struct SourceMark: View {
 struct SourcePreview: View {
     let source: Source
 
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             HStack(spacing: Theme.Space.s) {
@@ -112,8 +113,8 @@ struct SourcePreview: View {
                 .font(Theme.Text.bodyStrong)
                 .foregroundStyle(Theme.Colors.primary)
                 .lineLimit(2)
-            if !source.excerpt.isEmpty {
-                Text(source.excerpt)
+            if !Prose.from(source.excerpt).isEmpty {
+                Text(Prose.from(source.excerpt))
                     .font(Theme.Text.meta)
                     .lineSpacing(3)
                     .foregroundStyle(Theme.Colors.secondary)
@@ -122,12 +123,10 @@ struct SourcePreview: View {
         }
         .padding(Theme.Space.m)
         .frame(width: 268, alignment: .leading)
-        .background(Theme.Colors.surfaceAlt, in: .rect(cornerRadius: Theme.Radius.panel))
-        .overlay {
-            RoundedRectangle(cornerRadius: Theme.Radius.panel)
-                .strokeBorder(Theme.Colors.border, lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
+        // **No background, no border, no shadow of its own.** The popover already draws a rounded
+        // card with an edge and a shadow, so a second one inside it reads as a box in a box. The
+        // ground is set on the presentation instead, which fills the popover to its own corners.
+        .presentationBackground(Theme.Colors.background)
     }
 }
 
@@ -179,7 +178,6 @@ struct InlineCitation: View {
             .animation(reduceMotion ? nil : Theme.Motion.control, value: hovering)
             .popover(isPresented: $hovering, arrowEdge: .bottom) {
                 SourcePreview(source: lead)
-                    .padding(Theme.Space.xs)
             }
             .help(lead.title)
             .accessibilityLabel("Source: \(lead.host). \(lead.title)")
@@ -298,5 +296,49 @@ private struct SourceRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.control, value: hovering)
+    }
+}
+
+/// Markdown turned back into a sentence, for the places that show a line of a page.
+///
+/// **A preview is prose, not source.** What the extractor hands over is markdown, so the hover card
+/// showed `* [[Several trapped after a building collapse]](https://static.example.com/thumb/msid-34`
+/// where a sentence should have been. Link targets, image markers and bullets are structure, and
+/// two lines of preview have room for none of it.
+enum Prose {
+    static func from(_ markdown: String) -> String {
+        var out = ""
+        var depth = 0
+        var characters = Array(markdown)
+        var at = 0
+
+        while at < characters.count {
+            let character = characters[at]
+            if depth > 0 {
+                // Inside a link target, which is the half nobody reads.
+                if character == "(" { depth += 1 }
+                if character == ")" { depth -= 1 }
+                at += 1
+                continue
+            }
+            // `](` opens the target of a link whose text has just been kept.
+            if character == "]", at + 1 < characters.count, characters[at + 1] == "(" {
+                depth = 1
+                at += 2
+                continue
+            }
+            if !"[]!*#`>_".contains(character) {
+                out.append(character)
+            }
+            at += 1
+        }
+
+        return out
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespaces)
     }
 }

@@ -45,3 +45,36 @@ struct SourceTests {
         #expect(many.count - 1 == 5)
     }
 }
+
+@Suite("Markdown back into prose")
+struct ProseTests {
+    /// What the hover card actually showed before this existed.
+    @Test("A link keeps its words and loses its address")
+    func linkTargetGoes() {
+        let raw = "* [[Several trapped after a building collapse]](https://static.example.com/t/34)"
+        #expect(Prose.from(raw) == "Several trapped after a building collapse")
+    }
+
+    @Test("An image is not a sentence")
+    func imageGoes() {
+        #expect(Prose.from("![Centre Appoints 8 Chief Justices](https://x.test/a.jpg) today")
+            == "Centre Appoints 8 Chief Justices today")
+    }
+
+    @Test("Emphasis and headings come off, the words stay")
+    func syntaxGoes() {
+        #expect(Prose.from("## **Breaking**: the `river` crossed _its_ mark")
+            == "Breaking: the river crossed its mark")
+    }
+
+    @Test("Lines become one line")
+    func linesJoin() {
+        #expect(Prose.from("First line\n\n  Second line  ") == "First line Second line")
+    }
+
+    @Test("Plain prose is returned as it was")
+    func plainSurvives() {
+        let plain = "The Ganga has crossed the highest flood mark in Patna."
+        #expect(Prose.from(plain) == plain)
+    }
+}
