@@ -257,26 +257,34 @@ pub unsafe extern "C" fn loki_core_new(
     // §12.6's trigger cannot fire on a loop with no engine attached, and a loop with no engine
     // answers a question about today from what the model happens to remember. Built here because
     // this is the only place that holds the exit, the clock and the evidence store at once.
-    if let Some(browsing) = open_the_browser(&http, &gate) {
+    // §12.6's trigger cannot fire on a loop with no engine attached, and a loop with no engine
+    // answers a question about today from what the model happens to remember. Built here because
+    // this is the only place that holds the exit, the clock and the evidence store at once.
+    //
+    // **The ladder narrows without a browser, it does not vanish (§12.3).** Rung 1 answers a search
+    // in about a second and starts nothing, so gating the whole subsystem on an installed Chromium
+    // took search away from a Mac that has none for the sake of the rung it cannot run.
+    {
+        let browsing = open_the_browser(&http, &gate);
+
+        // §12.2's ladder, cheapest first. Measured 2026-09-06: rung 1 returns ten hits in 1.01s
+        // where the browser took 8.5s warm and 15s cold for twelve.
+        let mut engines: Vec<Arc<dyn loki_core::ports::search::Discover>> =
+            vec![Arc::new(loki_core::adapters::duckduckgo::DuckDuckGo::new(
+                Arc::clone(&outbound),
+                Arc::clone(&gate),
+            ))];
+        let mut rungs: Vec<Arc<dyn loki_core::ports::search::Extract>> = vec![Arc::new(
+            loki_core::adapters::reader::Reader::new(Arc::clone(&outbound), Arc::clone(&gate)),
+        )];
+        if let Some(browsing) = &browsing {
+            engines.push(Arc::clone(browsing) as Arc<dyn loki_core::ports::search::Discover>);
+            rungs.push(Arc::clone(browsing) as Arc<dyn loki_core::ports::search::Extract>);
+        }
+
         core.attach_web(Arc::new(loki_core::core::websearch::Search {
-            // §12.2's ladder, cheapest first. Rung 1 answers a search in about a second and
-            // starts nothing; the browser is behind it for the engines that will not talk to an
-            // HTTP client at all. Measured 2026-09-06: rung 1 returns ten hits in 1.01s where the
-            // browser took 8.5s warm and 15s cold for twelve.
-            engines: vec![
-                Arc::new(loki_core::adapters::duckduckgo::DuckDuckGo::new(
-                    Arc::clone(&outbound),
-                    Arc::clone(&gate),
-                )),
-                Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Discover>,
-            ],
-            rungs: vec![
-                Arc::new(loki_core::adapters::reader::Reader::new(
-                    Arc::clone(&outbound),
-                    Arc::clone(&gate),
-                )),
-                Arc::clone(&browsing) as Arc<dyn loki_core::ports::search::Extract>,
-            ],
+            engines,
+            rungs,
             clock: Arc::clone(&clock),
             budget: loki_core::core::attempt::Budget::of_steps(WEB_STEPS)
                 .within(std::time::Duration::from_secs(WEB_SECONDS)),
